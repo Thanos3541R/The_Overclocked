@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs and run artifacts
+*.log
+output_features.csv
+captured_snapshot.jpg
+inspection_result.jpg
+panel_*.jpg
+run_edits.py
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Environments
+venv/
+.venv/
+env/

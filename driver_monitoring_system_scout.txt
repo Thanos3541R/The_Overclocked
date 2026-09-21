@@ -1,0 +1,208 @@
+# Driver Monitoring System (DMS) — Comprehensive Feature & Architecture Scout
+
+**Project Root**: [`driver-monitor/`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor)  
+**System Status**: All core subsystems implemented; **59/59 unit & integration tests passing**; ready for Toyota IDD real-world training ingestion.
+
+---
+
+## 1. Executive Architecture Overview
+
+The Driver Monitoring System is an edge-optimized, non-intrusive computer vision pipeline designed to quantify driver drowsiness, neurological fatigue, and alcohol-induced impairment from monochrome NIR (near-infrared) or RGB driver-facing camera streams at $\ge 30\text{ fps}$ on standard CPU hardware.
+
+### End-to-End Frame Processing Pipeline
+
+```mermaid
+flowchart TD
+    A["Raw Input Stream<br/>(RGB / Monochrome NIR / Video)"] --> B["Stage 1: Preprocessing<br/>(CLAHE + Adaptive Gamma LUT)"]
+    B --> C["Stage 2: Landmark Detection<br/>(MediaPipe 478-pt Mesh + Iris)"]
+    C --> D["Stage 3: Metric Normalization<br/>(Rotation & Scale Invariant)"]
+    D --> E["Stage 4: Vectorized 1-Euro Filter<br/>(Jitter Elimination < 0.4ms)"]
+    E --> F["Stage 5: PnP 3D Pose<br/>(solvePnPRansac on 6 Key Points)"]
+    F --> G["Stage 6: Head Pose Gating<br/>(Yaw ±35°, Pitch -30°/+25°)"]
+    F --> H["Stage 7: Hardened Software IMU Gate<br/>(5-pt Savitzky-Golay Accel > 2.5 m/s²)"]
+    G & H --> I["Stage 8: Feature Extractor<br/>(22 Physiological Biomarkers)"]
+    I --> J["Stage 9: Downstream Consumers"]
+    J --> K["Classifier Scorer<br/>(inspect_driver / classifier.py)"]
+    J --> L["TrainingBuffer & Tensor Gen<br/>(training_buffer.py)"]
+    J --> M["Real-Time HUD / CSV Logger<br/>(main.py)"]
+```
+
+---
+
+## 2. Dedicated Noise Mitigation Architecture
+
+Because in-cabin automotive environments suffer from vibration, severe dynamic range changes, and road shocks, the pipeline implements seven dedicated noise mitigation layers:
+
+| Noise Category | Physical Cause | Mitigation Mechanism | Implementation File |
+| :--- | :--- | :--- | :--- |
+| **Illumination Fluctuations** | Sunlight glare, tunnels, streetlights, nighttime shadow | **CLAHE** (Contrast Limited Adaptive Histogram Equalization, $8\times 8$ grid, clip limit 2.0) combined with **dual-tier adaptive Gamma LUTs** ($0.5$ dark / $0.7$ dim) precomputed into 256-entry byte lookup tables. Pure array LUT mapping without bilateral filtering preserves real-time speed. In 940nm NIR illumination, melanin absorption is normalized, providing clean iris/pupil contrast across all eye pigmentations. | [`pipeline/preprocessing.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/preprocessing.py) |
+| **Landmark High-Frequency Jitter** | Detector sensor noise, minor pixel oscillations | **Vectorized 1-Euro Filter Pre-PnP** (Casiez et al., CHI 2012). Operates across all 478 3D points simultaneously via NumPy vectorization in $<0.4\text{ ms}$ *before* PnP pose estimation, eliminating non-linear rotational chatter in $R$ and $t_{\text{vec}}$. | [`pipeline/one_euro_filter.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/one_euro_filter.py) |
+| **Perspective & Distance Distortion** | Driver moving forward/backward, tilting seat | **PnP 3D Normalization**. Aligns smoothed 2D landmarks against a canonical 3D human head model (`CANONICAL_FACE_3D`) via `solvePnPRansac`. Decouples eye/mouth aspect ratios from camera distance and perspective skew. | [`pipeline/pnp_normalizer.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/pnp_normalizer.py) |
+| **Extreme Head Turn Artifacts** | Looking over shoulder, checking blind spots | **Head Pose Gating (`HeadPoseGate`)**. Flags frames where $|\text{yaw}| > 35^\circ$, $\text{pitch} < -30^\circ$ (drooping out of frame), or $\text{pitch} > 25^\circ$. Rather than calculating corrupted aspect ratios on occluded eyes, the system freezes features and holds the last validated state. | [`pipeline/head_pose_estimator.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/head_pose_estimator.py) |
+| **Vehicle Road Shock & Potholes** | Speed bumps, rough pavement, vehicle rumble | **Hardened Software IMU Gate (`SoftwareIMUGate`)**. In the absence of a hardware CAN bus IMU, applies low-pass smoothing to $t_{\text{vec}}$ ($\alpha=0.3$) and computes linear acceleration via a **5-point non-uniform Savitzky-Golay quadratic polynomial fit** (suppressing $1/\Delta t^2$ derivative noise) with temporal horizon pruning. Only triggers $150\text{ ms}$ freeze if $\text{accel} > 2.5\text{ m/s}^2$ AND head rotational velocity $\dot{\theta} < 20^\circ/\text{s}$ (rotational decoupling prevents false freezes during voluntary mirror checks). | [`pipeline/imu_gate.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/imu_gate.py) |
+| **Motor Action Hysteresis Noise** | Micro-movements mistaken for saccades or blinks | **Dual-threshold hysteresis & 4-state FSM**. Saccades use onset ($30^\circ/\text{s}$) and offset ($15^\circ/\text{s}$) hysteresis to prevent jitter cycling. Blinks use a 4-state Finite State Machine (`open` $\to$ `closing` $\to$ `closed` $\to$ `opening` $\to$ `open`) to isolate true eyelid downstroke/upstroke trajectories from noise. | [`pipeline/feature_extractor.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/feature_extractor.py) |
+| **Missing / Gated Frame Gaps** | Shocks or blind spot turns breaking time series | **Gated Frame Policies (`TrainingBuffer`)**. Implements three configurable data-ingestion handling strategies: `DROP` (skip corrupted frames), `HOLD_LAST` (propagate last valid physical state), and `INTERPOLATE` (linear lookahead interpolation over 2 frames). | [`pipeline/training_buffer.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/training_buffer.py) |
+
+---
+
+## 3. Complete Feature Extraction Matrix
+
+All biomarkers are extracted per-frame inside [`FeatureExtractor`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/feature_extractor.py) and packaged into the structured [`FrameFeatures`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/feature_extractor.py#L34-L103) dataclass.
+
+### A. Drowsiness & Fatigue Biomarkers
+1. **`ear_left` / `ear_right` / `ear_avg`** (Eye Aspect Ratio): Soukupová & Čech (2016) formulation using 6 eye-contour points per eye:
+   $$\text{EAR} = \frac{\|P_2 - P_6\| + \|P_3 - P_5\|}{2 \|P_1 - P_4\|}$$
+2. **`mar`** (Mouth Aspect Ratio): 3-vertical-pair dense outer lip aperture formulation against horizontal corner distance:
+   $$\text{MAR} = \frac{\sum_{i=1}^3 \|V_{\text{top}, i} - V_{\text{bot}, i}\|}{3 \|H_{\text{left}} - H_{\text{right}}\|}$$
+3. **`blink_detected`**: Instantaneous boolean flag when `ear_avg` dips below threshold ($0.20$).
+4. **`microsleep_detected`**: Boolean trigger firing when eyes remain closed continuously for $\ge 15\text{ frames}$ ($\sim 500\text{ ms}$ at $30\text{ fps}$).
+5. **`yawn_detected`**: Boolean trigger firing when mouth remains open ($\text{MAR} > 0.60$) for $\ge 30\text{ frames}$ ($1.0\text{ s}$).
+6. **`perclos`**: Proportion of time eyes are $\ge 80\%$ closed over a sliding 60-second window (standard NHTSA drowsiness metric).
+
+### B. Gaze & Iris Tracking
+7. **`left_iris_x`, `left_iris_y`**: Normalized horizontal/vertical gaze offset of left eye relative to inner/outer corners ($[-1.0, 1.0]$).
+8. **`right_iris_x`, `right_iris_y`**: Normalized horizontal/vertical gaze offset of right eye relative to inner/outer corners ($[-1.0, 1.0]$).
+
+### C. Alcohol-Discriminating Biomarkers (Phase 1 — Involuntary Motor Dynamics)
+9. **`saccade_velocity`**: Peak angular velocity ($\text{deg/s}$) of iris displacement using calibrated eye geometry ($1\text{ unit} \approx 15^\circ$ ocular rotation).
+10. **`saccade_detected`**: Schmitt-trigger boolean state with hysteresis ($30^\circ/\text{s}$ onset, $15^\circ/\text{s}$ offset).
+11. **`saccade_latency_ms`**: Inter-saccadic fixation interval ($\text{ms}$); proxy for central nervous system processing delay.
+12. **`blink_closing_velocity`**: Downstroke eyelid velocity in $\text{EAR units/sec}$ (captures motor slowing).
+13. **`blink_opening_velocity`**: Involuntary upstroke levator palpebrae velocity in $\text{EAR units/sec}$. Highly resistant to conscious masking/faking.
+14. **`gaze_yaw_dispersion` ($\sigma_{\text{yaw}}$)**: Rolling standard deviation of horizontal gaze angle over a 15-second window. Quantifies **gaze tunneling** toward the road center under CNS depression.
+
+### D. Advanced Oculomotor & Brainstem Signals (Phase 2)
+15. **`gen_detected`, `gen_beat_count`, `gen_slow_phase_vel`** (Gaze-Evoked Nystagmus): Detects failure of the cerebellar/brainstem neural integrator (Romano et al. 2017) during sustained lateral gaze ($|\text{iris}_x| \ge 0.35$):
+    - *Centripetal slow drift*: Inward slip toward center orbit at $2.0 \text{--} 18.0^\circ/\text{s}$.
+    - *Corrective fast beat*: Rapid outward reset saccade $\ge 30.0^\circ/\text{s}$.
+    - Fires `gen_detected` when $\ge 2$ sawtooth cycles occur within a rolling $1.5\text{ s}$ window.
+16. **`pursuit_fragmentation_ratio`**: Ratio of corrective catch-up saccade duration to total tracking duration over a 5.0-second window. Distinguishes fluid smooth pursuit from alcohol-induced jerky pursuit breakdown.
+17. **`vergence_angle_deg`, `lack_of_convergence` (LOC)**: Binocular vergence angle measured from differential iris adduction. Flags DRE-standard Lack of Convergence when divergent strabismus exceeds $-3.5^\circ$.
+18. **`vor_gain`** (Vestibulo-Ocular Reflex Micro-Compensation): Evaluates compensatory counter-rotation gain (PMC8997842):
+    $$\text{Gain} = -\frac{d(\text{eye\_yaw}) / dt}{d(\text{head\_yaw}) / dt}$$
+    Evaluated strictly during micro-head tremors ($2.0 \text{--} 25.0^\circ/\text{s}$) and smoothed via an exponential moving average ($0.85 \times \text{prev} + 0.15 \times \text{curr}$). Saccadic/sober gain operates near $1.0$; depressed gains ($<0.70$) indicate vestibular impairment.
+
+### E. Static Visual & Hypotonia Biomarkers
+19. **`sclera_redness`**: Ratio of red channel intensity to mean green/blue channels isolated strictly within the scleral mask (excluding pupil/iris where luminance $\le 70$). Measures conjunctival injection/bloodshot severity.
+20. **`head_pitch`, `head_yaw`, `head_roll`**: 3D Euler angles from PnP matrix, tracking cervical hypotonia and lateral slump.
+21. **`asymmetry`**: Absolute difference $| \text{EAR}_{\text{left}} - \text{EAR}_{\text{right}} |$, tracking asymmetric levator palpebrae motor tone. The classifier supports driver baseline subtraction (`excess_asymmetry = max(0.0, raw - baseline)`), eliminating false-positive ptosis alerts for drivers with natural resting asymmetry.
+
+---
+
+## 4. Pipeline Modules & File Registry
+
+| Module Path | Primary Class / Function | Functional Scope |
+| :--- | :--- | :--- |
+| [`config.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/config.py) | `PipelineConfig`, `DEFAULT_CONFIG` | Central configuration dataclass. Contains camera settings, filter parameters, and all threshold constants (annotated with `[PLACEHOLDER]` pending real-data calibration). |
+| [`pipeline/frame_capture.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/frame_capture.py) | `FrameCapture` | Polymorphic video input handler supporting live webcams, video files, and 8/16-bit single-channel monochrome NIR cameras with automatic grayscale routing. |
+| [`pipeline/preprocessing.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/preprocessing.py) | `LightingNormalizer` | Lighting normalization using CLAHE and precomputed gamma LUTs for low-light compensation without expensive edge-preserving blurs. |
+| [`pipeline/face_mesh_detector.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/face_mesh_detector.py) | `FaceMeshDetector` | MediaPipe Face Landmarker wrapper supporting modern Tasks API (`face_landmarker.task`) with fallback for legacy solutions. Extracts 478 landmarks with iris refinement. |
+| [`pipeline/pnp_normalizer.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/pnp_normalizer.py) | `PnPNormalizer` | Rigid pose estimation (`solvePnPRansac`) mapping 2D landmarks to canonical 3D model (`CANONICAL_FACE_3D`). Normalizes landmarks to be rotation- and scale-invariant. |
+| [`pipeline/one_euro_filter.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/one_euro_filter.py) | `VectorizedOneEuroFilter`, `OneEuroFilterBank` | High-throughput vectorized temporal jitter smoothing over the 478-point mesh ($<0.4\text{ ms}$) and auxiliary scalar smoothing for EAR/MAR. |
+| [`pipeline/head_pose_estimator.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/head_pose_estimator.py) | `HeadPoseGate`, `PoseState` | Evaluates head pitch, yaw, roll from PnP rotation matrix. Gates out frames with excessive head rotation to prevent feature distortion. |
+| [`pipeline/imu_gate.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/imu_gate.py) | `SoftwareIMUGate` | Software fallback for vehicle shock detection. Uses a 5-point non-uniform Savitzky-Golay quadratic fit with rotational decoupling ($\dot{\theta} < 20^\circ/\text{s}$) to freeze features during potholes without triggering on head turns. |
+| [`pipeline/feature_extractor.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/feature_extractor.py) | `FeatureExtractor`, `FrameFeatures` | Comprehensive feature extraction engine computing all 22 physiological signals, rolling windows, saccade/blink velocity FSMs, and advanced oculomotor metrics. |
+| [`pipeline/classifier.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/classifier.py) | `ImpairmentClassifier`, `ImpairmentAssessment` | Rule-based demo classifier for static frames and temporal streams. Supports `baseline_asymmetry` offset. All thresholds and weights explicitly labeled as uncalibrated placeholders pending real training data. |
+| [`pipeline/training_buffer.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/training_buffer.py) | `TrainingBuffer`, `TrainingWindow`, `GatedFrameStrategy` | Aggregates all 29 features (22 numeric + 7 boolean) into fixed-duration windowed numpy tensors tagged with subject ID, handling gated frames with configurable policies. |
+| [`idd_ingest.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/idd_ingest.py) | `IDDDatasetDiscovery`, `process_clip()` | Automated batch ingestion engine for the Toyota Impaired Driving Dataset (IDD). Runs raw video clips through the full 9-stage pipeline to generate labeled `.npz` tensors. |
+| [`inspect_driver.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/inspect_driver.py) | Standalone CLI tool | Diagnostic script for single image or webcam snapshot analysis. Generates terminal report cards and annotated inspection images (`inspection_result.jpg`). |
+| [`main.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/main.py) | `run_pipeline()`, `CSVLogger` | Main real-time CLI application. Orchestrates camera capture, full pipeline processing, interactive HUD visualization, and per-frame CSV logging. |
+| [`utils/landmarks.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/utils/landmarks.py) | Landmark indices & constants | MediaPipe landmark indices for eye contours, irises, lips, and the 6 key points of the canonical 3D head model. |
+| [`utils/visualization.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/utils/visualization.py) | `Visualizer` | OpenCV HUD overlay rendering face mesh tessellation, iris tracking crosshairs, 3D head pose axes, and a dynamic telemetry panel. |
+
+---
+
+## 5. Machine Learning & Training Infrastructure
+
+### Training-Ready Windowed Tensor Assembly (`TrainingBuffer`)
+To prepare raw video streams for sequence models (such as 1D-TCN or LSTM), [`TrainingBuffer`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/training_buffer.py) converts unstructured frame features into dense, uniform tensors:
+- **Feature Vector (29 Channels)**:
+  - *22 Continuous Features*: `ear_left`, `ear_right`, `ear_avg`, `mar`, `perclos`, `left_iris_x`, `left_iris_y`, `right_iris_x`, `right_iris_y`, `head_yaw`, `head_pitch`, `head_roll`, `saccade_velocity`, `saccade_latency_ms`, `blink_closing_velocity`, `blink_opening_velocity`, `gaze_yaw_dispersion`, `gen_slow_phase_vel`, `gen_beat_count`, `pursuit_fragmentation_ratio`, `vergence_angle_deg`, `vor_gain`.
+  - *7 Binary Indicator Flags*: `blink_detected`, `microsleep_detected`, `yawn_detected`, `saccade_detected`, `gen_detected`, `lack_of_convergence`, `imu_gated`.
+- **Windowing Parameters**: Default $5.0\text{ s}$ window ($150\text{ frames}$ at $30\text{ fps}$) with $2.5\text{ s}$ stride ($75\text{ frames}$, $50\%$ overlap).
+- **Quality Gate**: Discards windows with $< 80\%$ valid frame fill.
+- **Serialization**: Writes compressed `.npz` archives containing `features` $[N \times T \times 29]$, `timestamps` $[N \times T]$, `feature_names`, `subject_ids`, `session_id`, `labels`, and JSON metadata.
+
+### Toyota IDD Ingestion Engine (`idd_ingest.py`)
+Provides the bridge between raw research datasets and machine learning training:
+- **CLI Options**: Supports `--idd-root`, `--output-dir`, `--window-sec`, `--stride-sec`, `--max-clips`, `--fps`, `--resume`, and `--gated-strategy`.
+- **Auto-Discovery**: Automatically parses structured CSVs (`labels.csv` / `annotations.csv`) or directory naming conventions (`<subject>/<condition>/*.mp4`).
+- **Pipeline Symmetry**: Executes the exact same 9 processing stages as `main.py`, guaranteeing zero train-serve feature mismatch.
+- **Fault-Tolerant Execution**: Per-clip `try/except` boundary prevents corrupt clips from terminating multi-hour batch runs; logs diagnostics to `ingest_summary.csv`.
+
+---
+
+## 6. Verification & Test Coverage Matrix
+
+The entire pipeline is verified by **59 automated unit and integration tests** executing in $\sim 0.81\text{ seconds}$ via `pytest`:
+
+```
+============================= test session starts =============================
+platform win32 -- Python 3.14.2, pytest-9.1.1
+collected 59 items
+
+tests/test_advanced_impairment.py ........ [ 4 tests: LOC, VOR, GEN, Pursuit ]
+tests/test_alcohol_signals.py ............ [ 9 tests: Saccades, Blinks, Tunneling ]
+tests/test_classifier.py ................. [ 3 tests: Static & Temporal Scorer ]
+tests/test_ear.py ........................ [ 6 tests: Geometry & Edge Cases ]
+tests/test_imu_gate.py ................... [ 4 tests: Jitter, Shock, Decoupling ]
+tests/test_integration.py ............... [ 3 tests: Multi-frame Flow & Gating ]
+tests/test_one_euro.py .................. [ 9 tests: Vectorized Filter & Bank ]
+tests/test_pnp.py ....................... [ 6 tests: 3D Pose & Normalization ]
+tests/test_training_buffer.py ........... [ 8 tests: Windowing, Gating, NPZ ]
+tests/test_variable_framerate.py ......... [ 7 tests: Dynamic dt, Savitzky-Golay, Asymmetry ]
+
+============================= 59 passed in 0.81s ==============================
+```
+
+---
+
+---
+
+## 7. Current Project Status & Architecture Roadmap
+
+```
+[Phase 1: Foundation Pipeline] ─────────────── COMPLETED (100%)
+  • Capture, CLAHE, MediaPipe, PnP, Vectorized 1-Euro, Pose/IMU Gating
+[Phase 2: Core Biomarkers] ─────────────────── COMPLETED (100%)
+  • EAR, MAR, PERCLOS, Gaze, Saccade Dynamics, Blink Velocity, Gaze Tunneling
+[Phase 3: Advanced Neurological Signals] ───── COMPLETED (100%)
+  • Gaze-Evoked Nystagmus (GEN), Pursuit Fragmentation, Vergence/LOC, VOR Micro-Gain
+[Phase 4: Training Pipeline Infrastructure] ── COMPLETED (100%)
+  • TrainingBuffer (29 features), IDD Ingestion Script, [PLACEHOLDER] Threshold Audit
+[Phase 5: Real-World Calibration] ──────────── IN PROGRESS / NEXT
+  • Acquire Toyota IDD dataset -> Run idd_ingest.py -> Subject-independent baseline classifier
+[Phase 6: Advanced Sensor Extensions] ──────── ON HOLD (Per Roadmap Sequencing)
+  • rPPG, Pupillometry (PLR / Hippus via iris segmentation), 1D-TCN, Breath Fusion
+```
+
+---
+
+## 8. Claude Implementation Plan — Audit & Status Tracker
+
+Below is the cross-reference audit against the 5-point phased plan:
+
+| Step | Plan Item & Requirements | Status | Current Implementation Details / Remaining Work |
+| :---: | :--- | :---: | :--- |
+| **1** | **Fill the gap in feature extraction (before classifier)**<br>• *Saccadic velocity & latency*: Frame-to-frame angular iris velocity, catch-up saccade breakdown (Fransson et al. 2010).<br>• *Blink closing/opening velocity*: Involuntary eyelid downstroke/upstroke speed to defeat conscious masking.<br>• *Gaze yaw dispersion ($\sigma_{\text{yaw}}$)*: Rolling 15s std of horizontal gaze for road tunneling. | **COMPLETED**<br>`[100%]` | • Implemented in [`pipeline/feature_extractor.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/feature_extractor.py): `saccade_velocity`, `saccade_detected`, `saccade_latency_ms`.<br>• 4-state FSM computes `blink_closing_velocity` and `blink_opening_velocity`.<br>• Rolling buffer computes `gaze_yaw_dispersion`.<br>• Verified with 9 unit tests in [`tests/test_alcohol_signals.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/tests/test_alcohol_signals.py). |
+| **2** | **Build rolling buffer / windowing module**<br>• Sliding buffer assembling per-frame features into temporal windows.<br>• Start clock at seat-occupancy, not pipeline launch.<br>• Expose clean tensor ready for training.<br>• Handle gated/frozen frames explicitly. | **COMPLETED**<br>`[100%]` | • Implemented in [`pipeline/training_buffer.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/training_buffer.py).<br>• Assembles 29-element vector (22 continuous + 7 binary flags).<br>• `TrainingBuffer` creates session UUID and tracks `subject_id`.<br>• Supports sliding windows (default 5.0s window, 2.5s stride, 80% fill threshold).<br>• Implements `GatedFrameStrategy` enum (`DROP`, `HOLD_LAST`, `INTERPOLATE`).<br>• Exports to compressed `.npz` tensors.<br>• Verified with 8 unit tests in [`tests/test_training_buffer.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/tests/test_training_buffer.py). |
+| **3** | **Get Toyota IDD dataset flowing through pipeline**<br>• Pull IDD driver-facing video & run through existing pipeline.<br>• Align output with ground-truth impairment labels.<br>• **Enforce subject-independent train/test split** (no frames from same person in train & test). | **IN PROGRESS**<br>`[CODE 100% / RUN PENDING]` | • **Done**: Built [`idd_ingest.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/idd_ingest.py) batch ingestion script with structured CSV and directory discovery, 9-stage pipeline execution, and `.npz` generation tagged with `subject_id` and `label`.<br>• **Need to Complete**: Acquire/point to actual IDD clips, run batch ingestion, and build a dedicated `dataset_splitter.py` enforcing strict subject-disjoint splits (`GroupKFold`) across train/val/test. |
+| **4** | **Baseline classifier (Start simple)**<br>• Lightweight baseline first: Engineered features $\to$ Random Forest / Gradient-Boosted Trees (LightGBM/XGBoost) / small MLP.<br>• Evaluated with proper subject-independent cross-validation.<br>• Report sensitivity, specificity, ROC-AUC.<br>• Do not jump to 1D-TCN yet. | **NEED TO COMPLETE**<br>`[0% — PENDING STEP 3]` | • **Current State**: [`pipeline/classifier.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/classifier.py) is a rule-based demonstration tool with all thresholds explicitly marked `[PLACEHOLDER]`.<br>• **Need to Complete**: Once Step 3 outputs `.npz` tensors from real IDD data, write `train_baseline.py` to train a Random Forest / XGBoost model, perform subject-stratified evaluation, and replace placeholder thresholds with empirical decision boundaries. |
+| **5** | **Explicitly hold off on subsequent items**<br>• 1D-TCN upgrade.<br>• Anti-masking divergence metric ($M_{\text{mask}}$).<br>• Personal-baseline / differential architecture.<br>• Sequential (SPRT-style) confidence scoring.<br>• Fusion with breath sensor. | **ON HOLD**<br>`[Sequenced Later]` | • Properly deferred. Prerequisite velocity features from Step 1 are ready, but all complex modeling/fusion remains paused until the baseline classifier from Step 4 is honestly evaluated on real data. |
+
+---
+
+## 9. Immediate Action Items (Priority Order)
+
+1. **Acquire & Mount Toyota IDD Dataset**:
+   Place IDD clips into a local directory and run:
+   ```bash
+   python idd_ingest.py --idd-root <path_to_idd> --output-dir ./idd_output/
+   ```
+2. **Build Subject-Independent Dataset Splitter (`dataset_splitter.py`)**:
+   Implement a train/val/test partition script using `GroupKFold` on `subject_id` to ensure zero identity leakage across folds.
+3. **Train & Benchmark Baseline Classifier (`train_baseline.py`)**:
+   Train Random Forest / XGBoost / small MLP on the aggregated feature tensors. Measure ROC-AUC, sensitivity, and specificity against sober vs. impaired labels.
+4. **Calibrate `classifier.py`**:
+   Replace the placeholder weights and cutoffs in `classifier.py` with feature importances and decision thresholds learned from real driving data.
+

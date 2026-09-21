@@ -72,6 +72,21 @@ In-cabin automotive environments present extreme visual challenges: engine vibra
 
 ---
 
+## Sensor & Frame Rate Specifications: 30 FPS Discretization Limit vs. $\ge 60\text{ FPS}$ Global Shutter
+
+| Operating Domain | Frame Rate | Shutter Type | Target Biomarkers | Kinematic Fidelity |
+| :--- | :---: | :---: | :--- | :--- |
+| **Desktop / Dev Fallback** | $30\text{ fps}$ | Rolling Shutter | PERCLOS, Yawn (MAR), Head Slump, Static Asymmetry, Sclera Redness | **Coarse**: $33.3\text{ ms}$ interval; acceptable for macro-movements |
+| **Production Automotive / Forensic** | $\ge 60\text{--}120\text{ fps}$ | **Global Shutter** (NIR 940nm) | Involuntary Blink Velocities ($|d\text{EAR}/dt|$), Saccadic Peak Speeds ($200\text{--}900^\circ/\text{s}$), VOR Micro-Gain | **Forensic**: Downstroke (50–100ms) resolved across 6–12+ frames with low quantization noise |
+
+### The Sampling Reality
+* **Eyelid Downstroke Duration**: An involuntary eyelid closure downstroke lasts only $50\text{--}100\text{ ms}$. At $30\text{ fps}$ ($33.3\text{ ms/frame}$), that entire trajectory spans only **1.5 to 3 discrete frames**.
+* **Saccadic Burst Duration**: Rapid ballistic saccades reach peak angular velocities of $200\text{--}900^\circ/\text{s}$ across durations of only $20\text{--}50\text{ ms}$. At $30\text{ fps}$, a saccade spans only **1 to 2 frames**.
+* **Quantization Noise Consequence**: While our algorithms calculate derivatives dynamically using exact timestamp intervals ($\Delta t = t_n - t_{n-1}$), computing peak derivatives over 2 discrete frames carries substantial discretization noise ($1/\Delta t$).
+* **Deployment Mandate**: Standard $30\text{ fps}$ webcams serve as a functional desktop demonstration platform. However, for automotive deployment, real-world dataset calibration, or forensic certainty, **$\ge 60\text{ fps}$ (preferably $90\text{--}120\text{ fps}$) global-shutter NIR sensor hardware** is required to eliminate rolling-shutter distortion and guarantee fine oculomotor velocity resolution.
+
+---
+
 ## Repository Structure
 
 ```

@@ -18,6 +18,11 @@ class PipelineConfig:
     camera_source: int = 0  # 0 = default webcam, or path to video file
     frame_width: int = 1280
     frame_height: int = 720
+    # Note: 30 fps is an acceptable desktop/webcam fallback. For forensic/clinical
+    # oculomotor velocity measurement (eyelid downstroke 50-100ms, saccades 20-50ms),
+    # >= 60 fps (preferably 90-120 fps) global-shutter camera hardware is required
+    # to eliminate derivative quantization noise.
+    target_fps: float = 30.0
 
     # ── Preprocessing (CLAHE) ──
     clahe_clip_limit: float = 2.0

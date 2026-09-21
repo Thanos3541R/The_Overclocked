@@ -309,6 +309,14 @@ class FeatureExtractor:
         A saccade is detected when angular velocity exceeds onset threshold
         and ends when it drops below offset threshold (hysteresis).
 
+        NOTE on Sampling & Discretization Limit:
+          Human saccades reach peak angular velocities of 200–900 deg/s across
+          durations of only 20–50 ms. At 30 fps (33.3 ms/frame), a saccade spans
+          only 1–2 discrete frames, introducing high velocity quantization noise.
+          While dt is tracked dynamically to support 30 fps desktop fallback,
+          capturing fine saccadic kinematics with forensic/clinical certainty
+          requires >= 60 fps (preferably 90–120 fps) global-shutter sensor hardware.
+
         Args:
             iris_x: Average horizontal iris position (normalized [-1, 1]).
             iris_y: Average vertical iris position (normalized [-1, 1]).
@@ -365,6 +373,14 @@ class FeatureExtractor:
         These are involuntary motor signals: alcohol slows both phases, but
         especially the opening (upstroke) phase. Unlike blink *rate*, which
         a driver can consciously suppress, blink *velocity* cannot be faked.
+
+        NOTE on Sampling & Discretization Limit:
+          An involuntary eyelid downstroke lasts only 50–100 ms. At 30 fps
+          (33.3 ms/frame), that downstroke spans only 1.5 to 3 discrete frames,
+          producing high quantization variance in derivative calculations.
+          While 30 fps is an acceptable desktop demonstration fallback,
+          capturing fine oculomotor velocity with forensic certainty requires
+          >= 60 fps global-shutter NIR sensor hardware.
 
         Returns:
             (closing_velocity, opening_velocity) in EAR units/second.

@@ -71,6 +71,10 @@ All biomarkers are extracted per-frame inside [`FeatureExtractor`](file:///C:/Us
 13. **`blink_opening_velocity`**: Involuntary upstroke levator palpebrae velocity in $\text{EAR units/sec}$. Highly resistant to conscious masking/faking.
 14. **`gaze_yaw_dispersion` ($\sigma_{\text{yaw}}$)**: Rolling standard deviation of horizontal gaze angle over a 15-second window. Quantifies **gaze tunneling** toward the road center under CNS depression.
 
+> [!IMPORTANT]
+> **The 30 FPS Discretization Limit on Blink & Saccade Velocities**:
+> An involuntary eyelid downstroke lasts only $50\text{--}100\text{ ms}$; a rapid saccadic burst lasts only $20\text{--}50\text{ ms}$. At $30\text{ fps}$ ($33.3\text{ ms/frame}$), that entire downstroke spans only **1.5 to 3 discrete frames**. While the pipeline calculates derivatives dynamically with $\Delta t = t_n - t_{n-1}$, estimating peak derivative velocity across 2 frames carries significant quantization noise. While $30\text{ fps}$ is an acceptable desktop/webcam fallback, **$\ge 60\text{ fps}$ (preferably $90\text{--}120\text{ fps}$) global-shutter NIR sensor hardware** is required in automotive deployment to capture fine oculomotor velocity with forensic certainty.
+
 ### D. Advanced Oculomotor & Brainstem Signals (Phase 2)
 15. **`gen_detected`, `gen_beat_count`, `gen_slow_phase_vel`** (Gaze-Evoked Nystagmus): Detects failure of the cerebellar/brainstem neural integrator (Romano et al. 2017) during sustained lateral gaze ($|\text{iris}_x| \ge 0.35$):
     - *Centripetal slow drift*: Inward slip toward center orbit at $2.0 \text{--} 18.0^\circ/\text{s}$.

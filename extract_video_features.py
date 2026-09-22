@@ -28,6 +28,8 @@ from pipeline.face_mesh_detector import FaceMeshDetector
 from pipeline.pnp_normalizer import PnPNormalizer
 from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
 from pipeline.classifier import ImpairmentClassifier, ImpairmentAssessment
+from pipeline.calibration import PersonalBaselineCalibrator
+from pipeline.bayesian_filter import BayesianEvidenceAccumulator
 
 
 def extract_video_features(video_path: str,
@@ -78,10 +80,13 @@ def extract_video_features(video_path: str,
     pnp = PnPNormalizer(width, height)
     extractor = FeatureExtractor(fps=fps)
     classifier = ImpairmentClassifier()
+    calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=fps)
+    bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 
     frame_records: List[Dict[str, Any]] = []
     classifications: List[str] = []
     lockout_triggers = 0
+    bayesian_lockout_triggers = 0
     masking_triggers = 0
     face_detected_frames = 0
     processed_count = 0
@@ -128,6 +133,11 @@ def extract_video_features(video_path: str,
                     gating_reason='',
                     frame=frame
                 )
+
+                # Online Personal Baseline Auto-Calibration
+                calibrator.update(features)
+                if calibrator.is_calibrated:
+                    calibrator.apply_to(extractor, classifier)
             else:
                 features = extractor.compute(
                     landmarks=np.zeros((478, 3)),
@@ -142,8 +152,13 @@ def extract_video_features(video_path: str,
             assessment = classifier.evaluate_temporal_stream(features)
             classifications.append(assessment.classification)
 
+            # 6. Sequential Bayesian Evidence Accumulation (ISO 26262 ASIL-B/D)
+            b_state = bayesian_filter.update(assessment, timestamp)
+
             if assessment.lockout_recommended:
                 lockout_triggers += 1
+            if b_state.lockout_confirmed:
+                bayesian_lockout_triggers += 1
             if features.masking_detected:
                 masking_triggers += 1
 
@@ -174,11 +189,14 @@ def extract_video_features(video_path: str,
                 'blink_opening_velocity': round(features.blink_opening_velocity, 3),
                 'head_postural_sway': round(features.head_postural_sway, 3),
                 'facial_flushing_ratio': round(features.facial_flushing_ratio, 3),
+                'flushing_valid': bool(features.flushing_valid),
+                'flushing_delta': round(features.flushing_delta, 3),
                 'gaze_yaw_dispersion': round(features.gaze_yaw_dispersion, 4),
                 # Section B — Voluntary & Masking Behaviors
                 'deliberate_blink_suppression': bool(features.deliberate_blink_suppression),
                 'voluntary_eye_widening': bool(features.voluntary_eye_widening),
                 'stare_fixation_duration_s': round(features.stare_fixation_duration_s, 2),
+                'compensatory_stare_active': bool(features.compensatory_stare_active),
                 'rigid_head_stabilization': bool(features.rigid_head_stabilization),
                 # Anti-Masking Divergence (M_mask)
                 'masking_divergence_score': round(features.masking_divergence_score, 1),
@@ -188,7 +206,11 @@ def extract_video_features(video_path: str,
                 'involuntary_risk_score': round(assessment.involuntary_risk_score, 1),
                 'voluntary_masking_score': round(assessment.voluntary_masking_score, 1),
                 'classification': assessment.classification,
-                'lockout_recommended': bool(assessment.lockout_recommended)
+                'lockout_recommended': bool(assessment.lockout_recommended),
+                # ISO 26262 Bayesian Filter
+                'bayesian_posterior': round(b_state.posterior_probability, 4),
+                'bayesian_sustained_s': round(b_state.sustained_high_confidence_s, 2),
+                'bayesian_lockout_confirmed': bool(b_state.lockout_confirmed),
             }
             frame_records.append(rec)
 
@@ -199,7 +221,8 @@ def extract_video_features(video_path: str,
                       f"Invol Risk: {assessment.involuntary_risk_score:5.1f}% | "
                       f"M_mask: {features.masking_divergence_score:4.1f}% | "
                       f"State: {assessment.classification:<22} | "
-                      f"Lockout: {assessment.lockout_recommended}")
+                      f"Lockout: {assessment.lockout_recommended} | "
+                      f"Bayes Confirmed: {b_state.lockout_confirmed}")
 
     finally:
         cap.release()
@@ -259,6 +282,9 @@ def extract_video_features(video_path: str,
             'lockout_triggered': lockout_triggered,
             'lockout_trigger_frames': lockout_triggers,
             'lockout_trigger_pct': round((lockout_triggers / n_valid * 100), 1),
+            'bayesian_lockout_confirmed': bool(bayesian_lockout_triggers >= 1),
+            'bayesian_lockout_frames': bayesian_lockout_triggers,
+            'personal_baseline_calibrated': bool(calibrator.is_calibrated),
             'mean_involuntary_risk_pct': round(mean_invol_risk, 1),
             'max_involuntary_risk_pct': round(max_invol_risk, 1),
             'mean_masking_divergence_pct': round(mean_m_mask, 1),
@@ -332,10 +358,11 @@ def _generate_text_report(summary: Dict[str, Any], records: List[Dict[str, Any]]
     lines.append(f"Resolution & FPS       : {m['resolution']} @ {m['source_fps']} FPS")
     lines.append(f"Total Frames Analyzed  : {m['total_processed_frames']} frames ({m['processing_time_sec']}s wall time)")
     lines.append(f"Face Tracking Health   : {m['face_detected_frames']}/{m['total_processed_frames']} frames tracked ({m['face_detection_rate_pct']}%)")
+    lines.append(f"Baseline Auto-Calib    : {'Calibrated (Driver-Specific Baselines Active)' if v.get('personal_baseline_calibrated') else 'Uncalibrated (Population Defaults)'}")
     lines.append("-" * 85)
     lines.append(f"OVERALL CLASSIFICATION : {v['final_classification']}")
-    lines.append(f"PRIMARY LOCKOUT STATE  : {'>>> VEHICLE INTERLOCK LOCKOUT TRIGGERED <<<' if v['lockout_triggered'] else 'SYSTEM PERMISSIVE (NO LOCKOUT)'}")
-    lines.append(f"Lockout Trigger Frames : {v['lockout_trigger_frames']} frames ({v['lockout_trigger_pct']}%)")
+    lines.append(f"INSTANTANEOUS LOCKOUT  : {'TRIGGERED' if v['lockout_triggered'] else 'PERMISSIVE (NO LOCKOUT)'} ({v['lockout_trigger_frames']} frames, {v['lockout_trigger_pct']}%)")
+    lines.append(f"ISO 26262 BAYESIAN     : {'>>> SUSTAINED VEHICLE INTERLOCK LOCKOUT ARMED <<<' if v.get('bayesian_lockout_confirmed') else 'PERMISSIVE (Under Confirmation Horizon)'}")
     lines.append(f"Mean Involuntary Risk  : {v['mean_involuntary_risk_pct']}% (Peak: {v['max_involuntary_risk_pct']}%)")
     lines.append(f"Anti-Masking M_mask    : Mean {v['mean_masking_divergence_pct']}%, Peak {v['max_masking_divergence_pct']}% ({v['masking_detected_frames']} masking events)")
     lines.append("=" * 85)
@@ -346,16 +373,16 @@ def _generate_text_report(summary: Dict[str, Any], records: List[Dict[str, Any]]
     lines.append("-" * 85)
     lines.append(f"  1. Gaze-Evoked Nystagmus (GEN) : {sa['gaze_evoked_nystagmus_frames']} frames detected")
     lines.append(f"     * Diagnostic Significance   : Brainstem/cerebellar neural integrator failure at lateral gaze.")
-    lines.append(f"  2. Vestibulo-Ocular Reflex     : Mean VOR Micro-Gain = {sa['mean_vor_gain']:.3f}  [Normal: ~0.85 - 1.05]")
-    lines.append(f"     * Diagnostic Significance   : Compensatory counter-rotation during natural head motion.")
+    lines.append(f"  2. Vestibulo-Ocular Reflex     : Mean VOR Micro-Gain = {sa['mean_vor_gain']:.3f}")
+    lines.append(f"     * Functional Safety Status  : Demoted to 0% weight in primary lockout (Tier 3 experimental proxy).")
     lines.append(f"  3. Smooth Pursuit Breakdown    : Mean Fragmentation Ratio = {sa['mean_pursuit_fragmentation_ratio']*100:.1f}%  [Normal: < 10%]")
     lines.append(f"     * Diagnostic Significance   : Intrusion of catch-up saccades disrupting smooth visual pursuit.")
     lines.append(f"  4. Lack of Convergence (LOC)   : {sa['lack_of_convergence_frames']} divergent strabismus frames")
     lines.append(f"     * Diagnostic Significance   : Standard DRE ocular sign of central nervous system depression.")
     lines.append(f"  5. Involuntary Postural Sway   : Mean Sway = {sa['mean_head_postural_sway_deg']:.2f} deg  [Alert: > 1.40 deg]")
-    lines.append(f"     * Diagnostic Significance   : Low-frequency micro-tremor and vestibular equilibrium decay.")
+    lines.append(f"     * Diagnostic Significance   : Bandpass de-trended (0.5 - 2.0 Hz) micro-tremor rejecting road terrain.")
     lines.append(f"  6. Facial Flushing / Perfusion : Mean Chromaticity Ratio = {sa['mean_facial_flushing_ratio']:.3f}  [Normal: ~1.00]")
-    lines.append(f"     * Diagnostic Significance   : Alcohol-induced peripheral micro-vascular vasodilation in cheeks.")
+    lines.append(f"     * Diagnostic Significance   : Evaluates relative cheek delta >= +20% on RGB; cleanly disabled on NIR.")
     lines.append(f"  7. Palpebral Aperture & EAR    : Mean EAR = {sa['mean_ear']:.4f}  [Normal awake: 0.28 - 0.35]")
     lines.append(f"     * Diagnostic Significance   : Ptosis and levator motor neuron inhibition.")
     lines.append("")
@@ -368,15 +395,15 @@ def _generate_text_report(summary: Dict[str, Any], records: List[Dict[str, Any]]
     lines.append(f"  2. Voluntary Eye-Widening Spike: {sb['voluntary_eye_widening_spikes']} frontalis/levator contraction surges")
     lines.append(f"     * Mechanism                 : Transient eyebrow and lid raise to temporarily counter ptosis.")
     lines.append(f"  3. Compensatory Stare Duration : Peak unbroken gaze = {sb['max_compensatory_stare_duration_s']:.1f} seconds")
-    lines.append(f"     * Mechanism                 : Driver rigidly fixing eyes straight ahead to avoid roving gaze.")
+    lines.append(f"     * Mechanism                 : Rigid unbroken gaze (>6.0s with low spatial variance sigma<0.8 deg).")
     lines.append(f"  4. Rigid Head Stabilization    : {sb['rigid_head_stabilization_frames']} frames unnatural neck tension")
     lines.append(f"     * Mechanism                 : Tensing cervical muscles to artificially suppress natural head sway.")
     lines.append("")
 
     lines.append("ANTI-MASKING DIVERGENCE METRIC (M_mask) ANALYSIS")
-    lines.append("Models the gap between active voluntary compensation effort and involuntary reflex decay.")
+    lines.append("Models biophysical kinetic discordance: (f_blink / f_baseline) x (v_baseline_up / v_up).")
     lines.append("-" * 85)
-    lines.append(f"  * Formula: M_mask = 100 * min(1.0, 2.0 * Involuntary_Vector * Voluntary_Vector)")
+    lines.append(f"  * Biophysical Principle        : Normal blink rate cannot mask pharmacologically slowed levator upstroke.")
     lines.append(f"  * Average M_mask Divergence    : {v['mean_masking_divergence_pct']}%")
     lines.append(f"  * Peak M_mask Divergence       : {v['max_masking_divergence_pct']}%")
     lines.append(f"  * Discordant Masking Alerts    : {v['masking_detected_frames']} frames with M_mask >= 50.0%")

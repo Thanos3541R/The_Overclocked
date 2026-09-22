@@ -53,8 +53,9 @@ class TrainingBuffer:
         self,
         subject_id: str,
         fps: float = 30.0,
-        window_size_sec: float = 5.0,
-        stride_sec: float = 2.5,
+        window_size_sec: float = 3.0,
+        stride_sec: float = 1.5,
+        min_fill_ratio: float = 0.70,
         gated_strategy: GatedFrameStrategy = GatedFrameStrategy.HOLD_LAST,
         max_session_hours: float = 1.0
     ):
@@ -64,8 +65,9 @@ class TrainingBuffer:
         Args:
             subject_id: String identifier for the subject.
             fps: Expected frames per second.
-            window_size_sec: Duration of each extracted window in seconds.
-            stride_sec: Stride duration between windows in seconds.
+            window_size_sec: Duration of each extracted window in seconds (default 3.0s).
+            stride_sec: Stride duration between windows in seconds (default 1.5s).
+            min_fill_ratio: Minimum fraction of non-empty window frames required (default 0.70).
             gated_strategy: Strategy for handling gated/frozen frames.
             max_session_hours: Maximum session duration to keep in the buffer.
         """
@@ -73,6 +75,7 @@ class TrainingBuffer:
         self.fps = fps
         self.window_size_sec = window_size_sec
         self.stride_sec = stride_sec
+        self.min_fill_ratio = min_fill_ratio
         self.gated_strategy = gated_strategy
         
         self.window_frames = int(window_size_sec * fps)
@@ -179,7 +182,7 @@ class TrainingBuffer:
         buf_list = list(self._buffer)
         n_samples = len(buf_list)
         
-        min_required_frames = int(self.window_frames * 0.8)
+        min_required_frames = int(self.window_frames * self.min_fill_ratio)
         
         start_time = buf_list[0][0]
         end_time = buf_list[-1][0]
@@ -246,6 +249,7 @@ class TrainingBuffer:
             "fps": self.fps,
             "window_size_sec": self.window_size_sec,
             "stride_sec": self.stride_sec,
+            "min_fill_ratio": self.min_fill_ratio,
             "gated_strategy": self.gated_strategy.value
         }
         

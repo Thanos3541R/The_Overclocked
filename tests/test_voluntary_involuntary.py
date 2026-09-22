@@ -205,6 +205,84 @@ class TestVoluntaryInvoluntaryFeatures:
         assert assess_vol.lockout_recommended is False
         assert assess_vol.classification != "HIGH_RISK_INTOXICATED"
 
+    def test_monochrome_nir_disables_flushing(self):
+        """Monochrome and NIR frames should cleanly disable facial flushing."""
+        ext = FeatureExtractor(fps=30.0)
+        lm = make_full_landmarks(ear_val=0.30)
+        for idx in RIGHT_CHEEK + LEFT_CHEEK:
+            lm[idx] = [200, 200, 0]
+
+        # 1. 2D grayscale NIR frame
+        frame_gray = np.full((480, 640), 120, dtype=np.uint8)
+        feat_gray = ext.compute(lm, timestamp=0.1, frame_id=1, face_valid=True, frame=frame_gray)
+        assert feat_gray.flushing_valid is False
+        assert feat_gray.flushing_delta == 0.0
+
+        # 2. 3-channel monochrome NIR frame (identical B, G, R)
+        frame_nir_3ch = np.stack([frame_gray, frame_gray, frame_gray], axis=2)
+        feat_nir = ext.compute(lm, timestamp=0.2, frame_id=2, face_valid=True, frame=frame_nir_3ch)
+        assert feat_nir.flushing_valid is False
+        assert feat_nir.flushing_delta == 0.0
+
+    def test_compensatory_stare_spatial_variance(self):
+        """Compensatory stare (>6.0s) only triggers when ocular spatial variance sigma < 0.8 deg."""
+        ext = FeatureExtractor(fps=30.0)
+
+        # 1. Alert driver forward gaze with natural micro-explorations (sigma >= 0.8 deg)
+        for i in range(210):  # 7.0 seconds
+            t = i / 30.0
+            jitter_x = 2.0 * np.sin(i * 0.5)  # produces ~1.05 deg angular jitter (< 2.5 deg drift)
+            lm = make_full_landmarks(ear_val=0.30, iris_x_offset=jitter_x)
+            feat_alert = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat_alert.stare_fixation_duration_s >= 6.0
+        # Alert forward gaze with natural jitter should NOT be flagged as compensatory catatonic stare
+        assert feat_alert.compensatory_stare_active is False
+
+        # 2. Catatonic drunken stare: virtually zero ocular tremor
+        ext_drunk = FeatureExtractor(fps=30.0)
+        for i in range(210):  # 7.0 seconds
+            t = i / 30.0
+            lm = make_full_landmarks(ear_val=0.30, iris_x_offset=0.0)  # zero tremor
+            feat_drunk = ext_drunk.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat_drunk.stare_fixation_duration_s >= 6.0
+        assert feat_drunk.compensatory_stare_active is True
+
+    def test_postural_sway_detrending_road_drift(self):
+        """Constant vehicle road grade / tilt (e.g. 6 deg) is de-trended out of micro-tremor."""
+        ext = FeatureExtractor(fps=30.0)
+
+        # 2 seconds on a 6.0 degree highway bank/incline
+        for i in range(60):
+            t = i / 30.0
+            lm = make_full_landmarks(ear_val=0.30)
+            # Constant 6.0 deg pitch and -4.0 deg roll with low physiological tremor (<0.05)
+            pitch = 6.0 + 0.02 * np.sin(i)
+            roll = -4.0 + 0.02 * np.cos(i)
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True, head_pitch=pitch, head_roll=roll)
+
+        # De-trending should remove the steady 6 deg incline
+        assert feat.head_postural_sway < 0.20
+
+    def test_gated_resume_prevents_zero_derivative(self):
+        """Resuming from an IMU freeze does not inject a false zero or spike into velocities."""
+        ext = FeatureExtractor(fps=30.0)
+        lm = make_full_landmarks(ear_val=0.30)
+
+        # 1. Normal frame
+        feat1 = ext.compute(lm, timestamp=1.0, frame_id=1, face_valid=True)
+
+        # 2. IMU pothole freeze for 300ms
+        feat_gated = ext.compute(lm, timestamp=1.1, frame_id=2, face_valid=True, imu_gated=True)
+        assert feat_gated.imu_gated is True
+
+        # 3. Resume with a valid frame
+        feat_resumed = ext.compute(lm, timestamp=1.4, frame_id=3, face_valid=True, imu_gated=False)
+        assert feat_resumed.imu_gated is False
+        assert ext._just_resumed_from_gate is False
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

@@ -101,12 +101,15 @@ class FrameFeatures:
     # High evidential weight for lockout decisions (unfakeable)
     head_postural_sway: float = 0.0          # Involuntary micro-tremor / low-frequency postural sway (deg, sqrt(var_pitch + var_roll))
     facial_flushing_ratio: float = 1.0       # Cheek micro-vascular vasodilation chromaticity ratio R/((G+B)/2)
+    flushing_valid: bool = True              # False when monochrome / NIR mode active (chromaticity unavailable)
+    flushing_delta: float = 0.0              # Relative vasodilation surge: (ratio - baseline) / baseline
 
     # ── Section B — Voluntary & Semi-Voluntary Changes (Maskable / Gaming Behaviors) ──
     # Susceptible to conscious suppression; used for corroboration and mismatch detection
     deliberate_blink_suppression: bool = False  # Prolonged inter-blink interval (>6.0s) from fighting droop
     voluntary_eye_widening: bool = False        # Frontalis/levator contraction spike (EAR surge > 1.25x baseline)
-    stare_fixation_duration_s: float = 0.0      # Rigid central staring fixation without micro-saccades
+    stare_fixation_duration_s: float = 0.0      # Rigid central staring fixation duration (s)
+    compensatory_stare_active: bool = False     # True if fixation > 6.0s with low spatial variance (< 0.8 deg)
     rigid_head_stabilization: bool = False      # Conscious locking of neck muscles to suppress natural sway
 
     # ── Anti-Masking Divergence Metric (M_mask) ──
@@ -131,6 +134,24 @@ def _dist(p1: np.ndarray, p2: np.ndarray) -> float:
 # Approximate degrees per normalized iris displacement unit.
 # Human eye: ~30° horizontal range maps to iris_x in [-1, 1].
 _DEG_PER_IRIS_UNIT = 15.0         # 1 iris unit ≈ 15° of eye rotation
+
+
+def is_monochrome_frame(frame: Optional[np.ndarray]) -> bool:
+    """Check if input frame is single-channel grayscale or monochrome NIR."""
+    if frame is None:
+        return True
+    if frame.ndim == 2:
+        return True
+    if frame.ndim == 3:
+        if frame.shape[2] == 1:
+            return True
+        if frame.shape[2] == 3:
+            # Check sub-sample of pixels across channels
+            sub = frame[::16, ::16]
+            diff1 = np.abs(sub[:, :, 0].astype(np.int16) - sub[:, :, 1].astype(np.int16))
+            diff2 = np.abs(sub[:, :, 1].astype(np.int16) - sub[:, :, 2].astype(np.int16))
+            return bool(np.max(diff1) < 4 and np.max(diff2) < 4)
+    return False
 
 
 class FeatureExtractor:
@@ -246,14 +267,20 @@ class FeatureExtractor:
 
         # ── Facial Flushing State (Section A) ──
         self._smoothed_flushing: float = 1.0
+        self.baseline_flushing: float = 1.35
 
         # ── Voluntary Masking State (Section B) ──
         self.sober_ear_baseline: float = 0.28
+        self.sober_blink_up_baseline: float = 2.5
+        self.sober_blink_freq_baseline: float = 0.28  # ~17 blinks/min
         self._ear_time_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(4.0 * fps), 1))
         self._last_blink_time: float = 0.0
+        self._blink_times: Deque[float] = deque(maxlen=30)
         self._stare_start_time: Optional[float] = None
         self._stare_anchor_x: Optional[float] = None
         self._stare_anchor_y: Optional[float] = None
+        self._stare_iris_samples: Deque[Tuple[float, float]] = deque(maxlen=max(int(10.0 * fps), 1))
+        self._just_resumed_from_gate: bool = False
 
     @staticmethod
     def compute_ear(landmarks: np.ndarray, indices: list) -> float:
@@ -368,6 +395,12 @@ class FeatureExtractor:
         dt = timestamp - self._prev_timestamp
         if dt <= 1e-6:
             return (0.0, self._in_saccade, 0.0)
+        if dt > 0.5:
+            # Gated period or frame drop exceeded 500ms — re-anchor without generating false derivative spike
+            self._prev_iris_x = iris_x
+            self._prev_iris_y = iris_y
+            self._prev_timestamp = timestamp
+            return (self._last_features.saccade_velocity, False, 0.0)
 
         # Angular displacement in degrees
         dx_deg = (iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT
@@ -428,6 +461,11 @@ class FeatureExtractor:
         dt = timestamp - self._prev_ear_timestamp
         if dt <= 1e-6:
             return (self._last_blink_closing_vel, self._last_blink_opening_vel)
+        if dt > 0.5:
+            # Gated freeze or frame drop exceeded 500ms — re-anchor without corrupting blink velocities
+            self._prev_ear_avg = ear_avg
+            self._prev_ear_timestamp = timestamp
+            return (self._last_blink_closing_vel, self._last_blink_opening_vel)
 
         d_ear = ear_avg - self._prev_ear_avg
         ear_velocity = abs(d_ear / dt)   # EAR units / second
@@ -444,10 +482,12 @@ class FeatureExtractor:
             if ear_avg < self.blink_threshold:
                 # Eyes fully closed → transition to closed
                 self._blink_phase = "closed"
-                self._closing_velocities.append(ear_velocity)
+                if ear_velocity > 0.02:
+                    self._closing_velocities.append(ear_velocity)
             elif d_ear < 0:
-                # Still closing
-                self._closing_velocities.append(ear_velocity)
+                # Still closing (omit zero derivative from frozen/gated frames)
+                if ear_velocity > 0.02:
+                    self._closing_velocities.append(ear_velocity)
             else:
                 # Aborted blink (EAR went back up without closing fully)
                 self._blink_phase = "open"
@@ -461,7 +501,8 @@ class FeatureExtractor:
         elif self._blink_phase == "opening":
             if ear_avg > 0.22:
                 # Eyes reopened → blink complete, compute velocities
-                self._opening_velocities.append(ear_velocity)
+                if ear_velocity > 0.02:
+                    self._opening_velocities.append(ear_velocity)
 
                 # Store completed blink velocities
                 if self._closing_velocities:
@@ -473,8 +514,9 @@ class FeatureExtractor:
 
                 self._blink_phase = "open"
             elif d_ear > 0:
-                # Still opening
-                self._opening_velocities.append(ear_velocity)
+                # Still opening (omit zero derivative from frozen/gated frames)
+                if ear_velocity > 0.02:
+                    self._opening_velocities.append(ear_velocity)
             else:
                 # Double-dip or flicker — stay in opening
                 pass
@@ -613,32 +655,45 @@ class FeatureExtractor:
     def _compute_postural_sway(self, head_pitch: float, head_roll: float, timestamp: float) -> Tuple[float, bool]:
         """Compute low-frequency involuntary head wobble/postural sway (Section A) and detect rigid head stabilization (Section B).
 
-        Involuntary postural sway: under cerebellar/vestibular alcohol depression, micro-tremor and
-        sway increase (sway > 1.4 deg).
-        Voluntary rigid head stabilization: driver consciously tenses neck to freeze head (sway < 0.12 deg).
+        NOTE: Seated postural sway is an experimental proxy of Romberg standing posturography;
+        in moving vehicles, low-frequency road terrain (< 0.5 Hz) and vehicle pitch/roll must be
+        filtered out. We isolate 0.5 - 2.0 Hz tremor by subtracting the rolling 1.5s baseline
+        mean and evaluating residual variance.
         """
         self._head_pose_history.append((timestamp, head_pitch, head_roll))
         cutoff = timestamp - self.sway_window_sec
-        recent = [(p, r) for t, p, r in self._head_pose_history if t >= cutoff]
+        recent = [(t, p, r) for t, p, r in self._head_pose_history if t >= cutoff]
         if len(recent) < 10:
             return (0.0, False)
 
-        pitches = [p for p, _ in recent]
-        rolls = [r for _, r in recent]
-        std_p = float(np.std(pitches))
-        std_r = float(np.std(rolls))
+        # Baseline rolling 1.5s mean for road vibration de-trending (< 0.5 Hz rejection)
+        mean_cutoff = timestamp - 1.5
+        mean_samples = [(p, r) for t, p, r in recent if t >= mean_cutoff]
+        if not mean_samples:
+            mean_samples = [(p, r) for _, p, r in recent]
+
+        mean_pitch = float(np.mean([p for p, _ in mean_samples]))
+        mean_roll = float(np.mean([r for _, r in mean_samples]))
+
+        # High-pass / bandpass residuals (0.5 - 2.0 Hz micro-tremor)
+        detrended_pitches = [p - mean_pitch for _, p, _ in recent]
+        detrended_rolls = [r - mean_roll for _, _, r in recent]
+
+        std_p = float(np.std(detrended_pitches))
+        std_r = float(np.std(detrended_rolls))
         sway = float(np.sqrt(std_p**2 + std_r**2))
         rigid_stabilization = bool(sway < 0.12 and len(recent) >= 20)
         return (sway, rigid_stabilization)
 
-    def _compute_facial_flushing(self, frame: Optional[np.ndarray], landmarks: np.ndarray) -> float:
+    def _compute_facial_flushing(self, frame: Optional[np.ndarray], landmarks: np.ndarray) -> Tuple[float, bool, float]:
         """Measure micro-vascular facial flushing / vasodilation in cheek regions (Section A).
 
         Calculates chromaticity ratio R / ((G + B)/2 + 1e-5) across MediaPipe cheek landmarks.
-        Normal: ~1.00. Vasodilation / flushing under alcohol: > 1.15.
+        If frame is monochrome / NIR, flushing is cleanly marked invalid and delta set to 0.0.
+        When RGB, flushing_delta evaluates relative surge over baseline (default 1.35 or calibrated).
         """
-        if frame is None or landmarks is None or len(landmarks) < 468:
-            return self._smoothed_flushing
+        if frame is None or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
+            return (1.0, False, 0.0)
 
         try:
             h, w = frame.shape[:2]
@@ -667,10 +722,12 @@ class FeatureExtractor:
                 raw_ratio = float(mean_r / (mean_gb + 1e-5))
                 clamped = float(np.clip(raw_ratio, 0.5, 2.5))
                 self._smoothed_flushing = 0.90 * self._smoothed_flushing + 0.10 * clamped
+                flushing_delta = float((self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing))
+                return (float(self._smoothed_flushing), True, flushing_delta)
         except Exception:
             pass
 
-        return float(self._smoothed_flushing)
+        return (float(self._smoothed_flushing), True, 0.0)
 
     def _compute_voluntary_eye_widening(self, ear_avg: float, timestamp: float) -> bool:
         """Detect voluntary eye-widening spikes (Section B).
@@ -708,17 +765,20 @@ class FeatureExtractor:
 
     def _compute_fixation_stare(self, avg_iris_x: float, avg_iris_y: float,
                                 saccade_detected: bool, blink_detected: bool,
-                                timestamp: float) -> float:
-        """Track compensatory staring fixation duration (Section B).
+                                timestamp: float) -> Tuple[float, bool]:
+        """Track compensatory staring fixation duration and spatial variance (Section B).
 
-        Rigid unbroken central fixation within +/- 2.5 deg for > 3.5 seconds
-        without natural exploratory micro-saccades.
+        Rigid unbroken central fixation for > 6.0 seconds with low spatial variance
+        (sigma_gaze < 0.8 deg) captures compensatory cognitive freeze while avoiding
+        false positives on alert highway forward gaze.
         """
         if self._stare_start_time is None or self._stare_anchor_x is None or self._stare_anchor_y is None:
             self._stare_start_time = timestamp
             self._stare_anchor_x = avg_iris_x
             self._stare_anchor_y = avg_iris_y
-            return 0.0
+            self._stare_iris_samples.clear()
+            self._stare_iris_samples.append((avg_iris_x, avg_iris_y))
+            return (0.0, False)
 
         drift_deg = np.sqrt(
             ((avg_iris_x - self._stare_anchor_x) * _DEG_PER_IRIS_UNIT) ** 2 +
@@ -730,58 +790,84 @@ class FeatureExtractor:
             self._stare_start_time = timestamp
             self._stare_anchor_x = avg_iris_x
             self._stare_anchor_y = avg_iris_y
-            return 0.0
+            self._stare_iris_samples.clear()
+            self._stare_iris_samples.append((avg_iris_x, avg_iris_y))
+            return (0.0, False)
 
-        return float(timestamp - self._stare_start_time)
+        self._stare_iris_samples.append((avg_iris_x, avg_iris_y))
+        duration = float(timestamp - self._stare_start_time)
 
-    def _compute_anti_masking_divergence(self, features: FrameFeatures) -> Tuple[float, bool]:
+        # Compensatory stare active if duration >= 6.0s and gaze std < 0.8 deg
+        compensatory_stare = False
+        if duration >= 6.0 and len(self._stare_iris_samples) >= 15:
+            xs = [x for x, _ in self._stare_iris_samples]
+            ys = [y for _, y in self._stare_iris_samples]
+            sigma_deg = float(np.sqrt(np.std(xs)**2 + np.std(ys)**2) * _DEG_PER_IRIS_UNIT)
+            compensatory_stare = bool(sigma_deg < 0.8)
+
+        return (duration, compensatory_stare)
+
+    def _compute_anti_masking_divergence(self, features: FrameFeatures, timestamp: float = 0.0) -> Tuple[float, bool]:
         """Compute Anti-Masking Divergence Metric (M_mask).
 
-        Quantifies discordance between voluntary masking attempts and involuntary reflex decay:
-          - Involuntary Vector I_invol in [0, 1]: GEN, depressed VOR gain, sluggish upstroke,
-            pursuit fragmentation, LOC, postural sway, ptosis droop.
-          - Voluntary Vector V_mask in [0, 1]: eye-widening spikes, deliberate blink suppression,
-            rigid compensatory stare, head stabilization.
-          - Divergence Score: M_mask = 100 * min(1.0, 2.0 * I_invol * V_mask).
+        Quantifies biophysical kinetic discordance:
+          - Kinetic mismatch: normal/high blink rate (f_blink / f_baseline >= 0.8) paired with
+            pharmacologically sluggish levator upstroke (v_baseline / v_up > 1.25).
+          - Involuntary Vector I_invol: GEN, LOC, pursuit fragmentation, sluggish upstroke.
+          - Voluntary Masking Vector V_mask: eye widening, deliberate suppression, compensatory stare (>=6.0s).
+          - Discordance Score: M_mask in [0, 100]%.
           - Trigger: M_mask >= 50.0% flags masking_detected = True.
         """
-        inv = 0.0
+        # 1. Blink frequency estimation
+        cutoff = timestamp - 60.0
+        recent_blinks = [t for t in self._blink_times if t >= cutoff]
+        if timestamp >= 10.0 and len(recent_blinks) >= 2:
+            dt_window = min(60.0, timestamp)
+            current_f = len(recent_blinks) / max(1.0, dt_window)
+        else:
+            current_f = self.sober_blink_freq_baseline
+
+        r_rate = float(current_f / max(0.05, self.sober_blink_freq_baseline))
+
+        # 2. Levator upstroke sluggishness
+        v_up = features.blink_opening_velocity
+        if v_up <= 0.05:
+            v_up = self._last_blink_opening_vel if self._last_blink_opening_vel > 0.05 else self.sober_blink_up_baseline
+
+        r_sluggish = float(self.sober_blink_up_baseline / max(0.1, v_up))
+
+        # Kinetic mismatch core: only fires if upstroke is genuinely sluggish (> 25% slower)
+        # and blink rate is active (>= 80% baseline)
+        kinetic_mismatch = 0.0
+        if r_sluggish > 1.25 and r_rate >= 0.80:
+            sluggish_excess = r_sluggish - 1.25
+            kinetic_mismatch = min(100.0, 50.0 * min(2.0, r_rate) * sluggish_excess)
+
+        # 3. Behavioral discordance: voluntary masking fighting involuntary signs
+        invol_count = 0
         if features.gen_detected:
-            inv += 0.25
-        if features.vor_gain < 0.70:
-            inv += 0.20
-        elif features.vor_gain < 0.80:
-            inv += 0.10
-        if 0 < features.blink_opening_velocity < 1.2:
-            inv += 0.20
-        elif 0 < features.blink_opening_velocity < 1.8:
-            inv += 0.10
-        if features.pursuit_fragmentation_ratio > 0.25:
-            inv += 0.15
-        elif features.pursuit_fragmentation_ratio > 0.12:
-            inv += 0.08
+            invol_count += 1
         if features.lack_of_convergence:
-            inv += 0.10
-        if features.head_postural_sway > 1.4:
-            inv += 0.10
-        if features.ear_avg < 0.22:
-            inv += 0.10
-        inv_vec = float(np.clip(inv, 0.0, 1.0))
+            invol_count += 1
+        if features.pursuit_fragmentation_ratio > 0.20:
+            invol_count += 1
+        if r_sluggish > 1.30:
+            invol_count += 1
 
-        vol = 0.0
-        if features.voluntary_eye_widening:
-            vol += 0.35
-        if features.deliberate_blink_suppression:
-            vol += 0.35
-        if features.stare_fixation_duration_s >= 3.5:
-            vol += 0.20
-        if features.rigid_head_stabilization:
-            vol += 0.10
-        vol_vec = float(np.clip(vol, 0.0, 1.0))
+        bonus = 0.0
+        if invol_count >= 1:
+            if features.voluntary_eye_widening:
+                bonus += 25.0
+            if features.compensatory_stare_active:
+                bonus += 25.0
+            if features.deliberate_blink_suppression:
+                bonus += 20.0
+            if features.rigid_head_stabilization:
+                bonus += 15.0
 
-        m_mask = 100.0 * min(1.0, 2.0 * inv_vec * vol_vec)
-        detected = bool(m_mask >= 50.0)
-        return (float(round(m_mask, 1)), detected)
+        total_m_mask = min(100.0, kinetic_mismatch + bonus)
+        detected = bool(total_m_mask >= 50.0)
+        return (float(round(total_m_mask, 1)), detected)
 
     def compute(self, landmarks: np.ndarray,
                 timestamp: float,
@@ -820,6 +906,7 @@ class FeatureExtractor:
         )
 
         if not face_valid or imu_gated:
+            self._just_resumed_from_gate = True
             # Hold last valid features, but update metadata
             features.ear_left = self._last_features.ear_left
             features.ear_right = self._last_features.ear_right
@@ -831,7 +918,7 @@ class FeatureExtractor:
             features.right_iris_x = self._last_features.right_iris_x
             features.right_iris_y = self._last_features.right_iris_y
             features.saccade_velocity = self._last_features.saccade_velocity
-            features.saccade_detected = self._last_features.saccade_detected
+            features.saccade_detected = False
             features.saccade_latency_ms = self._last_features.saccade_latency_ms
             features.blink_closing_velocity = self._last_features.blink_closing_velocity
             features.blink_opening_velocity = self._last_features.blink_opening_velocity
@@ -845,13 +932,27 @@ class FeatureExtractor:
             features.vor_gain = self._last_features.vor_gain
             features.head_postural_sway = self._last_features.head_postural_sway
             features.facial_flushing_ratio = self._last_features.facial_flushing_ratio
+            features.flushing_valid = self._last_features.flushing_valid
+            features.flushing_delta = self._last_features.flushing_delta
             features.deliberate_blink_suppression = self._last_features.deliberate_blink_suppression
             features.voluntary_eye_widening = self._last_features.voluntary_eye_widening
             features.stare_fixation_duration_s = self._last_features.stare_fixation_duration_s
+            features.compensatory_stare_active = self._last_features.compensatory_stare_active
             features.rigid_head_stabilization = self._last_features.rigid_head_stabilization
             features.masking_divergence_score = self._last_features.masking_divergence_score
             features.masking_detected = self._last_features.masking_detected
             return features
+
+        if getattr(self, "_just_resumed_from_gate", False):
+            self._just_resumed_from_gate = False
+            self._prev_timestamp = timestamp
+            self._prev_ear_timestamp = timestamp
+            self._prev_head_timestamp = timestamp
+            self._prev_ear_avg = (self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT) + self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)) / 2.0
+            left_x, _ = self.compute_iris_position(landmarks, LEFT_IRIS_CENTER, 263, 362)
+            right_x, _ = self.compute_iris_position(landmarks, RIGHT_IRIS_CENTER, 33, 133)
+            self._prev_iris_x = (left_x + right_x) / 2.0
+            self._prev_head_yaw = head_yaw
 
         # ── EAR ──
         features.ear_right = self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)
@@ -930,19 +1031,23 @@ class FeatureExtractor:
             self._compute_postural_sway(head_pitch, head_roll, timestamp)
 
         # ── Facial Flushing / Vasodilation (Section A) ──
-        features.facial_flushing_ratio = self._compute_facial_flushing(frame, landmarks)
+        features.facial_flushing_ratio, features.flushing_valid, features.flushing_delta = \
+            self._compute_facial_flushing(frame, landmarks)
 
         # ── Voluntary Masking Behaviors (Section B) ──
+        if features.blink_detected:
+            self._blink_times.append(timestamp)
+
         features.voluntary_eye_widening = \
             self._compute_voluntary_eye_widening(features.ear_avg, timestamp)
         features.deliberate_blink_suppression = \
             self._compute_deliberate_blink_suppression(features.blink_detected, features.ear_avg, timestamp)
-        features.stare_fixation_duration_s = \
+        features.stare_fixation_duration_s, features.compensatory_stare_active = \
             self._compute_fixation_stare(avg_iris_x, avg_iris_y, features.saccade_detected, features.blink_detected, timestamp)
 
         # ── Anti-Masking Divergence Metric (M_mask) ──
         features.masking_divergence_score, features.masking_detected = \
-            self._compute_anti_masking_divergence(features)
+            self._compute_anti_masking_divergence(features, timestamp)
 
         self._prev_iris_x = avg_iris_x
         self._prev_iris_y = avg_iris_y

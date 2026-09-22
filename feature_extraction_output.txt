@@ -1,7 +1,7 @@
 ================================================================================
        DRIVER MONITORING SYSTEM (DMS) — FEATURE EXTRACTION REPORT
 ================================================================================
-Generated At          : 2026-09-22 17:48:07
+Generated At          : 2026-09-22 21:01:09
 Input Source File     : captured_snapshot.jpg (640x480 px)
 Face Mesh Status      : DETECTED (478 3D landmarks with iris refinement)
 Overall Classification: SOBER
@@ -46,22 +46,22 @@ Diagnostic Confidence : 95.0%
   * Smooth Pursuit Fragmentation      : 0.0%      [Normal: ~0%, Impaired: > 20%]
   * Binocular Vergence Angle          : +30.00 deg  [Positive = Convergence]
   * Lack of Convergence (LOC - DRE)   : False     [Strabismus Alert: < -3.5 deg]
-  * VOR Micro-Compensation Gain       : 1.000        [Normal: ~0.85 - 1.05, Impaired: < 0.70]
-  * Head Postural Sway (Micro-Tremor) : 0.00 deg       [Sway Alert: > 1.40 deg]
-  * Facial Flushing / Vasodilation    : 1.039        [Cheek Chromaticity Ratio R/(G+B)]
+  * VOR Micro-Compensation Gain       : 1.000        [0% lockout weight - Tier 3 experimental]
+  * Head Postural Sway (Micro-Tremor) : 0.00 deg       [0.5-2.0 Hz road de-trended sway]
+  * Facial Flushing / Vasodilation    : 1.039        [Valid: True, Delta: -23.1%]
 
 7. SECTION B — VOLUNTARY & MASKABLE BEHAVIORS (GAMING INDICATORS)
   * Deliberate Blink Suppression      : False     [Inter-blink interval > 6.0s]
   * Voluntary Eye-Widening Spike      : False     [Frontalis/levator contraction]
-  * Compensatory Stare Duration       : 0.0 s       [Rigid fixation > 3.5s alert]
+  * Compensatory Stare Duration       : 0.0 s       [Active: False (>6.0s, sigma<0.8 deg)]
   * Rigid Head Stabilization Effort   : False     [Conscious neck muscle locking]
 
 8. ANTI-MASKING DIVERGENCE ANALYSIS (M_mask)
-  * Masking Divergence Score (M_mask) : 0.0%      [Discordance between effort & reflex]
+  * Masking Divergence Score (M_mask) : 0.0%      [Biophysical kinetic discordance]
   * Active Masking Attempt Detected   : False     [Threshold: M_mask >= 50.0%]
 
 9. SCLERA VASCULAR INJECTION (BLOODSHOT INDEX)
-  * Sclera Redness Ratio (R/(G+B))    : 1.032        [Normal: ~1.00, Bloodshot: > 1.20]
+  * Sclera Redness Ratio (R/(G+B))    : 1.032        [Normal: ~1.00, Bloodshot: > 1.20, Neutral on NIR]
 
 10. NOISE MITIGATION & VEHICLE GATING STATE
   * Head Pose Valid (Within Limits)   : True
@@ -97,9 +97,12 @@ Diagnostic Confidence : 95.0%
   "vor_gain": 1.0,
   "head_postural_sway": 0.0,
   "facial_flushing_ratio": 1.038724566141361,
+  "flushing_valid": true,
+  "flushing_delta": -0.23057439545084368,
   "deliberate_blink_suppression": false,
   "voluntary_eye_widening": false,
   "stare_fixation_duration_s": 0.0,
+  "compensatory_stare_active": false,
   "rigid_head_stabilization": false,
   "masking_divergence_score": 0.0,
   "masking_detected": false,

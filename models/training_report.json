@@ -1,0 +1,155 @@
+{
+  "n_samples": 240,
+  "n_features": 203,
+  "n_subjects": 10,
+  "model_type": "HistGradientBoostingClassifier",
+  "scale_pos_weight": 1.0,
+  "oof_metrics": {
+    "roc_auc": 0.8,
+    "pr_auc": 0.7400000000000001,
+    "sensitivity": 0.8,
+    "specificity": 0.8,
+    "f1_score": 0.8,
+    "accuracy": 0.8,
+    "balanced_accuracy": 0.8
+  },
+  "fold_metrics": [
+    {
+      "fold": 1,
+      "val_subjects": [
+        "sub_04",
+        "sub_09"
+      ],
+      "roc_auc": 1.0,
+      "pr_auc": 1.0,
+      "sensitivity": 1.0,
+      "specificity": 1.0
+    },
+    {
+      "fold": 2,
+      "val_subjects": [
+        "sub_03",
+        "sub_08"
+      ],
+      "roc_auc": 1.0,
+      "pr_auc": 1.0,
+      "sensitivity": 1.0,
+      "specificity": 1.0
+    },
+    {
+      "fold": 3,
+      "val_subjects": [
+        "sub_02",
+        "sub_07"
+      ],
+      "roc_auc": 0.5,
+      "pr_auc": 0.5,
+      "sensitivity": 0.0,
+      "specificity": 1.0
+    },
+    {
+      "fold": 4,
+      "val_subjects": [
+        "sub_01",
+        "sub_06"
+      ],
+      "roc_auc": 0.5,
+      "pr_auc": 0.5,
+      "sensitivity": 1.0,
+      "specificity": 0.0
+    },
+    {
+      "fold": 5,
+      "val_subjects": [
+        "sub_00",
+        "sub_05"
+      ],
+      "roc_auc": 1.0,
+      "pr_auc": 1.0,
+      "sensitivity": 1.0,
+      "specificity": 1.0
+    }
+  ],
+  "top_features": [
+    {
+      "feature": "perclos_mean",
+      "importance": 0.52
+    },
+    {
+      "feature": "lack_of_convergence_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "imu_gated_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "saccade_detected_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "yawn_detected_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "microsleep_detected_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "blink_detected_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "vor_gain_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "vergence_angle_deg_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "pursuit_fragmentation_ratio_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "gen_detected_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "gen_slow_phase_vel_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "gaze_yaw_dispersion_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "blink_opening_velocity_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "blink_closing_velocity_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "saccade_latency_ms_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "saccade_velocity_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "head_roll_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "head_pitch_p90",
+      "importance": 0.0
+    },
+    {
+      "feature": "head_yaw_p90",
+      "importance": 0.0
+    }
+  ]
+}

@@ -21,7 +21,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from pipeline.feature_extractor import FrameFeatures
+from pipeline.feature_extractor import FrameFeatures, is_monochrome_frame
 from utils.landmarks import RIGHT_EYE_CONTOUR, LEFT_EYE_CONTOUR
 
 
@@ -302,22 +302,23 @@ class ImpairmentClassifier:
             marker_scores["microsleep"] = 0.0
 
         # 9. Low-Frequency Postural Sway (Section A Involuntary Micro-Tremor)
+        # NOTE: Seated postural sway is an experimental proxy of Romberg standing posturography.
         if features.head_postural_sway > 1.8:
-            marker_scores["postural_sway"] = 80.0
-            indicators.append(f"Pronounced postural sway / micro-tremor (σ={features.head_postural_sway:.2f}°)")
+            marker_scores["postural_sway"] = 70.0
+            indicators.append(f"Pronounced de-trended postural sway / micro-tremor (σ={features.head_postural_sway:.2f}°)")
         elif features.head_postural_sway > 1.2:
-            marker_scores["postural_sway"] = 45.0
-            indicators.append(f"Mild postural sway (σ={features.head_postural_sway:.2f}°)")
+            marker_scores["postural_sway"] = 35.0
+            indicators.append(f"Mild de-trended postural sway (σ={features.head_postural_sway:.2f}°)")
         else:
             marker_scores["postural_sway"] = 0.0
 
-        # 10. Facial Flushing / Cheek Vasodilation (Section A Involuntary)
-        if features.facial_flushing_ratio > 1.25:
+        # 10. Facial Flushing / Cheek Vasodilation (Section A Involuntary - RGB only)
+        if features.flushing_valid and features.flushing_delta >= 0.20:
             marker_scores["facial_flushing"] = 70.0
-            indicators.append(f"Facial vasodilation / cheek flushing ({features.facial_flushing_ratio:.2f}x)")
-        elif features.facial_flushing_ratio > 1.15:
+            indicators.append(f"Facial vasodilation / cheek flushing (+{features.flushing_delta*100:.0f}% over baseline)")
+        elif features.flushing_valid and features.flushing_delta >= 0.10:
             marker_scores["facial_flushing"] = 35.0
-            indicators.append(f"Mild cheek flushing ({features.facial_flushing_ratio:.2f}x)")
+            indicators.append(f"Mild cheek flushing (+{features.flushing_delta*100:.0f}% over baseline)")
         else:
             marker_scores["facial_flushing"] = 0.0
 
@@ -337,9 +338,12 @@ class ImpairmentClassifier:
             marker_scores["deliberate_blink_suppression"] = 0.0
 
         # 13. Compensatory Stare Fixation
-        if features.stare_fixation_duration_s >= 3.5:
-            marker_scores["compensatory_stare"] = 65.0
-            indicators.append(f"Compensatory stare fixation ({features.stare_fixation_duration_s:.1f}s unbroken gaze)")
+        if features.compensatory_stare_active:
+            marker_scores["compensatory_stare"] = 75.0
+            indicators.append(f"Compensatory stare fixation ({features.stare_fixation_duration_s:.1f}s rigid unbroken gaze, σ_gaze<0.8°)")
+        elif features.stare_fixation_duration_s >= 6.0:
+            marker_scores["compensatory_stare"] = 35.0
+            indicators.append(f"Prolonged staring fixation ({features.stare_fixation_duration_s:.1f}s)")
         else:
             marker_scores["compensatory_stare"] = 0.0
 
@@ -360,23 +364,25 @@ class ImpairmentClassifier:
 
         # ── Lockout & Risk Weighting (Section A Anchored) ──
         # Primary involuntary weights (unfakeable physiological signals)
+        # Note: Single-camera VOR is demoted to 0.0 weight for lockout decisions (Tier 3 experimental proxy)
         inv_weights = {
-            "gen": 0.22,
-            "pursuit_fragmentation": 0.18,
-            "blink_velocity": 0.18,
-            "vor_depression": 0.12,
-            "lack_of_convergence": 0.10,
+            "gen": 0.24,
+            "pursuit_fragmentation": 0.22,
+            "blink_velocity": 0.22,
+            "vor_depression": 0.00,
+            "lack_of_convergence": 0.12,
             "perclos": 0.10,
             "gaze_tunneling": 0.05,
             "microsleep": 0.05,
         }
         inv_risk = sum(marker_scores[k] * inv_weights[k] for k in inv_weights)
 
-        # Autonomic corroboration
-        if marker_scores["postural_sway"] >= 45.0:
-            inv_risk += 5.0
-        if marker_scores["facial_flushing"] >= 35.0:
-            inv_risk += 5.0
+        # Autonomic corroboration bonus: only applied if base involuntary risk is already present (>= 20%)
+        if inv_risk >= 20.0:
+            if marker_scores["postural_sway"] >= 35.0:
+                inv_risk += 5.0
+            if marker_scores["facial_flushing"] >= 35.0:
+                inv_risk += 5.0
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
         # Voluntary masking magnitude
@@ -390,7 +396,7 @@ class ImpairmentClassifier:
             classification = "HIGH_RISK_INTOXICATED"
             lockout_recommended = True
             total_risk = inv_risk
-        elif features.masking_detected and inv_risk >= 35.0:
+        elif features.masking_detected and inv_risk >= 40.0:
             classification = "HIGH_RISK_INTOXICATED"
             lockout_recommended = True
             total_risk = max(inv_risk, masking_divergence)
@@ -422,7 +428,11 @@ class ImpairmentClassifier:
 
         Returns:
             Redness ratio: R / ((G + B) / 2 + 1e-5). Values > 1.2 indicate bloodshot eyes.
+            Returns 1.0 (neutral) if image is monochrome / NIR.
         """
+        if is_monochrome_frame(frame):
+            return 1.0
+
         try:
             h, w = frame.shape[:2]
             # Combine left and right eye contour masks
@@ -434,7 +444,7 @@ class ImpairmentClassifier:
             cv2.fillPoly(mask, [r_pts], 255)
             cv2.fillPoly(mask, [l_pts], 255)
 
-            # Exclude dark pupil/iris pixels (luminance < 60) to isolate white sclera
+            # Exclude dark pupil/iris pixels (luminance < 70) to isolate white sclera
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             sclera_mask = (mask == 255) & (gray > 70)  # [PLACEHOLDER — pending calibration against real data]
 

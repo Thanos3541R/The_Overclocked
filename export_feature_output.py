@@ -120,25 +120,25 @@ def main():
     lines.append(f"  * Smooth Pursuit Fragmentation      : {features.pursuit_fragmentation_ratio * 100:.1f}%      [Normal: ~0%, Impaired: > 20%]")
     lines.append(f"  * Binocular Vergence Angle          : {features.vergence_angle_deg:+.2f} deg  [Positive = Convergence]")
     lines.append(f"  * Lack of Convergence (LOC - DRE)   : {features.lack_of_convergence}     [Strabismus Alert: < -3.5 deg]")
-    lines.append(f"  * VOR Micro-Compensation Gain       : {features.vor_gain:.3f}        [Normal: ~0.85 - 1.05, Impaired: < 0.70]")
-    lines.append(f"  * Head Postural Sway (Micro-Tremor) : {features.head_postural_sway:.2f} deg       [Sway Alert: > 1.40 deg]")
-    lines.append(f"  * Facial Flushing / Vasodilation    : {features.facial_flushing_ratio:.3f}        [Cheek Chromaticity Ratio R/(G+B)]")
+    lines.append(f"  * VOR Micro-Compensation Gain       : {features.vor_gain:.3f}        [0% lockout weight - Tier 3 experimental]")
+    lines.append(f"  * Head Postural Sway (Micro-Tremor) : {features.head_postural_sway:.2f} deg       [0.5-2.0 Hz road de-trended sway]")
+    lines.append(f"  * Facial Flushing / Vasodilation    : {features.facial_flushing_ratio:.3f}        [Valid: {features.flushing_valid}, Delta: {features.flushing_delta*100:+.1f}%]")
     lines.append("")
 
     lines.append("7. SECTION B — VOLUNTARY & MASKABLE BEHAVIORS (GAMING INDICATORS)")
     lines.append(f"  * Deliberate Blink Suppression      : {features.deliberate_blink_suppression}     [Inter-blink interval > 6.0s]")
     lines.append(f"  * Voluntary Eye-Widening Spike      : {features.voluntary_eye_widening}     [Frontalis/levator contraction]")
-    lines.append(f"  * Compensatory Stare Duration       : {features.stare_fixation_duration_s:.1f} s       [Rigid fixation > 3.5s alert]")
+    lines.append(f"  * Compensatory Stare Duration       : {features.stare_fixation_duration_s:.1f} s       [Active: {features.compensatory_stare_active} (>6.0s, sigma<0.8 deg)]")
     lines.append(f"  * Rigid Head Stabilization Effort   : {features.rigid_head_stabilization}     [Conscious neck muscle locking]")
     lines.append("")
 
     lines.append("8. ANTI-MASKING DIVERGENCE ANALYSIS (M_mask)")
-    lines.append(f"  * Masking Divergence Score (M_mask) : {features.masking_divergence_score:.1f}%      [Discordance between effort & reflex]")
+    lines.append(f"  * Masking Divergence Score (M_mask) : {features.masking_divergence_score:.1f}%      [Biophysical kinetic discordance]")
     lines.append(f"  * Active Masking Attempt Detected   : {features.masking_detected}     [Threshold: M_mask >= 50.0%]")
     lines.append("")
 
     lines.append("9. SCLERA VASCULAR INJECTION (BLOODSHOT INDEX)")
-    lines.append(f"  * Sclera Redness Ratio (R/(G+B))    : {sclera_redness:.3f}        [Normal: ~1.00, Bloodshot: > 1.20]")
+    lines.append(f"  * Sclera Redness Ratio (R/(G+B))    : {sclera_redness:.3f}        [Normal: ~1.00, Bloodshot: > 1.20, Neutral on NIR]")
     lines.append("")
 
     lines.append("10. NOISE MITIGATION & VEHICLE GATING STATE")
@@ -176,9 +176,12 @@ def main():
         'vor_gain': float(features.vor_gain),
         'head_postural_sway': float(features.head_postural_sway),
         'facial_flushing_ratio': float(features.facial_flushing_ratio),
+        'flushing_valid': bool(features.flushing_valid),
+        'flushing_delta': float(features.flushing_delta),
         'deliberate_blink_suppression': bool(features.deliberate_blink_suppression),
         'voluntary_eye_widening': bool(features.voluntary_eye_widening),
         'stare_fixation_duration_s': float(features.stare_fixation_duration_s),
+        'compensatory_stare_active': bool(features.compensatory_stare_active),
         'rigid_head_stabilization': bool(features.rigid_head_stabilization),
         'masking_divergence_score': float(features.masking_divergence_score),
         'masking_detected': bool(features.masking_detected),

@@ -172,11 +172,12 @@ def process_clip(
     clip: ClipInfo, 
     output_dir: Path,
     config: PipelineConfig,
-    window_sec: float,
-    stride_sec: float,
-    assumed_fps: float,
-    gated_strategy: str,
-    headless: bool
+    window_sec: float = 3.0,
+    stride_sec: float = 1.5,
+    min_fill_ratio: float = 0.70,
+    assumed_fps: float = 30.0,
+    gated_strategy: str = "hold_last",
+    headless: bool = True
 ) -> Dict:
     """Process a single video clip through the full DMS pipeline.
 
@@ -268,6 +269,7 @@ def process_clip(
         fps=fps,
         window_size_sec=window_sec,
         stride_sec=stride_sec,
+        min_fill_ratio=min_fill_ratio,
         gated_strategy=strategy_enum,
     )
 
@@ -344,6 +346,7 @@ def process_clip(
                 head_roll=pose_state.roll,
                 imu_gated=imu_frozen,
                 gating_reason=pose_state.gating_reason,
+                frame=processed,
             )
             
             # Stage 9: Accumulate into training buffer
@@ -393,8 +396,9 @@ def main():
     parser = argparse.ArgumentParser(description="Ingest Toyota IDD dataset for DMS training.")
     parser.add_argument("--idd-root", required=True, help="Root directory of the IDD dataset")
     parser.add_argument("--output-dir", default="./idd_output/", help="Output directory for .npz files")
-    parser.add_argument("--window-sec", type=float, default=5.0, help="Feature window duration in seconds")
-    parser.add_argument("--stride-sec", type=float, default=2.5, help="Window stride in seconds")
+    parser.add_argument("--window-sec", type=float, default=3.0, help="Feature window duration in seconds (default 3.0s)")
+    parser.add_argument("--stride-sec", type=float, default=1.5, help="Window stride in seconds (default 1.5s)")
+    parser.add_argument("--min-fill-ratio", type=float, default=0.70, help="Minimum non-empty fill ratio (default 0.70)")
     parser.add_argument("--max-clips", type=int, default=None, help="Max clips to process (for debugging)")
     parser.add_argument("--fps", type=float, default=30.0, help="Assumed FPS if metadata unavailable")
     parser.add_argument("--headless", action="store_true", default=True, help="No visualization")
@@ -411,7 +415,7 @@ def main():
     print(f"--- IDD Dataset Ingestion ---")
     print(f"Dataset root: {args.idd_root}")
     print(f"Output dir: {output_dir}")
-    print(f"Window: {args.window_sec}s, Stride: {args.stride_sec}s")
+    print(f"Window: {args.window_sec}s, Stride: {args.stride_sec}s, Min Fill: {args.min_fill_ratio*100:.0f}%")
     
     # Discover clips
     try:
@@ -454,6 +458,7 @@ def main():
                 config=config,
                 window_sec=args.window_sec,
                 stride_sec=args.stride_sec,
+                min_fill_ratio=args.min_fill_ratio,
                 assumed_fps=args.fps,
                 gated_strategy=args.gated_strategy,
                 headless=args.headless

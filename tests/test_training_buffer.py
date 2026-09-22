@@ -57,7 +57,7 @@ def test_gated_frame_hold_last():
 
 def test_minimum_fill_threshold():
     tb = TrainingBuffer(subject_id="test", window_size_sec=1.0, fps=10)
-    for i in range(7): # 7 frames < 80% of 10
+    for i in range(6): # 6 frames < 70% of 10
         tb.add_sample(FrameFeatures(timestamp=i*0.1))
     
     windows = tb.extract_windows()

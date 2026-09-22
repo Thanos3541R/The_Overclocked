@@ -7,6 +7,7 @@ Handles:
 
 Auto-detects input type and sets the `is_grayscale` flag accordingly.
 """
+import sys
 import cv2
 import numpy as np
 from typing import Optional, Tuple, Union
@@ -24,11 +25,26 @@ class FrameCapture:
             height: Requested frame height.
         """
         self.source = source
-        self.cap = cv2.VideoCapture(source)
 
-        if isinstance(source, int):
+        is_camera = isinstance(source, int)
+        if isinstance(source, str) and source.strip().isdigit():
+            source = int(source.strip())
+            self.source = source
+            is_camera = True
+
+        if is_camera:
+            if sys.platform.startswith("win"):
+                self.cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
+                if not self.cap.isOpened():
+                    self.cap = cv2.VideoCapture(source)
+                else:
+                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            else:
+                self.cap = cv2.VideoCapture(source)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        else:
+            self.cap = cv2.VideoCapture(source)
 
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
@@ -43,10 +59,14 @@ class FrameCapture:
 
         self.frame_width = test_frame.shape[1]
         self.frame_height = test_frame.shape[0]
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+        fps_val = self.cap.get(cv2.CAP_PROP_FPS)
+        self.fps = float(fps_val) if (fps_val and fps_val > 0 and not np.isnan(fps_val)) else 30.0
+
+        # Log negotiated resolution
+        print(f"[DMS Capture] Camera opened: {self.frame_width}x{self.frame_height} @ {self.fps} fps")
 
         # Reset to beginning for video files
-        if isinstance(source, str):
+        if not is_camera and isinstance(self.source, str):
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         self._frame_count = 0

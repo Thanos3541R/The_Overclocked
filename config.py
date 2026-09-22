@@ -34,8 +34,10 @@ class PipelineConfig:
     # ── MediaPipe Face Mesh ──
     max_faces: int = 1
     refine_landmarks: bool = True  # enables iris landmarks (468-477)
-    min_detection_confidence: float = 0.5
-    min_tracking_confidence: float = 0.5
+    min_detection_confidence: float = 0.35
+    min_tracking_confidence: float = 0.35
+    enable_adaptive_roi: bool = True
+    roi_margin: float = 2.0
 
     # ── 1-Euro Filter ──
     landmark_min_cutoff: float = 1.0   # smoothing at rest

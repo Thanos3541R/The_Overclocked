@@ -114,6 +114,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         refine_landmarks=config.refine_landmarks,
         min_detection_confidence=config.min_detection_confidence,
         min_tracking_confidence=config.min_tracking_confidence,
+        enable_adaptive_roi=config.enable_adaptive_roi,
+        roi_margin=config.roi_margin,
     )
     normalizer = PnPNormalizer(
         frame_width=capture.frame_width,

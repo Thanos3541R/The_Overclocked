@@ -107,3 +107,68 @@ def test_calibrator_apply_to_extractor_and_classifier():
     assert abs(classifier.sober_ear - 0.33) < 0.01
     assert abs(classifier.sober_blink_up - 3.1) < 0.01
     assert abs(classifier.baseline_asymmetry - 0.04) < 0.01
+
+
+def test_drunk_ingress_detection_and_rejection():
+    """Verify that an intoxicated driver entering with ptosis & sluggish blinks is rejected from poisoning baseline."""
+    calibrator = PersonalBaselineCalibrator(calibration_duration_sec=3.0, min_samples=30, fps=30.0)
+
+    # Impaired driver entering: EAR=0.20 (<0.25 min), blink_up=1.1 EAR/s (<1.80 min)
+    for i in range(100):
+        t = i / 30.0
+        ff = FrameFeatures(
+            timestamp=t,
+            face_valid=True,
+            ear_left=0.20,
+            ear_right=0.20,
+            ear_avg=0.20,
+            blink_opening_velocity=1.1,
+            blink_detected=False
+        )
+        calibrator.update(ff)
+
+    b = calibrator.finalize()
+    assert b.ingress_impairment_detected is True
+    assert "DRUNK INGRESS DETECTED" in b.ingress_reason
+    # Baselines should NOT be poisoned to 0.20 or 1.1; they must reset to sober defaults
+    assert b.ear_baseline == 0.28
+    assert b.blink_upstroke_baseline == 2.50
+
+    classifier = ImpairmentClassifier()
+    calibrator.apply_to(extractor=FeatureExtractor(), classifier=classifier)
+    assert classifier.ingress_impairment_detected is True
+    assert classifier.sober_ear == 0.28
+
+    # When evaluated, ingress alert should trip high risk
+    assessment = classifier.evaluate_static_image(
+        frame=np.zeros((480, 640, 3), dtype=np.uint8),
+        landmarks=np.zeros((478, 3)),
+        ear_left=0.20,
+        ear_right=0.20,
+        mar=0.15,
+        head_pitch=0.0,
+        head_roll=0.0
+    )
+    assert assessment.risk_score >= 50.0
+    assert any("INGRESS ALERT" in ind for ind in assessment.primary_indicators)
+
+
+def test_physiological_bounding_clamps():
+    """Extreme anatomical outliers should be bounded to plausible human limits."""
+    calibrator = PersonalBaselineCalibrator(calibration_duration_sec=2.0, min_samples=30, fps=30.0)
+
+    for i in range(70):
+        ff = FrameFeatures(
+            timestamp=i / 30.0,
+            face_valid=True,
+            ear_left=0.45,
+            ear_right=0.45,
+            ear_avg=0.45,  # Unusually large aperture
+            blink_opening_velocity=4.5,  # Super fast blink
+        )
+        calibrator.update(ff)
+
+    b = calibrator.finalize()
+    assert b.ingress_impairment_detected is False
+    assert b.ear_baseline == 0.38  # Clamped to PHYSIOLOGICAL_EAR_MAX
+    assert b.blink_upstroke_baseline == 3.20  # Clamped to PHYSIOLOGICAL_BLINK_UP_MAX

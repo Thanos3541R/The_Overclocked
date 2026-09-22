@@ -76,6 +76,43 @@ class TestImpairmentClassifier:
         assert assessment.risk_score > 50.0
         assert any("blink" in ind.lower() for ind in assessment.primary_indicators)
 
+    def test_monochrome_nir_weight_redistribution(self):
+        """Monochrome / NIR frames must bypass sclera chromaticity and redistribute weight without score penalty."""
+        classifier = ImpairmentClassifier()
+        # Single channel monochrome NIR frame
+        mono_frame = np.full((480, 640), 150, dtype=np.uint8)
+        landmarks = make_full_landmarks(ear_val=0.15)
+
+        assessment = classifier.evaluate_static_image(
+            frame=mono_frame,
+            landmarks=landmarks,
+            ear_left=0.15,
+            ear_right=0.15,
+            mar=0.25,
+            head_pitch=-20.0,
+            head_roll=0.0
+        )
+
+        assert any("Monochrome/NIR active" in ind for ind in assessment.primary_indicators)
+        assert assessment.classification == "HIGH_RISK_INTOXICATED"
+        assert assessment.risk_score >= 60.0
+
+    def test_ingress_impairment_flag_elevates_temporal_and_static_risk(self):
+        """Ingress impairment flag should elevate static and temporal evaluation to high risk."""
+        classifier = ImpairmentClassifier()
+        classifier.ingress_impairment_detected = True
+        classifier.ingress_reason = "Resting EAR 0.20 < 0.25"
+
+        # Even with otherwise borderline features, ingress alert triggers high risk
+        features = FrameFeatures(
+            perclos=0.05,
+            blink_opening_velocity=2.5,
+            gaze_yaw_dispersion=0.15
+        )
+        assessment = classifier.evaluate_temporal_stream(features)
+        assert assessment.risk_score >= 55.0
+        assert any("INGRESS ALERT" in ind for ind in assessment.primary_indicators)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

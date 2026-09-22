@@ -133,8 +133,27 @@ class IDDDatasetDiscovery:
     @staticmethod
     def _parse_directories(root_path: Path) -> List[ClipInfo]:
         clips = []
-        valid_conditions = ['sober', 'impaired', 'drowsy', 'intoxicated', 'alert']
-        video_files = list(root_path.rglob("*.mp4")) + list(root_path.rglob("*.avi"))
+        valid_conditions = [
+            'sober', 'impaired', 'drowsy', 'intoxicated', 'alert',
+            'drunk', 'alcohol', 'control', 'normal'
+        ]
+        video_extensions = [
+            "*.mp4", "*.avi", "*.mov", "*.mkv", "*.webm",
+            "*.MP4", "*.AVI", "*.MOV", "*.MKV", "*.WEBM"
+        ]
+        video_files = []
+        for ext in video_extensions:
+            video_files.extend(root_path.rglob(ext))
+
+        # Deduplicate paths
+        seen = set()
+        deduped = []
+        for v in video_files:
+            abs_p = str(v.resolve())
+            if abs_p not in seen:
+                seen.add(abs_p)
+                deduped.append(v)
+        video_files = deduped
         
         for vid in video_files:
             parts = vid.relative_to(root_path).parts
@@ -177,7 +196,8 @@ def process_clip(
     min_fill_ratio: float = 0.70,
     assumed_fps: float = 30.0,
     gated_strategy: str = "hold_last",
-    headless: bool = True
+    headless: bool = True,
+    extractor: Optional[FeatureExtractor] = None,
 ) -> Dict:
     """Process a single video clip through the full DMS pipeline.
 
@@ -244,26 +264,27 @@ def process_clip(
         freeze_duration_ms=config.imu_freeze_ms,
         window_size=config.imu_accel_window,
     )
-    extractor = FeatureExtractor(
-        blink_threshold=config.ear_blink_threshold,
-        mar_yawn_threshold=config.mar_yawn_threshold,
-        perclos_window_sec=config.perclos_window_sec,
-        perclos_alert_threshold=config.perclos_alert_threshold,
-        microsleep_frames=config.microsleep_frames,
-        yawn_frames=config.yawn_frames,
-        gaze_dispersion_window_sec=config.gaze_dispersion_window_sec,
-        saccade_onset_velocity=config.saccade_onset_velocity,
-        saccade_offset_velocity=config.saccade_offset_velocity,
-        eccentric_gaze_threshold=config.eccentric_gaze_threshold,
-        gen_drift_min_vel=config.gen_drift_min_vel,
-        gen_drift_max_vel=config.gen_drift_max_vel,
-        gen_reset_min_vel=config.gen_reset_min_vel,
-        loc_vergence_threshold_deg=config.loc_vergence_threshold_deg,
-        vor_min_head_speed=config.vor_min_head_speed,
-        vor_max_head_speed=config.vor_max_head_speed,
-        pursuit_window_sec=config.pursuit_window_sec,
-        fps=fps,
-    )
+    if extractor is None:
+        extractor = FeatureExtractor(
+            blink_threshold=config.ear_blink_threshold,
+            mar_yawn_threshold=config.mar_yawn_threshold,
+            perclos_window_sec=config.perclos_window_sec,
+            perclos_alert_threshold=config.perclos_alert_threshold,
+            microsleep_frames=config.microsleep_frames,
+            yawn_frames=config.yawn_frames,
+            gaze_dispersion_window_sec=config.gaze_dispersion_window_sec,
+            saccade_onset_velocity=config.saccade_onset_velocity,
+            saccade_offset_velocity=config.saccade_offset_velocity,
+            eccentric_gaze_threshold=config.eccentric_gaze_threshold,
+            gen_drift_min_vel=config.gen_drift_min_vel,
+            gen_drift_max_vel=config.gen_drift_max_vel,
+            gen_reset_min_vel=config.gen_reset_min_vel,
+            loc_vergence_threshold_deg=config.loc_vergence_threshold_deg,
+            vor_min_head_speed=config.vor_min_head_speed,
+            vor_max_head_speed=config.vor_max_head_speed,
+            pursuit_window_sec=config.pursuit_window_sec,
+            fps=fps,
+        )
     training_buffer = TrainingBuffer(
         subject_id=clip.subject_id,
         fps=fps,
@@ -439,10 +460,10 @@ def main():
     fail_count = 0
     total_frames_processed = 0
     total_proc_time = 0.0
-    condition_counts = {}
+    extractors_by_subject: Dict[str, FeatureExtractor] = {}
     
     for i, clip in enumerate(clips):
-        progress_str = f"[{i+1}/{total_clips}] Processing {clip.subject_id}/{clip.condition_label}/{clip.session_id}.mp4 ..."
+        progress_str = f"[{i+1}/{total_clips}] Processing {clip.subject_id}/{clip.condition_label}/{clip.session_id} ..."
         print(progress_str, end="", flush=True)
         
         # Check resume
@@ -452,6 +473,31 @@ def main():
             continue
             
         try:
+            # Maintain persistent rolling feature extraction memory per subject to prevent sparse window aliasing
+            subj_extractor = extractors_by_subject.setdefault(
+                clip.subject_id,
+                FeatureExtractor(
+                    blink_threshold=config.ear_blink_threshold,
+                    mar_yawn_threshold=config.mar_yawn_threshold,
+                    perclos_window_sec=config.perclos_window_sec,
+                    perclos_alert_threshold=config.perclos_alert_threshold,
+                    microsleep_frames=config.microsleep_frames,
+                    yawn_frames=config.yawn_frames,
+                    gaze_dispersion_window_sec=config.gaze_dispersion_window_sec,
+                    saccade_onset_velocity=config.saccade_onset_velocity,
+                    saccade_offset_velocity=config.saccade_offset_velocity,
+                    eccentric_gaze_threshold=config.eccentric_gaze_threshold,
+                    gen_drift_min_vel=config.gen_drift_min_vel,
+                    gen_drift_max_vel=config.gen_drift_max_vel,
+                    gen_reset_min_vel=config.gen_reset_min_vel,
+                    loc_vergence_threshold_deg=config.loc_vergence_threshold_deg,
+                    vor_min_head_speed=config.vor_min_head_speed,
+                    vor_max_head_speed=config.vor_max_head_speed,
+                    pursuit_window_sec=config.pursuit_window_sec,
+                    fps=args.fps,
+                )
+            )
+
             res = process_clip(
                 clip=clip,
                 output_dir=output_dir,
@@ -461,7 +507,8 @@ def main():
                 min_fill_ratio=args.min_fill_ratio,
                 assumed_fps=args.fps,
                 gated_strategy=args.gated_strategy,
-                headless=args.headless
+                headless=args.headless,
+                extractor=subj_extractor,
             )
             
             success_count += 1

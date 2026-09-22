@@ -351,8 +351,14 @@ def main():
     print("=== DMS Baseline Impairment Training Pipeline ===")
 
     if args.test_synthetic:
-        print("Self-test mode: Generating synthetic multi-subject benchmark dataset...")
+        print("\n" + "*" * 72)
+        print("* NOTICE: RUNNING IN SYNTHETIC BENCHMARK / SELF-TEST MODE              *")
+        print("* All metrics represent synthetic pipeline verification, NOT clinical  *")
+        print("* or empirical validation on human subjects.                           *")
+        print("*" * 72 + "\n")
         X_3d, y, subjects, raw_feat_names = generate_synthetic_dataset(n_subjects=10, windows_per_subject=24, window_frames=90)
+        benchmark_mode = "SYNTHETIC_SELF_TEST"
+        empirical_validation = False
     else:
         pattern = os.path.join(args.data_dir, "*.npz")
         npz_files = glob.glob(pattern)
@@ -362,6 +368,8 @@ def main():
             sys.exit(1)
         print(f"Found {len(npz_files)} feature archives. Loading...")
         X_3d, y, subjects, raw_feat_names = load_dataset_from_npz(npz_files)
+        benchmark_mode = "REAL_DATA_INGEST"
+        empirical_validation = True
 
     print(f"Aggregating 3D window tensors {X_3d.shape} into 2D summary statistics (7 per signal)...")
     X_2d, flat_feature_names = compute_window_summary_features(X_3d, raw_feat_names)
@@ -376,6 +384,8 @@ def main():
         scale_pos_weight=args.scale_pos_weight,
         use_xgboost=not args.no_xgb
     )
+    results["benchmark_mode"] = benchmark_mode
+    results["empirical_validation"] = empirical_validation
 
     # Print summary report
     print("\n========================================================")

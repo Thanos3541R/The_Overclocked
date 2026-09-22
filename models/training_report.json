@@ -151,5 +151,7 @@
       "feature": "head_yaw_p90",
       "importance": 0.0
     }
-  ]
+  ],
+  "benchmark_mode": "SYNTHETIC_SELF_TEST",
+  "empirical_validation": false
 }

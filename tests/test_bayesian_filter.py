@@ -77,3 +77,84 @@ def test_sustained_involuntary_evidence_confirms_lockout():
     assert states[-1].sustained_high_confidence_s >= 10.0
     # Lockout confirmed flag must be True
     assert states[-1].lockout_confirmed
+
+
+def test_chattering_prevention_leaky_integrator():
+    """Verify that a brief 2-frame dip at 14.2s does not zero out the sustained timer."""
+    bf = BayesianEvidenceAccumulator(lockout_threshold_prob=0.999, lockout_sustained_sec=15.0)
+
+    severe = ImpairmentAssessment(
+        involuntary_risk_score=90.0,
+        marker_scores={"gen": 90.0, "lack_of_convergence": 80.0},
+        classification="HIGH_RISK_INTOXICATED"
+    )
+    sober = ImpairmentAssessment(
+        involuntary_risk_score=5.0,
+        classification="SOBER"
+    )
+
+    # Accumulate until posterior >= 0.999 and sustained timer reaches ~14.0s
+    t = 0.0
+    while bf._sustained_time_s < 14.0 and t < 30.0:
+        bf.update(severe, timestamp=t)
+        t += 0.033
+
+    time_before_blip = bf._sustained_time_s
+    assert time_before_blip >= 14.0
+
+    # Simulate a flicker dip where posterior probability drops to 0.985 (< 0.999 lockout threshold)
+    bf.log_odds = float(np.log(0.985 / (1.0 - 0.985)))
+    assert bf.posterior < 0.999
+
+    # Inject 2 frames during this dip (0.066s total)
+    dt = 0.033
+    bf.update(sober, timestamp=t)
+    t += dt
+    bf.update(sober, timestamp=t)
+    t += dt
+
+    # Timer should decay leaky (-2.0 * dt per frame = -4.0 * dt ≈ -0.132s), NOT drop to 0!
+    time_after_blip = bf._sustained_time_s
+    assert time_after_blip < time_before_blip
+    assert time_after_blip > 13.5
+    expected_decay = 2.0 * dt * 2
+    assert abs((time_before_blip - time_after_blip) - expected_decay) < 0.01
+
+
+def test_lockout_latching_and_unlatch():
+    """Once confirmed, lockout MUST latch until vehicle park gear is confirmed."""
+    bf = BayesianEvidenceAccumulator(lockout_threshold_prob=0.999, lockout_sustained_sec=3.0)
+
+    severe = ImpairmentAssessment(
+        involuntary_risk_score=95.0,
+        marker_scores={"gen": 95.0},
+        classification="HIGH_RISK_INTOXICATED"
+    )
+    sober = ImpairmentAssessment(
+        involuntary_risk_score=0.0,
+        classification="SOBER"
+    )
+
+    t = 0.0
+    for i in range(120):
+        t = i * 0.1
+        state = bf.update(severe, timestamp=t)
+
+    assert state.lockout_confirmed is True
+
+    # Feed 5 seconds of completely sober frames
+    for i in range(50):
+        t += 0.1
+        state = bf.update(sober, timestamp=t)
+
+    # Lockout MUST remain latched!
+    assert state.lockout_confirmed is True
+    assert "[LATCHED]" in state.status_summary
+
+    # Unlatching without park gear confirmed must fail
+    assert bf.unlatch(park_gear_confirmed=False) is False
+    assert bf._lockout_armed is True
+
+    # Unlatching with park gear confirmed succeeds
+    assert bf.unlatch(park_gear_confirmed=True) is True
+    assert bf._lockout_armed is False

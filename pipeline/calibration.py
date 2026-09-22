@@ -19,6 +19,15 @@ import numpy as np
 
 from pipeline.feature_extractor import FrameFeatures
 
+# ── Physiological Bounds for Alert Sober Adult Humans ──
+# Awake resting open EAR naturally sits between 0.25 and 0.38 (median ~0.28).
+# Involuntary levator palpebrae reopening velocity in sober humans is 1.80 to 3.50 EAR/s.
+PHYSIOLOGICAL_EAR_MIN: float = 0.25
+PHYSIOLOGICAL_EAR_MAX: float = 0.38
+PHYSIOLOGICAL_BLINK_UP_MIN: float = 1.80
+PHYSIOLOGICAL_BLINK_UP_MAX: float = 3.20
+MAX_ALLOWABLE_ASYMMETRY: float = 0.05
+
 
 @dataclass
 class PersonalBaselines:
@@ -33,6 +42,8 @@ class PersonalBaselines:
     is_calibrated: bool = False
     samples_collected: int = 0
     duration_s: float = 0.0
+    ingress_impairment_detected: bool = False
+    ingress_reason: str = ""
 
 
 class PersonalBaselineCalibrator:
@@ -125,60 +136,75 @@ class PersonalBaselineCalibrator:
         if elapsed >= self.calibration_duration_sec and len(self._ear_samples) >= self.min_samples:
             self.finalize()
 
-    def finalize(self) -> PersonalBaselines:
-        """Lock in calibration and calculate final baseline medians."""
-        ear_base = float(np.median(self._ear_samples)) if self._ear_samples else 0.28
-        mar_base = float(np.median(self._mar_samples)) if self._mar_samples else 0.15
-        blink_up_base = float(np.median(self._blink_up_samples)) if self._blink_up_samples else 2.5
-        flush_base = float(np.median(self._flushing_samples)) if self._flushing_samples else 1.35
-        asym_base = float(np.median(self._asymmetry_samples)) if self._asymmetry_samples else 0.0
+    def _compute_metrics(self) -> PersonalBaselines:
+        """Compute baseline parameters with physiological sanity bounding and Drunk Ingress rejection."""
+        has_min_ear = len(self._ear_samples) >= 30
+        has_min_blink = len(self._blink_up_samples) >= 3
+
+        raw_ear = float(np.median(self._ear_samples)) if self._ear_samples else 0.28
+        raw_mar = float(np.median(self._mar_samples)) if self._mar_samples else 0.15
+        raw_blink_up = float(np.median(self._blink_up_samples)) if self._blink_up_samples else 2.5
+        raw_flush = float(np.median(self._flushing_samples)) if self._flushing_samples else 1.35
+        raw_asym = float(np.median(self._asymmetry_samples)) if self._asymmetry_samples else 0.0
         pitch_base = float(np.median(self._pitch_samples)) if self._pitch_samples else 0.0
         roll_base = float(np.median(self._roll_samples)) if self._roll_samples else 0.0
 
+        # Check for Drunk Ingress: if driver enters with impaired open EAR or sluggish eyelid velocity
+        ingress_flag = False
+        reasons = []
+        if has_min_ear and raw_ear < PHYSIOLOGICAL_EAR_MIN:
+            ingress_flag = True
+            reasons.append(
+                f"Resting open EAR {raw_ear:.3f} < physiological sober minimum {PHYSIOLOGICAL_EAR_MIN:.2f} (severe ptosis)"
+            )
+        if has_min_blink and raw_blink_up < PHYSIOLOGICAL_BLINK_UP_MIN:
+            ingress_flag = True
+            reasons.append(
+                f"Eyelid reopening velocity {raw_blink_up:.2f} EAR/s < physiological sober minimum {PHYSIOLOGICAL_BLINK_UP_MIN:.2f} EAR/s"
+            )
+
+        if ingress_flag:
+            # Reject poisoned calibration: clamp/reset to conservative population sober baselines
+            ear_base = 0.28
+            blink_up_base = 2.5
+            asym_base = min(raw_asym, MAX_ALLOWABLE_ASYMMETRY)
+            ingress_reason = "DRUNK INGRESS DETECTED: " + "; ".join(reasons)
+        else:
+            # Clamp within plausible physiological limits
+            ear_base = float(np.clip(raw_ear, PHYSIOLOGICAL_EAR_MIN, PHYSIOLOGICAL_EAR_MAX))
+            blink_up_base = float(np.clip(raw_blink_up, PHYSIOLOGICAL_BLINK_UP_MIN, PHYSIOLOGICAL_BLINK_UP_MAX))
+            asym_base = float(min(raw_asym, MAX_ALLOWABLE_ASYMMETRY))
+            ingress_reason = ""
+
         elapsed = (self._last_timestamp - self._start_timestamp) if self._start_timestamp else 0.0
 
-        self._frozen_baselines = PersonalBaselines(
+        return PersonalBaselines(
             ear_baseline=ear_base,
-            mar_baseline=mar_base,
+            mar_baseline=raw_mar,
             blink_upstroke_baseline=blink_up_base,
-            flushing_baseline=flush_base,
+            flushing_baseline=raw_flush,
             asymmetry_baseline=asym_base,
             head_pitch_baseline=pitch_base,
             head_roll_baseline=roll_base,
-            is_calibrated=True,
+            is_calibrated=self._is_calibrated,
             samples_collected=len(self._ear_samples),
-            duration_s=float(elapsed)
+            duration_s=float(elapsed),
+            ingress_impairment_detected=ingress_flag,
+            ingress_reason=ingress_reason,
         )
+
+    def finalize(self) -> PersonalBaselines:
+        """Lock in calibration and calculate final baseline medians."""
         self._is_calibrated = True
+        self._frozen_baselines = self._compute_metrics()
+        self._frozen_baselines.is_calibrated = True
         return self._frozen_baselines
 
     def get_baselines(self) -> PersonalBaselines:
         """Return current baselines (or default baselines if calibration not yet complete)."""
         if self._frozen_baselines is not None:
             return self._frozen_baselines
-
-        ear_base = float(np.median(self._ear_samples)) if len(self._ear_samples) >= 30 else 0.28
-        mar_base = float(np.median(self._mar_samples)) if len(self._mar_samples) >= 30 else 0.15
-        blink_up_base = float(np.median(self._blink_up_samples)) if len(self._blink_up_samples) >= 3 else 2.5
-        flush_base = float(np.median(self._flushing_samples)) if len(self._flushing_samples) >= 30 else 1.35
-        asym_base = float(np.median(self._asymmetry_samples)) if len(self._asymmetry_samples) >= 30 else 0.0
-        pitch_base = float(np.median(self._pitch_samples)) if len(self._pitch_samples) >= 30 else 0.0
-        roll_base = float(np.median(self._roll_samples)) if len(self._roll_samples) >= 30 else 0.0
-
-        elapsed = (self._last_timestamp - self._start_timestamp) if self._start_timestamp else 0.0
-
-        return PersonalBaselines(
-            ear_baseline=ear_base,
-            mar_baseline=mar_base,
-            blink_upstroke_baseline=blink_up_base,
-            flushing_baseline=flush_base,
-            asymmetry_baseline=asym_base,
-            head_pitch_baseline=pitch_base,
-            head_roll_baseline=roll_base,
-            is_calibrated=self._is_calibrated,
-            samples_collected=len(self._ear_samples),
-            duration_s=float(elapsed)
-        )
+        return self._compute_metrics()
 
     def apply_to(self, extractor: Any, classifier: Optional[Any] = None) -> None:
         """Inject calibrated personal baselines into FeatureExtractor and ImpairmentClassifier instances."""
@@ -197,3 +223,7 @@ class PersonalBaselineCalibrator:
                 classifier.sober_blink_up = b.blink_upstroke_baseline
             if hasattr(classifier, "baseline_asymmetry"):
                 classifier.baseline_asymmetry = b.asymmetry_baseline
+            if hasattr(classifier, "ingress_impairment_detected"):
+                classifier.ingress_impairment_detected = b.ingress_impairment_detected
+            if hasattr(classifier, "ingress_reason"):
+                classifier.ingress_reason = b.ingress_reason

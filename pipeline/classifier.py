@@ -60,6 +60,8 @@ class ImpairmentClassifier:
         self.sober_saccade = sober_saccade_baseline
         self.sober_blink_up = sober_blink_up_baseline
         self.baseline_asymmetry = baseline_asymmetry
+        self.ingress_impairment_detected: bool = False
+        self.ingress_reason: str = ""
 
     def evaluate_static_image(self,
                               frame: np.ndarray,
@@ -150,34 +152,54 @@ class ImpairmentClassifier:
         marker_scores["jaw_slackness"] = jaw_score
 
         # ── 5. Sclera Injection / Redness Index (Bloodshot Eyes) ──
-        sclera_redness = self._extract_sclera_redness(frame, landmarks)
-        if sclera_redness > 1.35:  # [PLACEHOLDER — pending calibration against real data]
-            redness_score = 75.0
-            indicators.append(f"High sclera conjunctival injection/redness ({sclera_redness:.2f}x)")
-        elif sclera_redness > 1.15:  # [PLACEHOLDER — pending calibration against real data]
-            redness_score = 35.0
-            indicators.append(f"Mild sclera redness ({sclera_redness:.2f}x)")
+        is_mono = is_monochrome_frame(frame)
+        if not is_mono:
+            sclera_redness = self._extract_sclera_redness(frame, landmarks)
+            if sclera_redness > 1.35:  # [PLACEHOLDER — pending calibration against real data]
+                redness_score = 75.0
+                indicators.append(f"High sclera conjunctival injection/redness ({sclera_redness:.2f}x)")
+            elif sclera_redness > 1.15:  # [PLACEHOLDER — pending calibration against real data]
+                redness_score = 35.0
+                indicators.append(f"Mild sclera redness ({sclera_redness:.2f}x)")
+            else:
+                redness_score = 0.0
+            marker_scores["sclera_redness"] = redness_score
         else:
-            redness_score = 0.0
-        marker_scores["sclera_redness"] = redness_score
+            marker_scores["sclera_redness"] = 0.0
+            indicators.append("Monochrome/NIR active — sclera redness bypassed and weight redistributed")
 
         # ── Composite Risk Scoring (Weighted Static Formulation) ──
-        # Sclera redness demoted to 5% corroborating weight (non-specific: fatigue/dry eyes/allergies)
-        weights = {
-            "ptosis": 0.50,  # [PLACEHOLDER — pending calibration against real data]
-            "head_slump": 0.25,  # [PLACEHOLDER — pending calibration against real data]
-            "ocular_asymmetry": 0.10,  # [PLACEHOLDER — pending calibration against real data]
-            "jaw_slackness": 0.10,  # [PLACEHOLDER — pending calibration against real data]
-            "sclera_redness": 0.05,  # [PLACEHOLDER — pending calibration against real data]
-        }
-
-        base_risk = sum(marker_scores[k] * weights[k] for k in weights)
+        # Sclera redness carries 5% corroborating weight in visible light.
+        # Under monochrome / NIR, its 5% weight is dynamically redistributed across structural markers.
+        if is_mono:
+            weights = {
+                "ptosis": 0.50 / 0.95,           # ~0.526
+                "head_slump": 0.25 / 0.95,       # ~0.263
+                "ocular_asymmetry": 0.10 / 0.95, # ~0.105
+                "jaw_slackness": 0.10 / 0.95,    # ~0.105
+            }
+            base_risk = sum(marker_scores[k] * weights[k] for k in weights)
+        else:
+            weights = {
+                "ptosis": 0.50,
+                "head_slump": 0.25,
+                "ocular_asymmetry": 0.10,
+                "jaw_slackness": 0.10,
+                "sclera_redness": 0.05,
+            }
+            base_risk = sum(marker_scores[k] * weights[k] for k in weights)
 
         # Co-occurrence compounding: if BOTH eyes are heavily drooping AND head is slumped,
         # depressant CNS inhibition is strongly indicated.
         if marker_scores["ptosis"] >= 60.0 and marker_scores["head_slump"] >= 25.0:  # [PLACEHOLDER — pending calibration against real data]
             base_risk += 15.0  # [PLACEHOLDER — pending calibration against real data]
             indicators.append("Compounding depressant indicators: Co-occurring ptosis and head slump")
+
+        # Ingress alert: if driver biometrics at startup violated sober physiological bounds
+        if self.ingress_impairment_detected:
+            base_risk = max(base_risk, 55.0)
+            reason_msg = f" ({self.ingress_reason})" if self.ingress_reason else ""
+            indicators.insert(0, f"CRITICAL INGRESS ALERT: Driver biometrics at startup violated sober human physiological bounds{reason_msg}")
 
         total_risk = float(np.clip(base_risk, 0.0, 100.0))
 
@@ -378,11 +400,21 @@ class ImpairmentClassifier:
         inv_risk = sum(marker_scores[k] * inv_weights[k] for k in inv_weights)
 
         # Autonomic corroboration bonus: only applied if base involuntary risk is already present (>= 20%)
+        # Note on Seated Postural Sway: Without differential CAN-bus IMU subtraction of vehicle cabin
+        # vibration and suspension harmonics (0.5-2.0 Hz), seated head sway cannot be distinguished from
+        # rough road / chassis inputs. Therefore, it carries 0% authority in lockout and acts strictly as a corroborating bonus.
         if inv_risk >= 20.0:
             if marker_scores["postural_sway"] >= 35.0:
                 inv_risk += 5.0
             if marker_scores["facial_flushing"] >= 35.0:
                 inv_risk += 5.0
+
+        # Ingress alert: if driver biometrics at startup violated sober physiological bounds
+        if self.ingress_impairment_detected:
+            inv_risk = max(inv_risk, 55.0)
+            reason_msg = f" ({self.ingress_reason})" if self.ingress_reason else ""
+            indicators.insert(0, f"CRITICAL INGRESS ALERT: Driver biometrics at startup violated sober human physiological bounds{reason_msg}")
+
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
         # Voluntary masking magnitude

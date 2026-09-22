@@ -119,20 +119,25 @@ class BayesianEvidenceAccumulator:
         current_p = self.posterior
 
         # Check sustained duration for ISO 26262 lockout confirmation
-        if current_p >= self.lockout_threshold_prob:
+        if self._lockout_armed:
+            # Latched state: Once confirmed, lockout remains latched across subsequent frames
+            # to prevent a driver from clearing an armed interlock by briefly opening eyes or glancing.
+            # Can only be unlatched via unlatch(park_gear_confirmed=True).
+            self._sustained_time_s = max(self.lockout_sustained_sec, self._sustained_time_s)
+        elif current_p >= self.lockout_threshold_prob:
             self._sustained_time_s += dt
+            if self._sustained_time_s >= self.lockout_sustained_sec:
+                self._lockout_armed = True
         else:
-            # Drop sustained timer with modest decay rather than instant zeroing to absorb single-frame blips
+            # Drop sustained timer with leaky integrator decay (-2.0 * dt) rather than instant zeroing,
+            # preventing single-frame chattering/blips at e.g. 14.2s from wiping accumulated evidence.
             self._sustained_time_s = max(0.0, self._sustained_time_s - 2.0 * dt)
-
-        if self._sustained_time_s >= self.lockout_sustained_sec:
-            self._lockout_armed = True
 
         advisory = bool(current_p >= self.warning_threshold_prob)
 
         status = "SOBER"
         if self._lockout_armed:
-            status = f"CRITICAL LOCKOUT ARMED (P={current_p*100:.2f}%, {self._sustained_time_s:.1f}s sustained)"
+            status = f"CRITICAL LOCKOUT ARMED (P={current_p*100:.2f}%, {self._sustained_time_s:.1f}s sustained [LATCHED])"
         elif advisory:
             status = f"IMPAIRMENT WARNING (P={current_p*100:.1f}%, confirming... {self._sustained_time_s:.1f}/{self.lockout_sustained_sec:.0f}s)"
 
@@ -144,3 +149,20 @@ class BayesianEvidenceAccumulator:
             advisory_warning=advisory,
             status_summary=status
         )
+
+    def unlatch(self, park_gear_confirmed: bool = False) -> bool:
+        """Unlatch an armed lockout state.
+
+        Per ISO 26262 ASIL-D functional safety, unlatching an automotive engine lockout
+        requires explicit confirmation that the vehicle is in PARK gear or engine is cycled off.
+
+        Args:
+            park_gear_confirmed: Must be True (e.g. from vehicle CAN bus) to release latch.
+
+        Returns:
+            True if successfully unlatched, False if rejected.
+        """
+        if park_gear_confirmed:
+            self.reset()
+            return True
+        return False

@@ -1,0 +1,98 @@
+================================================================================
+       DRIVER MONITORING SYSTEM (DMS) — FEATURE EXTRACTION REPORT
+================================================================================
+Generated At          : 2026-09-22 16:37:01
+Input Source File     : captured_snapshot.jpg (640x480 px)
+Face Mesh Status      : DETECTED (478 3D landmarks with iris refinement)
+Overall Classification: SOBER
+Impairment Risk Score : 0.0%
+Diagnostic Confidence : 95.0%
+--------------------------------------------------------------------------------
+
+1. EYE & DROWSINESS BIOMARKERS (EAR & CLOSURE)
+  * Left Eye Aspect Ratio (EAR)       : 0.3539      [Normal Awake: 0.28 - 0.35]
+  * Right Eye Aspect Ratio (EAR)      : 0.3398      [Normal Awake: 0.28 - 0.35]
+  * Average Eye Aspect Ratio (EAR)    : 0.3469      [Droop Alert: < 0.22, Closed: < 0.12]
+  * Eyelid Asymmetry (|dEAR|)         : 0.0140      [Normal: < 0.035, Baseline Subtracted: 0.000]
+  * Instantaneous Blink Detected      : False
+  * Microsleep Episode Detected       : False     [Threshold: >= 15 frames / 500ms]
+  * PERCLOS (% Eyes Closed Window)    : 0.00%      [Drowsiness Threshold: > 15.0%]
+
+2. MOUTH & YAWN BIOMARKERS (MAR)
+  * Mouth Aspect Ratio (MAR)          : 0.0153      [Closed Lip: < 0.20, Yawn Alert: > 0.60]
+  * Yawn Episode Detected             : False     [Threshold: MAR > 0.60 for >= 30 frames]
+
+3. 3D HEAD POSE & CERVICAL TONE (PnP)
+  * Head Pitch (Nodding / Slump)      : -1.63 deg   [Slump Alert: < -14.0 deg]
+  * Head Yaw (Horizontal Turn)        : +5.45 deg   [FOV Gating Limit: +/- 35.0 deg]
+  * Head Roll (Lateral Tilt)          : -2.44 deg   [Tilt Alert: > 14.0 deg]
+
+4. IRIS CENTROID & GAZE TRACKING (NORMALIZED [-1.0, 1.0])
+  * Left Iris Offset (X, Y)           : (+1.0000, +0.3413)
+  * Right Iris Offset (X, Y)          : (+1.0000, -0.3387)
+
+5. ALCOHOL-DISCRIMINATING OCULOMOTOR KINEMATICS (Fransson et al. 2010)
+  * Saccadic Angular Velocity         : 0.00 deg/s   [Normal Peak: 200 - 900 deg/s]
+  * Saccade In-Progress Trigger       : False     [Hysteresis: Onset > 30, Offset < 15]
+  * Saccade Fixation Latency          : 0.0 ms      [Inter-saccadic reaction time]
+  * Blink Downstroke Velocity         : 0.000 EAR/s   [Involuntary eyelid downstroke]
+  * Blink Upstroke Reopening Velocity : 0.000 EAR/s   [Involuntary levator upstroke]
+  * Gaze Yaw Dispersion (sigma_yaw)   : 0.0000        [Road Tunneling Alert: < 0.030]
+
+6. ADVANCED BRAINSTEM & REFLEX BIOMARKERS
+  * Gaze-Evoked Nystagmus (GEN)       : False     [Romano et al. 2017]
+  * GEN Corrective Fast Beat Count    : 0
+  * GEN Centripetal Drift Speed       : 0.00 deg/s   [Diagnostic Slip: 2.0 - 18.0 deg/s]
+  * Smooth Pursuit Fragmentation      : 0.0%      [Normal: ~0%, Impaired: > 20%]
+  * Binocular Vergence Angle          : +30.00 deg  [Positive = Convergence]
+  * Lack of Convergence (LOC - DRE)   : False     [Strabismus Alert: < -3.5 deg]
+  * VOR Micro-Compensation Gain       : 1.000        [Normal: ~0.85 - 1.05, Impaired: < 0.70]
+
+7. SCLERA VASCULAR INJECTION (BLOODSHOT INDEX)
+  * Sclera Redness Ratio (R/(G+B))    : 1.032        [Normal: ~1.00, Bloodshot: > 1.20]
+
+8. NOISE MITIGATION & VEHICLE GATING STATE
+  * Head Pose Valid (Within Limits)   : True
+  * Software IMU Pothole Gated        : False     [Linear Accel > 2.5 m/s2 shock]
+  * Active Gating Reason              : None (Operating Normally)
+================================================================================
+
+9. RAW MACHINE-LEARNING TENSOR RECORD (JSON FORMAT)
+{
+  "timestamp": 0.0,
+  "frame_id": 1,
+  "ear_left": 0.35386307160777325,
+  "ear_right": 0.3398426678959091,
+  "ear_avg": 0.34685286975184115,
+  "mar": 0.015331348636890773,
+  "perclos": 0.0,
+  "left_iris_x": 1.0,
+  "left_iris_y": 0.3413393379510197,
+  "right_iris_x": 1.0,
+  "right_iris_y": -0.33874794804546116,
+  "head_yaw": 5.4486883872781435,
+  "head_pitch": -1.6331574313633028,
+  "head_roll": -2.436325519635949,
+  "saccade_velocity": 0.0,
+  "saccade_latency_ms": 0.0,
+  "blink_closing_velocity": 0.0,
+  "blink_opening_velocity": 0.0,
+  "gaze_yaw_dispersion": 0.0,
+  "gen_slow_phase_vel": 0.0,
+  "gen_beat_count": 0,
+  "pursuit_fragmentation_ratio": 0.0,
+  "vergence_angle_deg": 30.0,
+  "vor_gain": 1.0,
+  "blink_detected": false,
+  "microsleep_detected": false,
+  "yawn_detected": false,
+  "saccade_detected": false,
+  "gen_detected": false,
+  "lack_of_convergence": false,
+  "imu_gated": false,
+  "risk_score": 0.0,
+  "classification": "SOBER",
+  "confidence": 0.95
+}
+
+================================================================================

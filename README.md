@@ -1,10 +1,34 @@
 # The Overclocked — Driver Monitoring System (DMS)
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Tests Passing](https://img.shields.io/badge/tests-59%2F59%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-66%2F66%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 An edge-optimized, non-intrusive computer vision pipeline designed to quantify driver drowsiness, neurological fatigue, and alcohol-induced impairment from monochrome NIR (near-infrared) or RGB driver-facing camera streams at $\ge 30\text{ fps}$ on standard CPU hardware.
+
+---
+
+## Voluntary vs. Involuntary Facial & Ocular Biomarkers Under Intoxication
+
+For a passive, non-cooperative driver monitoring system, distinguishing between **involuntary** and **voluntary** signals is essential to prevent gaming:
+* **Section A — Involuntary Biomarkers (High Evidential Weight for Lockout)**:
+  - **Horizontal Gaze Nystagmus (HGN / GEN)**: Leaky neural integrator at lateral gaze ($\ge 2$ corrective beats, $2\text{--}18^\circ/\text{s}$ centripetal drift).
+  - **Smooth Pursuit Fragmentation**: Breakdown into catch-up saccades ($> 15\%$).
+  - **Vestibulo-Ocular Reflex (VOR) Gain**: Micro-counter-rotation depression ($< 0.70$ vs normal $0.85\text{--}1.05$).
+  - **Binocular Vergence & LOC**: Lack of Convergence (DRE strabismus sign, vergence $<-3.5^\circ$).
+  - **Involuntary Blink Upstroke Speed**: Sluggish levator palpebrae reopening ($< 1.2\text{ EAR/s}$).
+  - **Low-Frequency Postural Sway**: Cerebellar micro-tremor and vestibular head wobble ($\sqrt{\sigma_{\text{pitch}}^2 + \sigma_{\text{roll}}^2} > 1.40^\circ$).
+  - **Facial Flushing / Vasodilation**: Micro-vascular perfusion in cheek landmarks ($R / \frac{G+B}{2} > 1.15$).
+* **Section B — Voluntary & Semi-Voluntary Changes (Masking & Gaming Indicators)**:
+  - **Deliberate Blink Suppression**: Actively fighting eyelid droop with prolonged inter-blink intervals ($> 6.0\text{s}$).
+  - **Voluntary Eye-Widening Spikes**: Transient frontalis/levator contraction surges ($\text{EAR} > 1.25\times \text{baseline}$) following droop episodes.
+  - **Compensatory Staring Fixation**: Unbroken central gaze without natural exploratory micro-saccades ($> 3.5\text{s}$).
+  - **Rigid Head Stabilization**: Unnatural cervical muscle locking to freeze natural head sway ($\text{sway} < 0.12^\circ$).
+* **Anti-Masking Divergence Metric ($M_{\text{mask}}$)**:
+  $$M_{\text{mask}} = 100 \times \min\left(1.0, 2.0 \cdot I_{\text{invol}} \cdot V_{\text{mask}}\right)$$
+  When both involuntary impairment ($I_{\text{invol}}$) and voluntary suppression ($V_{\text{mask}}$) co-occur, $M_{\text{mask}} \ge 50.0\%$ triggers an anti-masking alert and confirms conscious gaming.
+
+---
 
 ---
 
@@ -150,22 +174,35 @@ python main.py
 python main.py --source /path/to/video.mp4 --save-csv
 ```
 
-### 3. Run Static Facial Assessment
+### 3. Automated Video Feature Extraction & Anti-Masking Report
+Processes any recorded video (MP4, AVI, MOV) to extract Section A Involuntary reflexes, Section B Voluntary behaviors, and Anti-Masking Divergence ($M_{\text{mask}}$):
 ```bash
+# Extract features and generate reports
+python extract_video_features.py --video /path/to/video.mp4 --output-dir .
+```
+Generates 3 forensic artifacts:
+* `video_features_report.txt` — Formatted clinical & lockout audit report separating Section A vs Section B.
+* `video_features.csv` — Full time-series CSV with all frame-by-frame biomarkers.
+* `video_features_summary.json` — Machine-readable summary metrics and ML risk payload.
+
+### 4. Run Static Facial Assessment & Feature Extraction
+```bash
+# Evaluate photo and export reports (TXT, JSON, CSV)
+python export_feature_output.py
 python inspect_driver.py --image path/to/photo.jpg
 ```
 
-### 4. Run Batch Training Data Ingestion (Toyota IDD)
+### 5. Run Batch Training Data Ingestion (Toyota IDD)
 ```bash
 python idd_ingest.py --idd-root /path/to/dataset --output-dir ./idd_output/
 ```
 
-### 5. Run the Automated Test Suite
+### 6. Run the Automated Test Suite
 ```bash
 pytest tests/ -v
 ```
 
-All 59 unit and integration tests execute in $<1.0\text{ second}$.
+All 66 unit and integration tests execute in $<1.6\text{ seconds}$.
 
 ---
 

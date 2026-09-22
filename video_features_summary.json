@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "video_path": "C:\\Users\\Akhileshwar Subbiah\\.gemini\\antigravity\\scratch\\driver-monitor\\tests\\sample_driver_video.mp4",
+    "analysis_timestamp": "2026-09-22 19:11:34",
+    "resolution": "640x480",
+    "source_fps": 30.0,
+    "total_processed_frames": 120,
+    "face_detected_frames": 120,
+    "face_detection_rate_pct": 100.0,
+    "processing_time_sec": 3.48,
+    "processing_speed_fps": 34.5
+  },
+  "overall_verdict": {
+    "final_classification": "SOBER",
+    "lockout_triggered": false,
+    "lockout_trigger_frames": 0,
+    "lockout_trigger_pct": 0.0,
+    "mean_involuntary_risk_pct": 13.6,
+    "max_involuntary_risk_pct": 14.0,
+    "mean_masking_divergence_pct": 1.0,
+    "max_masking_divergence_pct": 8.0,
+    "masking_detected_frames": 0
+  },
+  "section_a_involuntary_biomarkers": {
+    "mean_vor_gain": 0.099,
+    "mean_pursuit_fragmentation_ratio": 0.0,
+    "gaze_evoked_nystagmus_frames": 0,
+    "lack_of_convergence_frames": 0,
+    "mean_head_postural_sway_deg": 0.809,
+    "mean_facial_flushing_ratio": 1.356,
+    "mean_ear": 0.3419
+  },
+  "section_b_voluntary_masking_biomarkers": {
+    "deliberate_blink_suppression_frames": 0,
+    "voluntary_eye_widening_spikes": 0,
+    "max_compensatory_stare_duration_s": 3.97,
+    "rigid_head_stabilization_frames": 0
+  },
+  "classification_breakdown": {
+    "sober_frames": 120,
+    "mild_impairment_frames": 0,
+    "high_risk_intoxicated_frames": 0
+  }
+}

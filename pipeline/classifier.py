@@ -34,6 +34,10 @@ class ImpairmentAssessment:
     primary_indicators: List[str] = field(default_factory=list)
     marker_scores: Dict[str, float] = field(default_factory=dict)
     summary_text: str = ""
+    involuntary_risk_score: float = 0.0
+    voluntary_masking_score: float = 0.0
+    masking_divergence: float = 0.0
+    lockout_recommended: bool = False
 
 
 class ImpairmentClassifier:
@@ -297,26 +301,107 @@ class ImpairmentClassifier:
         else:
             marker_scores["microsleep"] = 0.0
 
-        weights = {
-            "gen": 0.22,  # [PLACEHOLDER — pending calibration against real data]
-            "pursuit_fragmentation": 0.18,  # [PLACEHOLDER — pending calibration against real data]
-            "blink_velocity": 0.18,  # [PLACEHOLDER — pending calibration against real data]
-            "vor_depression": 0.12,  # [PLACEHOLDER — pending calibration against real data]
-            "lack_of_convergence": 0.10,  # [PLACEHOLDER — pending calibration against real data]
-            "perclos": 0.10,  # [PLACEHOLDER — pending calibration against real data]
-            "gaze_tunneling": 0.05,  # [PLACEHOLDER — pending calibration against real data]
-            "microsleep": 0.05,  # [PLACEHOLDER — pending calibration against real data]
+        # 9. Low-Frequency Postural Sway (Section A Involuntary Micro-Tremor)
+        if features.head_postural_sway > 1.8:
+            marker_scores["postural_sway"] = 80.0
+            indicators.append(f"Pronounced postural sway / micro-tremor (σ={features.head_postural_sway:.2f}°)")
+        elif features.head_postural_sway > 1.2:
+            marker_scores["postural_sway"] = 45.0
+            indicators.append(f"Mild postural sway (σ={features.head_postural_sway:.2f}°)")
+        else:
+            marker_scores["postural_sway"] = 0.0
+
+        # 10. Facial Flushing / Cheek Vasodilation (Section A Involuntary)
+        if features.facial_flushing_ratio > 1.25:
+            marker_scores["facial_flushing"] = 70.0
+            indicators.append(f"Facial vasodilation / cheek flushing ({features.facial_flushing_ratio:.2f}x)")
+        elif features.facial_flushing_ratio > 1.15:
+            marker_scores["facial_flushing"] = 35.0
+            indicators.append(f"Mild cheek flushing ({features.facial_flushing_ratio:.2f}x)")
+        else:
+            marker_scores["facial_flushing"] = 0.0
+
+        # ── Section B: Voluntary & Masking Behaviors ──
+        # 11. Voluntary Eye-Widening Spikes (Levator/Frontalis compensation)
+        if features.voluntary_eye_widening:
+            marker_scores["voluntary_eye_widening"] = 75.0
+            indicators.append("Voluntary eye-widening spike (transient ptosis counter-effort)")
+        else:
+            marker_scores["voluntary_eye_widening"] = 0.0
+
+        # 12. Deliberate Blink Suppression
+        if features.deliberate_blink_suppression:
+            marker_scores["deliberate_blink_suppression"] = 70.0
+            indicators.append("Deliberate blink suppression (prolonged inter-blink interval fighting droop)")
+        else:
+            marker_scores["deliberate_blink_suppression"] = 0.0
+
+        # 13. Compensatory Stare Fixation
+        if features.stare_fixation_duration_s >= 3.5:
+            marker_scores["compensatory_stare"] = 65.0
+            indicators.append(f"Compensatory stare fixation ({features.stare_fixation_duration_s:.1f}s unbroken gaze)")
+        else:
+            marker_scores["compensatory_stare"] = 0.0
+
+        # 14. Rigid Head Stabilization
+        if features.rigid_head_stabilization:
+            marker_scores["rigid_head_stabilization"] = 60.0
+            indicators.append("Rigid head stabilization (unnatural neck tension suppressing sway)")
+        else:
+            marker_scores["rigid_head_stabilization"] = 0.0
+
+        # ── Anti-Masking Divergence Metric (M_mask) ──
+        masking_divergence = features.masking_divergence_score
+        marker_scores["masking_divergence"] = masking_divergence
+        if features.masking_detected or masking_divergence >= 50.0:
+            indicators.append(
+                f"Anti-Masking Alert: High discordance between conscious effort and involuntary decay ({masking_divergence:.1f}% M_mask)"
+            )
+
+        # ── Lockout & Risk Weighting (Section A Anchored) ──
+        # Primary involuntary weights (unfakeable physiological signals)
+        inv_weights = {
+            "gen": 0.22,
+            "pursuit_fragmentation": 0.18,
+            "blink_velocity": 0.18,
+            "vor_depression": 0.12,
+            "lack_of_convergence": 0.10,
+            "perclos": 0.10,
+            "gaze_tunneling": 0.05,
+            "microsleep": 0.05,
         }
+        inv_risk = sum(marker_scores[k] * inv_weights[k] for k in inv_weights)
 
-        total_risk = sum(marker_scores[k] * weights[k] for k in weights)
-        total_risk = float(np.clip(total_risk, 0.0, 100.0))
+        # Autonomic corroboration
+        if marker_scores["postural_sway"] >= 45.0:
+            inv_risk += 5.0
+        if marker_scores["facial_flushing"] >= 35.0:
+            inv_risk += 5.0
+        inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
-        if total_risk >= 50.0:  # [PLACEHOLDER — pending calibration against real data]
+        # Voluntary masking magnitude
+        vol_keys = ["voluntary_eye_widening", "deliberate_blink_suppression", "compensatory_stare", "rigid_head_stabilization"]
+        vol_scores = [marker_scores[k] for k in vol_keys if marker_scores[k] > 0]
+        vol_masking = float(np.mean(vol_scores)) if vol_scores else 0.0
+
+        # Lockout Decision: Anchored on Section A Involuntary evidence + Anti-masking divergence
+        lockout_recommended = False
+        if inv_risk >= 50.0:
             classification = "HIGH_RISK_INTOXICATED"
-        elif total_risk >= 25.0:  # [PLACEHOLDER — pending calibration against real data]
+            lockout_recommended = True
+            total_risk = inv_risk
+        elif features.masking_detected and inv_risk >= 35.0:
+            classification = "HIGH_RISK_INTOXICATED"
+            lockout_recommended = True
+            total_risk = max(inv_risk, masking_divergence)
+        elif inv_risk >= 25.0 or (vol_masking >= 40.0 and inv_risk >= 20.0):
             classification = "MILD_IMPAIRMENT"
+            total_risk = max(inv_risk, 25.0)
         else:
             classification = "SOBER"
+            total_risk = inv_risk
+
+        total_risk = float(np.clip(total_risk, 0.0, 100.0))
 
         return ImpairmentAssessment(
             risk_score=total_risk,
@@ -324,7 +409,11 @@ class ImpairmentClassifier:
             confidence=0.88,  # [PLACEHOLDER — pending calibration against real data]
             primary_indicators=indicators,
             marker_scores=marker_scores,
-            summary_text=f"Temporal Risk: {total_risk:.1f}% | {classification}"
+            summary_text=f"Temporal Risk: {total_risk:.1f}% | {classification}" + (" [LOCKOUT TRIGGERED]" if lockout_recommended else ""),
+            involuntary_risk_score=inv_risk,
+            voluntary_masking_score=vol_masking,
+            masking_divergence=masking_divergence,
+            lockout_recommended=lockout_recommended
         )
 
     @staticmethod

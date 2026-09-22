@@ -108,3 +108,15 @@ CANONICAL_FACE_3D = np.array([
     [-150.0,  150.0,   125.0],       # Right mouth (idx 61)
     [150.0,   150.0,   125.0],       # Left mouth (idx 291)
 ], dtype=np.float64)
+
+# ═══════════════════════════════════════════════════════════════════
+# Cheek Landmarks for Facial Flushing / Vasodilation
+# ═══════════════════════════════════════════════════════════════════
+# Subject's RIGHT cheek (viewer's left)
+RIGHT_CHEEK = [117, 118, 101, 205, 50]
+
+# Subject's LEFT cheek (viewer's right)
+LEFT_CHEEK = [346, 347, 330, 425, 280]
+
+CHEEK_LANDMARKS = RIGHT_CHEEK + LEFT_CHEEK
+

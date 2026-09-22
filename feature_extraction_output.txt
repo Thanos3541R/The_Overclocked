@@ -1,7 +1,7 @@
 ================================================================================
        DRIVER MONITORING SYSTEM (DMS) — FEATURE EXTRACTION REPORT
 ================================================================================
-Generated At          : 2026-09-22 16:37:01
+Generated At          : 2026-09-22 17:48:07
 Input Source File     : captured_snapshot.jpg (640x480 px)
 Face Mesh Status      : DETECTED (478 3D landmarks with iris refinement)
 Overall Classification: SOBER
@@ -39,7 +39,7 @@ Diagnostic Confidence : 95.0%
   * Blink Upstroke Reopening Velocity : 0.000 EAR/s   [Involuntary levator upstroke]
   * Gaze Yaw Dispersion (sigma_yaw)   : 0.0000        [Road Tunneling Alert: < 0.030]
 
-6. ADVANCED BRAINSTEM & REFLEX BIOMARKERS
+6. SECTION A — INVOLUNTARY BIOMARKERS (UNFAKEABLE REFLEXES)
   * Gaze-Evoked Nystagmus (GEN)       : False     [Romano et al. 2017]
   * GEN Corrective Fast Beat Count    : 0
   * GEN Centripetal Drift Speed       : 0.00 deg/s   [Diagnostic Slip: 2.0 - 18.0 deg/s]
@@ -47,17 +47,29 @@ Diagnostic Confidence : 95.0%
   * Binocular Vergence Angle          : +30.00 deg  [Positive = Convergence]
   * Lack of Convergence (LOC - DRE)   : False     [Strabismus Alert: < -3.5 deg]
   * VOR Micro-Compensation Gain       : 1.000        [Normal: ~0.85 - 1.05, Impaired: < 0.70]
+  * Head Postural Sway (Micro-Tremor) : 0.00 deg       [Sway Alert: > 1.40 deg]
+  * Facial Flushing / Vasodilation    : 1.039        [Cheek Chromaticity Ratio R/(G+B)]
 
-7. SCLERA VASCULAR INJECTION (BLOODSHOT INDEX)
+7. SECTION B — VOLUNTARY & MASKABLE BEHAVIORS (GAMING INDICATORS)
+  * Deliberate Blink Suppression      : False     [Inter-blink interval > 6.0s]
+  * Voluntary Eye-Widening Spike      : False     [Frontalis/levator contraction]
+  * Compensatory Stare Duration       : 0.0 s       [Rigid fixation > 3.5s alert]
+  * Rigid Head Stabilization Effort   : False     [Conscious neck muscle locking]
+
+8. ANTI-MASKING DIVERGENCE ANALYSIS (M_mask)
+  * Masking Divergence Score (M_mask) : 0.0%      [Discordance between effort & reflex]
+  * Active Masking Attempt Detected   : False     [Threshold: M_mask >= 50.0%]
+
+9. SCLERA VASCULAR INJECTION (BLOODSHOT INDEX)
   * Sclera Redness Ratio (R/(G+B))    : 1.032        [Normal: ~1.00, Bloodshot: > 1.20]
 
-8. NOISE MITIGATION & VEHICLE GATING STATE
+10. NOISE MITIGATION & VEHICLE GATING STATE
   * Head Pose Valid (Within Limits)   : True
   * Software IMU Pothole Gated        : False     [Linear Accel > 2.5 m/s2 shock]
   * Active Gating Reason              : None (Operating Normally)
 ================================================================================
 
-9. RAW MACHINE-LEARNING TENSOR RECORD (JSON FORMAT)
+11. RAW MACHINE-LEARNING TENSOR RECORD (JSON FORMAT)
 {
   "timestamp": 0.0,
   "frame_id": 1,
@@ -83,6 +95,14 @@ Diagnostic Confidence : 95.0%
   "pursuit_fragmentation_ratio": 0.0,
   "vergence_angle_deg": 30.0,
   "vor_gain": 1.0,
+  "head_postural_sway": 0.0,
+  "facial_flushing_ratio": 1.038724566141361,
+  "deliberate_blink_suppression": false,
+  "voluntary_eye_widening": false,
+  "stare_fixation_duration_s": 0.0,
+  "rigid_head_stabilization": false,
+  "masking_divergence_score": 0.0,
+  "masking_detected": false,
   "blink_detected": false,
   "microsleep_detected": false,
   "yawn_detected": false,

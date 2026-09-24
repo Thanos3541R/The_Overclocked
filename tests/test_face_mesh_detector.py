@@ -46,6 +46,24 @@ def create_synthetic_landmarks(cx: float = 640.0, cy: float = 360.0,
     return lms
 
 
+def get_real_test_frame() -> np.ndarray:
+    """Return a real driver face frame from inspection_result.jpg or sample_driver_video.mp4."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    test_img_path = os.path.join(repo_root, "inspection_result.jpg")
+    if os.path.exists(test_img_path):
+        img = cv2.imread(test_img_path)
+        if img is not None:
+            return img
+    video_path = os.path.join(repo_root, "tests", "sample_driver_video.mp4")
+    if os.path.exists(video_path):
+        cap = cv2.VideoCapture(video_path)
+        ret, frame = cap.read()
+        cap.release()
+        if ret and frame is not None:
+            return frame
+    pytest.skip("Neither inspection_result.jpg nor sample_driver_video.mp4 available")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. AdaptiveROITracker Bounding Box and EMA Smoothing Tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -489,13 +507,7 @@ class TestFaceMeshDetectorContract:
 
     def test_detect_returns_correct_shape_on_real_image(self):
         """detect() on real image must return (478, 3) numpy array with float64 dtype."""
-        test_img_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inspection_result.jpg"
-        )
-        if not os.path.exists(test_img_path):
-            pytest.skip("inspection_result.jpg not present in repo root")
-
-        img = cv2.imread(test_img_path)
+        img = get_real_test_frame()
         detector = FaceMeshDetector()
         landmarks = detector.detect(img)
 
@@ -513,13 +525,7 @@ class TestFaceMeshDetectorContract:
 
     def test_detect_grayscale_frame(self):
         """Grayscale frames must be processed without error."""
-        test_img_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inspection_result.jpg"
-        )
-        if not os.path.exists(test_img_path):
-            pytest.skip("inspection_result.jpg not present in repo root")
-
-        bgr = cv2.imread(test_img_path)
+        bgr = get_real_test_frame()
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         detector = FaceMeshDetector()
         landmarks = detector.detect(gray)
@@ -725,13 +731,7 @@ class TestTrackerRobustnessAndEdgeCases:
 
     def test_refine_landmarks_false_returns_468_shape(self):
         """When refine_landmarks=False, detector returns (468, 3) matching n_landmarks."""
-        test_img_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inspection_result.jpg"
-        )
-        if not os.path.exists(test_img_path):
-            pytest.skip("inspection_result.jpg not present")
-
-        img = cv2.imread(test_img_path)
+        img = get_real_test_frame()
         detector = FaceMeshDetector(refine_landmarks=False)
         assert detector.n_landmarks == 468
         landmarks = detector.detect(img)

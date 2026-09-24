@@ -54,32 +54,52 @@ class LightingNormalizer:
         ], dtype=np.uint8)
         return table
 
-    def process(self, frame: np.ndarray) -> np.ndarray:
+    def process(self, frame: np.ndarray, return_rgb: bool = False) -> np.ndarray:
         """Apply lighting normalization to a frame.
 
         Args:
             frame: Input frame (BGR color or single-channel grayscale).
+            return_rgb: If True, returns normalized frame in RGB format
+                        (optimized single-pass conversion for MediaPipe input).
 
         Returns:
-            Normalized frame in the same format as input.
+            Normalized frame in the requested format (RGB if return_rgb=True,
+            otherwise matching input color format).
         """
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0 or frame.ndim not in (2, 3):
+            return frame
+
         # ── Grayscale / NIR path ──
-        if len(frame.shape) == 2:
-            enhanced = self.clahe.apply(frame)
-            mean_lum = enhanced.mean()
+        if len(frame.shape) == 2 or (len(frame.shape) == 3 and frame.shape[2] == 1):
+            gray_input = frame if len(frame.shape) == 2 else frame[:, :, 0]
+            if gray_input.dtype != np.uint8:
+                if np.issubdtype(gray_input.dtype, np.floating) and np.nanmax(gray_input) <= 1.0:
+                    gray_input = (gray_input * 255.0)
+                gray_input = np.clip(gray_input, 0, 255).astype(np.uint8)
+            enhanced = self.clahe.apply(gray_input)
+            mean_lum = float(enhanced.mean())
             if mean_lum < self.low_light_threshold:
                 lut = self._lut_dark if mean_lum < 40.0 else self._lut_dim
                 enhanced = cv2.LUT(enhanced, lut)
+            if return_rgb:
+                return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)
             return enhanced
 
-        # ── BGR color path ──
-        yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+        # ── BGR color path (single-pass CLAHE + Y-LUT + conversion) ──
+        color_frame = frame
+        if color_frame.dtype != np.uint8:
+            if np.issubdtype(color_frame.dtype, np.floating) and np.nanmax(color_frame) <= 1.0:
+                color_frame = (color_frame * 255.0)
+            color_frame = np.clip(color_frame, 0, 255).astype(np.uint8)
+
+        yuv = cv2.cvtColor(color_frame, cv2.COLOR_BGR2YUV)
         yuv[:, :, 0] = self.clahe.apply(yuv[:, :, 0])
-        mean_lum = yuv[:, :, 0].mean()
-        enhanced = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+        mean_lum = float(yuv[:, :, 0].mean())
 
         if mean_lum < self.low_light_threshold:
             lut = self._lut_dark if mean_lum < 40.0 else self._lut_dim
-            enhanced = cv2.LUT(enhanced, lut)
+            yuv[:, :, 0] = cv2.LUT(yuv[:, :, 0], lut)
 
-        return enhanced
+        if return_rgb:
+            return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB)
+        return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)

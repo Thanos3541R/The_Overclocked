@@ -225,7 +225,16 @@ def extract_video_features(video_path: str,
                       f"Bayes Confirmed: {b_state.lockout_confirmed}")
 
     finally:
-        cap.release()
+        if 'cap' in locals() and hasattr(cap, "release"):
+            try:
+                cap.release()
+            except Exception:
+                pass
+        if 'detector' in locals() and hasattr(detector, "close"):
+            try:
+                detector.close()
+            except Exception:
+                pass
         cv2.destroyAllWindows()
 
     elapsed = time.time() - start_time

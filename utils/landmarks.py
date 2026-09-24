@@ -102,11 +102,11 @@ INNER_LIP_LOWER = [308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 78]
 # Coordinates aligned with OpenCV camera frame (+X right, +Y down towards chin, +Z away into face)
 CANONICAL_FACE_3D = np.array([
     [0.0,      0.0,      0.0],       # Nose tip (idx 4)
-    [0.0,    330.0,     65.0],       # Chin (idx 152)
-    [-225.0, -170.0,   135.0],       # Right eye outer (idx 33)
-    [225.0,  -170.0,   135.0],       # Left eye outer (idx 263)
-    [-150.0,  150.0,   125.0],       # Right mouth (idx 61)
-    [150.0,   150.0,   125.0],       # Left mouth (idx 291)
+    [0.0,     73.3,     14.4],       # Chin (idx 152)
+    [-50.0,  -37.8,     30.0],       # Right eye outer (idx 33) - 100mm outer bi-canthal width
+    [50.0,   -37.8,     30.0],       # Left eye outer (idx 263)
+    [-33.3,   33.3,     27.8],       # Right mouth (idx 61)
+    [33.3,    33.3,     27.8],       # Left mouth (idx 291)
 ], dtype=np.float64)
 
 # ═══════════════════════════════════════════════════════════════════

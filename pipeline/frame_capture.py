@@ -8,13 +8,15 @@ Handles:
 Auto-detects input type and sets the `is_grayscale` flag accordingly.
 """
 import sys
+import threading
+import time
 import cv2
 import numpy as np
 from typing import Optional, Tuple, Union
 
 
 class FrameCapture:
-    """Polymorphic video capture abstraction."""
+    """Polymorphic video capture abstraction with threaded async capture for live cameras."""
 
     def __init__(self, source: Union[int, str] = 0,
                  width: int = 1280, height: int = 720):
@@ -31,6 +33,8 @@ class FrameCapture:
             source = int(source.strip())
             self.source = source
             is_camera = True
+
+        self.is_camera = is_camera
 
         if is_camera:
             if sys.platform.startswith("win"):
@@ -52,6 +56,7 @@ class FrameCapture:
         # Read one test frame to detect grayscale vs color
         ret, test_frame = self.cap.read()
         if not ret:
+            self.cap.release()
             raise RuntimeError(f"Cannot read from video source: {source}")
 
         self.is_grayscale = (len(test_frame.shape) == 2 or
@@ -70,6 +75,32 @@ class FrameCapture:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         self._frame_count = 0
+        self._lock = threading.Lock()
+        self._running = False
+        self._latest_frame: Optional[np.ndarray] = test_frame.copy()
+        self._thread: Optional[threading.Thread] = None
+
+        if self.is_camera:
+            self._running = True
+            self._thread = threading.Thread(target=self._capture_worker, daemon=True)
+            self._thread.start()
+
+    def _capture_worker(self):
+        """Asynchronous background worker continuously polling live camera frames."""
+        while self._running:
+            try:
+                if not hasattr(self, "cap") or not self.cap.isOpened():
+                    break
+                ret, frame = self.cap.read()
+            except Exception:
+                break
+
+            if not ret or frame is None:
+                time.sleep(0.005)
+                continue
+            with self._lock:
+                self._latest_frame = frame
+            time.sleep(0.001)
 
     def read(self) -> Optional[np.ndarray]:
         """Read the next frame.
@@ -78,11 +109,21 @@ class FrameCapture:
             Frame as numpy array (BGR for color, single-channel for NIR),
             or None if no frame available.
         """
-        ret, frame = self.cap.read()
-        if not ret:
+        if not self.is_camera:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                return None
+            if self.is_grayscale and len(frame.shape) == 3:
+                frame = frame[:, :, 0]
+            self._frame_count += 1
+            return frame
+
+        with self._lock:
+            frame = self._latest_frame.copy() if self._latest_frame is not None else None
+
+        if frame is None:
             return None
 
-        # Normalize single-channel to 2D array
         if self.is_grayscale and len(frame.shape) == 3:
             frame = frame[:, :, 0]
 
@@ -99,8 +140,17 @@ class FrameCapture:
         return self.cap.isOpened()
 
     def release(self):
-        """Release the video capture resource."""
-        self.cap.release()
+        """Release the video capture resource and background thread."""
+        self._running = False
+        if hasattr(self, "_thread") and self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.5)
+        if hasattr(self, "cap") and self.cap.isOpened():
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+        if hasattr(self, "_thread") and self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.2)
 
     def __enter__(self):
         return self

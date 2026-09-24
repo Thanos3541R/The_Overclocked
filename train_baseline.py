@@ -47,15 +47,56 @@ LABEL_SOBER_ALIASES = {"sober", "normal", "baseline", "alert", "control", "0", "
 LABEL_IMPAIRED_ALIASES = {"impaired", "intoxicated", "alcohol", "drunk", "drowsy", "1", "true", "positive"}
 
 
-def compute_window_summary_features(windows_3d: np.ndarray, feature_names: List[str]) -> Tuple[np.ndarray, List[str]]:
+def compute_subject_invariant_delta_features(
+    features_2d: np.ndarray,
+    flat_names: List[str],
+    subjects: np.ndarray,
+) -> Tuple[np.ndarray, List[str]]:
+    """Convert subject-dependent physical baseline features (e.g. raw EAR) into
+    subject-invariant baseline delta features relative to each subject's personal baseline.
+
+    This prevents GroupKFold models from overfitting to individual anatomical eye aperture
+    variations (e.g., naturally small eyes vs true ptosis droop), ensuring generalized
+    cross-subject impairment detection.
+    """
+    clean_features = features_2d.copy()
+    clean_names = list(flat_names)
+
+    if len(features_2d) == 0 or len(subjects) == 0:
+        return clean_features, clean_names
+
+    unique_subs = np.unique(subjects)
+    for s in unique_subs:
+        mask = (subjects == s)
+        if not np.any(mask):
+            continue
+        for col_idx, col_name in enumerate(flat_names):
+            if col_name.startswith("ear_") and any(stat in col_name for stat in ["mean", "median", "min", "max", "p10", "p90"]):
+                vals = features_2d[mask, col_idx]
+                if len(vals) == 0 or np.all(np.isnan(vals)):
+                    s_base = 0.0
+                else:
+                    s_base = float(np.nanpercentile(vals, 90))
+                clean_features[mask, col_idx] = features_2d[mask, col_idx] - s_base
+                clean_names[col_idx] = f"{col_name}_delta_base"
+
+    return clean_features, clean_names
+
+
+def compute_window_summary_features(
+    windows_3d: np.ndarray,
+    feature_names: List[str],
+    subjects: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, List[str]]:
     """Transform 3D window tensors (N, window_frames, n_features) into 2D summary statistics.
 
     Computes 7 statistics along the temporal axis for each feature:
       [mean, std, min, max, median, 10th percentile, 90th percentile]
     yielding N x (n_features * 7) flattened tabular features.
+    If subjects array is provided, converts anatomical features into subject-invariant baseline deltas.
     """
     n_windows, window_frames, n_features = windows_3d.shape
-    
+
     means = np.mean(windows_3d, axis=1)
     stds = np.std(windows_3d, axis=1)
     mins = np.min(windows_3d, axis=1)
@@ -65,7 +106,7 @@ def compute_window_summary_features(windows_3d: np.ndarray, feature_names: List[
     p90s = np.percentile(windows_3d, 90, axis=1)
 
     # Concatenate statistics horizontally
-    features_2d = np.hstack([means, stds, mins, maxs, medians, p10s, p90s])
+    features_2d = np.hstack([means, stds, mins, maxs, medians, p10s, p90s]).astype(np.float32)
 
     # Construct feature column names
     flat_names = []
@@ -73,7 +114,12 @@ def compute_window_summary_features(windows_3d: np.ndarray, feature_names: List[
         for fname in feature_names:
             flat_names.append(f"{fname}_{stat}")
 
-    return features_2d.astype(np.float32), flat_names
+    if subjects is not None:
+        features_2d, flat_names = compute_subject_invariant_delta_features(
+            features_2d, flat_names, subjects
+        )
+
+    return features_2d, flat_names
 
 
 def load_dataset_from_npz(npz_paths: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
@@ -372,7 +418,7 @@ def main():
         empirical_validation = True
 
     print(f"Aggregating 3D window tensors {X_3d.shape} into 2D summary statistics (7 per signal)...")
-    X_2d, flat_feature_names = compute_window_summary_features(X_3d, raw_feat_names)
+    X_2d, flat_feature_names = compute_window_summary_features(X_3d, raw_feat_names, subjects=subjects)
     print(f"Generated feature matrix: {X_2d.shape[0]} windows x {X_2d.shape[1]} summary features.")
 
     results, final_model = train_and_evaluate(

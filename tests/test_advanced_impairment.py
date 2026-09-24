@@ -30,15 +30,12 @@ class TestAdvancedOculomotorSignals:
         assert feat_parallel.lack_of_convergence is False
 
         # 2. Exotropic divergence / Lack of Convergence
-        # Artificially move left iris temporal (-x) and right iris temporal (-x)
-        # Left eye: outer is 263 (temporal), inner is 362 (nasal)
-        # Right eye: outer is 33 (temporal), inner is 133 (nasal)
+        # Artificially move right iris temporal (-x) and left iris temporal (+x)
+        # Right eye: outer is 33 (temporal, left), inner is 133 (nasal, right)
+        # Left eye: inner is 362 (nasal, left), outer is 263 (temporal, right)
         lm_divergent = make_full_landmarks(ear_val=0.30)
-        # Shift left iris temporal (outer) and right iris temporal (outer)
-        # In make_full_landmarks: right eye cx=200, outer=180, inner=220 (temporal is left / -X)
-        # Left eye cx=400, outer=380, inner=420 (temporal is left / -X)
-        lm_divergent[473][0] -= 10.0  # right iris temporal (abducted)
-        lm_divergent[468][0] -= 10.0  # left iris temporal (abducted)
+        lm_divergent[473][0] -= 10.0  # right iris temporal (abducted, towards right ear)
+        lm_divergent[468][0] += 10.0  # left iris temporal (abducted, towards left ear)
 
         feat_divergent = ext.compute(lm_divergent, timestamp=1/30.0, frame_id=1, face_valid=True)
         assert feat_divergent.vergence_angle_deg < -3.5

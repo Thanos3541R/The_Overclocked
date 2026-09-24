@@ -1,7 +1,7 @@
 # The Overclocked — Driver Monitoring System (DMS)
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Tests Passing](https://img.shields.io/badge/tests-128%2F128%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-144%2F144%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 An automotive-grade, edge-optimized computer vision and biophysical intelligence pipeline designed to quantify driver drowsiness, neurological fatigue, and alcohol-induced impairment from monochrome NIR (near-infrared) or RGB driver-facing camera streams at real-time speeds on standard CPU hardware.
@@ -135,7 +135,7 @@ driver-monitor/
 │   ├── classifier.py          # Impairment diagnostic classifier (with baseline subtraction & NIR weights)
 │   ├── bayesian_filter.py     # Sequential Bayesian evidence accumulator with ISO 26262 latching
 │   └── training_buffer.py     # 29-channel windowed numpy tensor generator for ML models
-├── tests/                    # Comprehensive automated test suite (128 passing tests)
+├── tests/                    # Comprehensive automated test suite (144 passing tests)
 │   ├── test_advanced_impairment.py
 │   ├── test_alcohol_signals.py
 │   ├── test_bayesian_filter.py
@@ -146,6 +146,7 @@ driver-monitor/
 │   ├── test_imu_gate.py
 │   ├── test_integration.py
 │   ├── test_one_euro.py
+│   ├── test_optimizations_and_fixes.py
 │   ├── test_pnp.py
 │   ├── test_training_buffer.py
 │   ├── test_variable_framerate.py
@@ -216,7 +217,7 @@ python idd_ingest.py --idd-root /path/to/dataset --output-dir ./idd_output/
 ```bash
 pytest tests/ -v
 ```
-All **128 unit and integration tests** execute in $\approx 7\text{ seconds}$ with a 100% pass rate.
+All **144 unit and integration tests** execute in $\approx 11\text{ seconds}$ with a 100% pass rate.
 
 ---
 

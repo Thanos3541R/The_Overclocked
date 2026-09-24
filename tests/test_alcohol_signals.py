@@ -43,12 +43,12 @@ def make_full_landmarks(ear_val=0.30, iris_x_offset=0.0):
 
     # Left eye (subject's left) — around (400, 200)
     eye_cx2, eye_cy2 = 400.0, 200.0
-    lm[263] = [eye_cx2 - eye_w/2, eye_cy2, 0]
-    lm[385] = [eye_cx2 - eye_w*0.15, eye_cy2 - half_v, 0]
-    lm[387] = [eye_cx2 + eye_w*0.15, eye_cy2 - half_v, 0]
-    lm[362] = [eye_cx2 + eye_w/2, eye_cy2, 0]
-    lm[373] = [eye_cx2 + eye_w*0.15, eye_cy2 + half_v, 0]
-    lm[380] = [eye_cx2 - eye_w*0.15, eye_cy2 + half_v, 0]
+    lm[263] = [eye_cx2 + eye_w/2, eye_cy2, 0]  # outer corner (temporal)
+    lm[385] = [eye_cx2 + eye_w*0.15, eye_cy2 - half_v, 0]
+    lm[387] = [eye_cx2 - eye_w*0.15, eye_cy2 - half_v, 0]
+    lm[362] = [eye_cx2 - eye_w/2, eye_cy2, 0]  # inner corner (nasal)
+    lm[373] = [eye_cx2 - eye_w*0.15, eye_cy2 + half_v, 0]
+    lm[380] = [eye_cx2 + eye_w*0.15, eye_cy2 + half_v, 0]
 
     # Iris centers (positioned at eye centers + offset)
     lm[473] = [eye_cx + iris_x_offset, eye_cy, 0]    # right iris center

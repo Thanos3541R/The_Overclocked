@@ -15,7 +15,7 @@ Pipeline:
 import cv2
 import numpy as np
 from typing import Optional, Tuple
-from utils.landmarks import (PNP_LANDMARK_INDICES, CANONICAL_FACE_3D)
+from utils.landmarks import (PNP_LANDMARK_INDICES, CANONICAL_FACE_3D, NOSE_TIP)
 
 
 class PnPNormalizer:
@@ -54,21 +54,38 @@ class PnPNormalizer:
         """Solve head pose from landmarks.
 
         Args:
-            landmarks: Full 478×3 landmark array in pixel coords.
+            landmarks: Full landmark array in pixel coords (e.g. 478×3 or 478×2).
 
         Returns:
             True if PnP solution found, False otherwise.
         """
-        # Extract 2D points for PnP anchors
-        image_points = landmarks[PNP_LANDMARK_INDICES, :2].astype(np.float64)
+        if landmarks is None:
+            return False
 
-        success, rvec, tvec, inliers = cv2.solvePnPRansac(
-            CANONICAL_FACE_3D,
-            image_points,
-            self.camera_matrix,
-            self.dist_coeffs,
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
+        try:
+            lms = np.asarray(landmarks, dtype=np.float64)
+        except Exception:
+            return False
+
+        if (lms.ndim != 2 or
+                lms.shape[0] <= max(PNP_LANDMARK_INDICES) or
+                lms.shape[1] < 2 or
+                np.isnan(lms).any() or
+                np.isinf(lms).any()):
+            return False
+
+        image_points = lms[PNP_LANDMARK_INDICES, :2]
+
+        try:
+            success, rvec, tvec, inliers = cv2.solvePnPRansac(
+                CANONICAL_FACE_3D,
+                image_points,
+                self.camera_matrix,
+                self.dist_coeffs,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+        except cv2.error:
+            return False
 
         if not success or inliers is None or len(inliers) < 4:
             return False
@@ -79,25 +96,47 @@ class PnPNormalizer:
         return True
 
     def normalize_landmarks(self, landmarks: np.ndarray) -> np.ndarray:
-        """Transform landmarks from camera-space to face-centered space.
+        """Transform landmarks to face-aligned space while preserving pixel coordinates for visual sampling.
 
-        Removes vehicle bounce: the entire face coordinate box shifts
-        together, so internal distances (EAR, MAR) stay constant.
+        Removes vehicle bounce: translates coordinates relative to the face origin (nose tip) in pixel space,
+        applies canonical rotation alignment, and anchors back to pixel coordinates so downstream visual sampling
+        (e.g., cheek flushing patches and eye crops) remains perfectly registered on the image frame.
 
         Args:
-            landmarks: Full 478×3 landmark array in pixel coords.
+            landmarks: Full landmark array in pixel coords (e.g. 478×3 or 478×2).
 
         Returns:
-            Normalized landmarks in face-centered coordinates.
+            Normalized landmarks in stabilized pixel coordinates.
             If no valid pose, returns landmarks unchanged.
         """
-        if self.rotation_matrix is None or self.tvec is None:
-            return landmarks.copy()
+        if landmarks is None:
+            return None
 
-        # Translate to face origin, then rotate to canonical orientation
-        # p_face = R^T * (p_cam - t)
-        centered = landmarks - self.tvec.flatten()
-        normalized = (self.rotation_matrix.T @ centered.T).T
+        try:
+            lms = np.asarray(landmarks)
+        except Exception:
+            return landmarks.copy() if hasattr(landmarks, "copy") else landmarks
+
+        if self.rotation_matrix is None or lms.ndim != 2 or lms.shape[0] == 0 or lms.shape[1] < 2:
+            return lms.copy() if isinstance(landmarks, np.ndarray) else (landmarks.copy() if hasattr(landmarks, "copy") else landmarks)
+
+        # Anchor origin in pixel space (nose tip if present, otherwise centroid)
+        if lms.shape[0] > NOSE_TIP:
+            origin = lms[NOSE_TIP].copy()
+        else:
+            origin = np.mean(lms, axis=0)
+
+        n_dim = lms.shape[1]
+        normalized = lms.copy()
+
+        if n_dim >= 3:
+            centered = lms[:, :3] - origin[:3]
+            rotated = (self.rotation_matrix.T @ centered.T).T
+            normalized[:, :3] = rotated + origin[:3]
+        elif n_dim == 2:
+            centered_3d = np.column_stack([lms[:, :2] - origin[:2], np.zeros(len(lms))])
+            rotated_3d = (self.rotation_matrix.T @ centered_3d.T).T
+            normalized[:, :2] = rotated_3d[:, :2] + origin[:2]
 
         return normalized
 

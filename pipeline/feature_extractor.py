@@ -206,6 +206,8 @@ class FeatureExtractor:
         # Rolling buffers for PERCLOS
         buffer_size = int(perclos_window_sec * fps)
         self._ear_history: Deque[float] = deque(maxlen=max(buffer_size, 1))
+        self._perclos_closed_count: int = 0
+        self._last_blink_threshold: float = blink_threshold
 
         # Counters for sustained events
         self._consecutive_closed = 0
@@ -338,8 +340,8 @@ class FeatureExtractor:
 
         Returns:
             (x, y) normalized to approximately [-1, 1].
-            x: -1 = looking outward, +1 = looking inward.
-            y: -1 = looking down, +1 = looking up.
+            x: horizontal gaze along consistent conjugate axis (-1 = left, +1 = right in camera frame).
+            y: vertical gaze (-1 = down, +1 = up).
         """
         iris = landmarks[iris_center_idx]
         outer = landmarks[eye_outer_idx]
@@ -351,8 +353,13 @@ class FeatureExtractor:
         if eye_width < 1e-6:
             return (0.0, 0.0)
 
-        # Horizontal: project iris offset onto eye axis
-        eye_axis = (inner - outer) / eye_width
+        # Consistent conjugate horizontal axis: left corner -> right corner (+X in frame)
+        if outer[0] <= inner[0]:
+            left_corner, right_corner = outer, inner
+        else:
+            left_corner, right_corner = inner, outer
+
+        eye_axis = (right_corner - left_corner) / eye_width
         offset = iris - eye_center
         x = float(np.dot(offset[:2], eye_axis[:2]) / (eye_width / 2.0))
 
@@ -360,7 +367,12 @@ class FeatureExtractor:
         perp = np.array([-eye_axis[1], eye_axis[0]])
         y = float(np.dot(offset[:2], perp) / (eye_width / 2.0))
 
-        return (np.clip(x, -1.0, 1.0), np.clip(y, -1.0, 1.0))
+        if np.isnan(x) or np.isinf(x):
+            x = 0.0
+        if np.isnan(y) or np.isinf(y):
+            y = 0.0
+
+        return (float(np.clip(x, -1.0, 1.0)), float(np.clip(y, -1.0, 1.0)))
 
     def _compute_saccade_dynamics(self, iris_x: float, iris_y: float,
                                    timestamp: float) -> Tuple[float, bool, float]:
@@ -550,13 +562,16 @@ class FeatureExtractor:
     def _compute_binocular_vergence(self, left_iris_x: float, right_iris_x: float) -> Tuple[float, bool]:
         """Compute binocular vergence angle and test for Lack of Convergence (LOC).
 
-        In normalized iris coordinates, +1 = nasal (adducted) and -1 = temporal (abducted).
-        Vergence = (left_x + right_x) * _DEG_PER_IRIS_UNIT.
+        Under conjugate horizontal gaze (+X right for both eyes):
+        Right eye (viewer left): nasal (inward) is +X, temporal (outward) is -X.
+        Left eye (viewer right): nasal (inward) is -X, temporal (outward) is +X.
+        Vergence = (right_iris_x - left_iris_x) * _DEG_PER_IRIS_UNIT.
         Parallel forward gaze (infinity) has vergence ≈ 0.0°.
         Near convergence (instrument panel) has positive vergence (> 2.0°).
         Divergent strabismus / inability to hold convergence (DRE LOC sign) has negative vergence (< -3.5°).
+        Pure conjugate saccades yield vergence ≈ 0.0° (no false-positive LOC triggers).
         """
-        vergence = (left_iris_x + right_iris_x) * _DEG_PER_IRIS_UNIT
+        vergence = (right_iris_x - left_iris_x) * _DEG_PER_IRIS_UNIT
         loc = bool(vergence < self.loc_vergence_threshold_deg)
         return (float(vergence), loc)
 
@@ -657,8 +672,8 @@ class FeatureExtractor:
 
         NOTE: Seated postural sway is an experimental proxy of Romberg standing posturography;
         in moving vehicles, low-frequency road terrain (< 0.5 Hz) and vehicle pitch/roll must be
-        filtered out. We isolate 0.5 - 2.0 Hz tremor by subtracting the rolling 1.5s baseline
-        mean and evaluating residual variance.
+        filtered out. We isolate 0.5 - 2.0 Hz tremor by applying high-pass linear detrending across
+        the recent window to reject road grade/banking drift and evaluating residual variance.
         """
         self._head_pose_history.append((timestamp, head_pitch, head_roll))
         cutoff = timestamp - self.sway_window_sec
@@ -666,18 +681,24 @@ class FeatureExtractor:
         if len(recent) < 10:
             return (0.0, False)
 
-        # Baseline rolling 1.5s mean for road vibration de-trending (< 0.5 Hz rejection)
-        mean_cutoff = timestamp - 1.5
-        mean_samples = [(p, r) for t, p, r in recent if t >= mean_cutoff]
-        if not mean_samples:
-            mean_samples = [(p, r) for _, p, r in recent]
+        times = np.array([t for t, _, _ in recent], dtype=np.float64)
+        pitches = np.array([p for _, p, _ in recent], dtype=np.float64)
+        rolls = np.array([r for _, _, r in recent], dtype=np.float64)
 
-        mean_pitch = float(np.mean([p for p, _ in mean_samples]))
-        mean_roll = float(np.mean([r for _, r in mean_samples]))
-
-        # High-pass / bandpass residuals (0.5 - 2.0 Hz micro-tremor)
-        detrended_pitches = [p - mean_pitch for _, p, _ in recent]
-        detrended_rolls = [r - mean_roll for _, _, r in recent]
+        # High-pass suspension de-trending: reject vehicle incline, banking, and road grade drift (<0.5 Hz)
+        try:
+            if len(times) >= 2 and (times[-1] - times[0]) > 1e-4:
+                t_rel = times - times[0]
+                p_slope, p_intercept = np.polyfit(t_rel, pitches, 1)
+                detrended_pitches = pitches - (p_slope * t_rel + p_intercept)
+                r_slope, r_intercept = np.polyfit(t_rel, rolls, 1)
+                detrended_rolls = rolls - (r_slope * t_rel + r_intercept)
+            else:
+                detrended_pitches = pitches - np.mean(pitches)
+                detrended_rolls = rolls - np.mean(rolls)
+        except Exception:
+            detrended_pitches = pitches - np.mean(pitches)
+            detrended_rolls = rolls - np.mean(rolls)
 
         std_p = float(np.std(detrended_pitches))
         std_r = float(np.std(detrended_rolls))
@@ -982,12 +1003,24 @@ class FeatureExtractor:
         features.yawn_detected = (
             self._consecutive_yawn >= self.yawn_frames)
 
-        # ── PERCLOS ──
+        # ── PERCLOS (O(1) sliding window ring counter) ──
+        if getattr(self, "_last_blink_threshold", None) != self.blink_threshold:
+            self._last_blink_threshold = self.blink_threshold
+            self._perclos_closed_count = sum(1 for e in self._ear_history if e < self.blink_threshold)
+
+        if len(self._ear_history) == self._ear_history.maxlen:
+            old_ear = self._ear_history[0]
+            if old_ear < self.blink_threshold:
+                self._perclos_closed_count = max(0, self._perclos_closed_count - 1)
+
         self._ear_history.append(features.ear_avg)
+        if features.ear_avg < self.blink_threshold:
+            self._perclos_closed_count += 1
+
         if len(self._ear_history) > 0:
-            closed_count = sum(
-                1 for e in self._ear_history if e < self.blink_threshold)
-            features.perclos = closed_count / len(self._ear_history)
+            features.perclos = float(np.clip(self._perclos_closed_count / len(self._ear_history), 0.0, 1.0))
+        else:
+            features.perclos = 0.0
 
         # ── Iris gaze ──
         # Left eye (subject's left): iris 468, corners 263 (outer) & 362 (inner)

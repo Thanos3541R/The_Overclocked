@@ -60,8 +60,11 @@ def parse_args() -> argparse.Namespace:
         "--csv-path", type=str, default="output_features.csv",
         help="CSV output file path (default: output_features.csv)")
     parser.add_argument(
+        "--mesh-style", type=str, choices=["full", "contours", "dots", "off"], default="full",
+        help="Mesh visualization style: 'full' (3D wireframe), 'contours', 'dots', 'off'. Default: full")
+    parser.add_argument(
         "--no-mesh", action="store_true",
-        help="Hide face mesh wireframe in visualization")
+        help="Hide face mesh wireframe in visualization (alias for --mesh-style off)")
     parser.add_argument(
         "--no-iris", action="store_true",
         help="Hide iris crosshairs in visualization")
@@ -156,8 +159,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     filter_bank: Optional[OneEuroFilterBank] = None
 
     # Visualization
+    mesh_style = "off" if args.no_mesh else args.mesh_style
     visualizer = Visualizer(
-        show_mesh=not args.no_mesh,
+        show_mesh=not args.no_mesh and mesh_style != "off",
+        mesh_style=mesh_style,
         show_iris=not args.no_iris,
         show_pose_axes=not args.no_axes,
     )
@@ -172,7 +177,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
           f"@ {capture.fps:.1f} fps (est.)")
     print(f"[DMS] Input type: {'Grayscale (NIR)' if capture.is_grayscale else 'BGR (RGB camera)'}")
     if not args.headless:
-        print("[DMS] Press 'q' to quit, 'p' to pause/resume")
+        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'm' to cycle mesh (Full -> Contours -> Dots -> Off)")
 
     # ── Main loop ──
     paused = False
@@ -213,6 +218,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         break
                     elif key == ord('p'):
                         paused = True
+                    elif key == ord('m'):
+                        visualizer.cycle_mesh_mode()
                 continue
 
             # ── Stage 3: 1-Euro Temporal Filtering ──
@@ -282,6 +289,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     break
                 elif key == ord('p'):
                     paused = True
+                elif key == ord('m'):
+                    visualizer.cycle_mesh_mode()
 
     except KeyboardInterrupt:
         print("\n[DMS] Interrupted by user")

@@ -21,19 +21,45 @@ from utils.landmarks import (
     PNP_LANDMARK_INDICES,
 )
 
+# Extract full facial mesh connections for 3D wireframe overlay
+try:
+    import mediapipe as mp
+    if hasattr(mp, 'tasks') and hasattr(mp.tasks, 'vision') and hasattr(mp.tasks.vision, 'FaceLandmarksConnections'):
+        TESSELATION_CONNECTIONS = [(c.start, c.end) for c in mp.tasks.vision.FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION]
+        CONTOUR_CONNECTIONS = [(c.start, c.end) for c in mp.tasks.vision.FaceLandmarksConnections.FACE_LANDMARKS_CONTOURS]
+    elif hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_mesh'):
+        TESSELATION_CONNECTIONS = list(mp.solutions.face_mesh.FACEMESH_TESSELATION)
+        CONTOUR_CONNECTIONS = list(mp.solutions.face_mesh.FACEMESH_CONTOURS)
+    else:
+        TESSELATION_CONNECTIONS = []
+        CONTOUR_CONNECTIONS = []
+except Exception:
+    TESSELATION_CONNECTIONS = []
+    CONTOUR_CONNECTIONS = []
+
 
 class Visualizer:
     """Debug overlay renderer for the DMS pipeline."""
 
     def __init__(self, show_mesh: bool = True,
+                 mesh_style: str = "full",
                  show_iris: bool = True,
                  show_pose_axes: bool = True):
         self.show_mesh = show_mesh
+        self.mesh_style = mesh_style if show_mesh else "off"
         self.show_iris = show_iris
         self.show_pose_axes = show_pose_axes
         self._prev_time = time.time()
         self._fps = 0.0
         self._fps_alpha = 0.1  # EMA smoothing for FPS display
+
+    def cycle_mesh_mode(self) -> str:
+        """Cycle through mesh visualization modes: full -> contours -> dots -> off -> full."""
+        modes = ["full", "contours", "dots", "off"]
+        idx = (modes.index(self.mesh_style) + 1) % len(modes) if self.mesh_style in modes else 0
+        self.mesh_style = modes[idx]
+        self.show_mesh = self.mesh_style != "off"
+        return self.mesh_style
 
     def draw(self, frame: np.ndarray,
              landmarks: Optional[np.ndarray],
@@ -60,6 +86,20 @@ class Visualizer:
 
         if landmarks is not None:
             pts = landmarks[:, :2].astype(np.int32)
+
+            # ── Full Face Mesh Wireframe & Landmark Dots ──
+            if self.show_mesh and self.mesh_style != "off":
+                if self.mesh_style == "full" and TESSELATION_CONNECTIONS:
+                    for s, e in TESSELATION_CONNECTIONS:
+                        cv2.line(frame, tuple(pts[s]), tuple(pts[e]), (140, 140, 140), 1, cv2.LINE_4)
+                elif self.mesh_style == "contours" and CONTOUR_CONNECTIONS:
+                    for s, e in CONTOUR_CONNECTIONS:
+                        cv2.line(frame, tuple(pts[s]), tuple(pts[e]), (0, 220, 100), 1, cv2.LINE_AA)
+
+                # Draw landmark dots across the entire face
+                if self.mesh_style in ("full", "contours", "dots"):
+                    for pt in pts:
+                        cv2.circle(frame, tuple(pt), 1, (0, 255, 128), -1)
 
             # ── Eye contours (cyan) ──
             self._draw_contour(frame, pts, RIGHT_EYE_CONTOUR, (255, 255, 0))
@@ -135,7 +175,8 @@ class Visualizer:
         bg_color = (0, 0, 0)
         thickness = 1
 
-        lines = [f"FPS: {self._fps:.1f}"]
+        mesh_label = self.mesh_style.upper() if self.show_mesh else "OFF"
+        lines = [f"FPS: {self._fps:.1f} | Mesh [m]: {mesh_label}"]
 
         if features is not None:
             lines.extend([

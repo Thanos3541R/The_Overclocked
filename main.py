@@ -60,11 +60,14 @@ def parse_args() -> argparse.Namespace:
         "--csv-path", type=str, default="output_features.csv",
         help="CSV output file path (default: output_features.csv)")
     parser.add_argument(
-        "--mesh-style", type=str, choices=["full", "contours", "dots", "off"], default="full",
-        help="Mesh visualization style: 'full' (3D wireframe), 'contours', 'dots', 'off'. Default: full")
+        "--overlay-mode", type=str, choices=["off", "regions", "full"], default="regions",
+        help="HUD landmark overlay mode: 'regions' (default key regions), 'full' (full mesh), 'off'")
+    parser.add_argument(
+        "--mesh-style", type=str, choices=["full", "contours", "dots", "off"], default="regions",
+        help="Legacy alias for --overlay-mode")
     parser.add_argument(
         "--no-mesh", action="store_true",
-        help="Hide face mesh wireframe in visualization (alias for --mesh-style off)")
+        help="Hide face mesh wireframe in visualization (alias for --overlay-mode off)")
     parser.add_argument(
         "--no-iris", action="store_true",
         help="Hide iris crosshairs in visualization")
@@ -159,10 +162,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     filter_bank: Optional[OneEuroFilterBank] = None
 
     # Visualization
-    mesh_style = "off" if args.no_mesh else args.mesh_style
+    overlay_mode = "off" if args.no_mesh else getattr(args, "overlay_mode", args.mesh_style)
     visualizer = Visualizer(
-        show_mesh=not args.no_mesh and mesh_style != "off",
-        mesh_style=mesh_style,
+        overlay_mode=overlay_mode,
         show_iris=not args.no_iris,
         show_pose_axes=not args.no_axes,
     )
@@ -177,7 +179,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
           f"@ {capture.fps:.1f} fps (est.)")
     print(f"[DMS] Input type: {'Grayscale (NIR)' if capture.is_grayscale else 'BGR (RGB camera)'}")
     if not args.headless:
-        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'm' to cycle mesh (Full -> Contours -> Dots -> Off)")
+        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'v' to cycle overlay (Key Regions -> Full Mesh -> Off)")
 
     # ── Main loop ──
     paused = False
@@ -218,8 +220,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         break
                     elif key == ord('p'):
                         paused = True
-                    elif key == ord('m'):
-                        visualizer.cycle_mesh_mode()
+                    elif key in (ord('v'), ord('m')):
+                        visualizer.cycle_overlay_mode()
                 continue
 
             # ── Stage 3: 1-Euro Temporal Filtering ──
@@ -282,15 +284,15 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             # ── Visualization ──
             if not args.headless:
                 viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                visualizer.draw(viz_frame, landmarks, features, normalizer)
+                visualizer.draw(viz_frame, smooth_landmarks, features, normalizer)
                 cv2.imshow("Driver Monitor", viz_frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
                 elif key == ord('p'):
                     paused = True
-                elif key == ord('m'):
-                    visualizer.cycle_mesh_mode()
+                elif key in (ord('v'), ord('m')):
+                    visualizer.cycle_overlay_mode()
 
     except KeyboardInterrupt:
         print("\n[DMS] Interrupted by user")

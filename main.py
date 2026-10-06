@@ -213,7 +213,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 # No face detected — show frame without annotations
                 if not args.headless:
                     viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                    visualizer.draw(viz_frame, None, None, None)
+                    visualizer.draw(viz_frame, None, None, None, pnp_success=False)
                     cv2.imshow("Driver Monitor", viz_frame)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q'):
@@ -284,7 +284,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             # ── Visualization ──
             if not args.headless:
                 viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                visualizer.draw(viz_frame, smooth_landmarks, features, normalizer)
+                visualizer.draw(viz_frame, smooth_landmarks, features, normalizer, pnp_success=pnp_success)
                 cv2.imshow("Driver Monitor", viz_frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):

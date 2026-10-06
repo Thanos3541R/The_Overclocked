@@ -22,10 +22,17 @@ RIGHT_EYE_OUTER = 33      # Subject's right, outer canthus
 LEFT_EYE_OUTER = 263      # Subject's left, outer canthus
 RIGHT_MOUTH_CORNER = 61   # Right commissure
 LEFT_MOUTH_CORNER = 291   # Left commissure
+NOSE_BRIDGE = 168         # Rhinion / sellion bridge
+MID_EYEBROW = 9           # Glabella / sellion midpoint
 
 # Ordered list matching the canonical 3D model in pnp_normalizer.py
 PNP_LANDMARK_INDICES = [NOSE_TIP, CHIN, RIGHT_EYE_OUTER,
                         LEFT_EYE_OUTER, RIGHT_MOUTH_CORNER, LEFT_MOUTH_CORNER]
+
+# Expanded 8-point rigid anchor set (adds midline vertical pitch rigidity)
+PNP_LANDMARK_INDICES_8 = [NOSE_TIP, CHIN, RIGHT_EYE_OUTER,
+                          LEFT_EYE_OUTER, RIGHT_MOUTH_CORNER, LEFT_MOUTH_CORNER,
+                          NOSE_BRIDGE, MID_EYEBROW]
 
 # ═══════════════════════════════════════════════════════════════════
 # Eye Landmarks for EAR (6-point Soukupová & Čech 2016 formula)
@@ -108,6 +115,15 @@ CANONICAL_FACE_3D = np.array([
     [-33.3,   33.3,     27.8],       # Right mouth (idx 61)
     [33.3,    33.3,     27.8],       # Left mouth (idx 291)
 ], dtype=np.float64)
+
+# Expanded 8-point canonical 3D face model with midline vertical rigidity (nose bridge + glabella)
+CANONICAL_FACE_3D_8 = np.vstack([
+    CANONICAL_FACE_3D,
+    np.array([
+        [0.0,   -22.0,    15.0],       # Nose bridge (idx 168)
+        [0.0,   -45.0,    22.0],       # Mid-eyebrow / glabella (idx 9)
+    ], dtype=np.float64),
+])
 
 # ═══════════════════════════════════════════════════════════════════
 # Cheek Landmarks for Facial Flushing / Vasodilation

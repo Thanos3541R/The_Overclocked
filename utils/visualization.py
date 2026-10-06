@@ -130,6 +130,7 @@ class Visualizer:
         landmarks: Optional[np.ndarray],
         features=None,
         pnp_normalizer=None,
+        pnp_success: Optional[bool] = None,
     ) -> np.ndarray:
         """Draw all debug overlays on the frame.
 
@@ -141,6 +142,7 @@ class Visualizer:
             landmarks: Smoothed pixel-space landmarks (478, 3), or None.
             features: FrameFeatures dataclass, or None.
             pnp_normalizer: PnPNormalizer instance for pose axes, or None.
+            pnp_success: Optional bool flag indicating whether PnP solved successfully this frame.
 
         Returns:
             Annotated display frame.
@@ -191,9 +193,16 @@ class Visualizer:
             self._last_overlay_ms = 0.0
             self._overlay_ms_ema = 0.0
 
-        # ── Head Pose Axes ──
-        if self.show_pose_axes and pnp_normalizer is not None:
-            self._draw_pose_axes(frame, pnp_normalizer)
+        # ── Head Pose Axes (Only drawn if pose is valid and current) ──
+        if self.show_pose_axes and pnp_normalizer is not None and pnp_normalizer.rvec is not None:
+            pose_ok = True
+            if pnp_success is not None:
+                pose_ok = bool(pnp_success)
+            elif features is not None and getattr(features, "gating_reason", "") == "no_pose":
+                pose_ok = False
+
+            if pose_ok:
+                self._draw_pose_axes(frame, pnp_normalizer, is_gated=is_gated)
 
         # ── Gating Border: Red on gated frames, Green on valid ──
         if features is not None:
@@ -247,8 +256,46 @@ class Visualizer:
             cv2.putText(frame, reg.name, (box_x + 26, item_y - 1),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 220, 220), 1, cv2.LINE_AA)
 
-    def _draw_pose_axes(self, frame: np.ndarray, normalizer) -> None:
-        """Draw RGB head pose axes at the nose tip."""
+    @staticmethod
+    def _draw_dashed_line(
+        img: np.ndarray,
+        pt1: Tuple[int, int],
+        pt2: Tuple[int, int],
+        color: Tuple[int, int, int],
+        thickness: int = 1,
+        dash_len: int = 6,
+    ) -> None:
+        """Draw a dashed anti-aliased line between pt1 and pt2."""
+        dist = np.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
+        if dist < 1.0:
+            return
+        n_dashes = max(1, int(dist / dash_len))
+        for j in range(0, n_dashes, 2):
+            s_frac = j / n_dashes
+            e_frac = min(j + 1, n_dashes) / n_dashes
+            start = (
+                int(pt1[0] + (pt2[0] - pt1[0]) * s_frac),
+                int(pt1[1] + (pt2[1] - pt1[1]) * s_frac),
+            )
+            end = (
+                int(pt1[0] + (pt2[0] - pt1[0]) * e_frac),
+                int(pt1[1] + (pt2[1] - pt1[1]) * e_frac),
+            )
+            cv2.line(img, start, end, color, thickness, cv2.LINE_AA)
+
+    def _draw_pose_axes(
+        self,
+        frame: np.ndarray,
+        normalizer,
+        is_gated: bool = False,
+    ) -> None:
+        """Draw RGB head pose axes at the nose tip.
+
+        Args:
+            frame: Display frame.
+            normalizer: PnPNormalizer with valid rvec/tvec.
+            is_gated: If True, renders axes dimmed with dashed indicator.
+        """
         if normalizer.rvec is None or normalizer.tvec is None:
             return
 
@@ -260,16 +307,25 @@ class Visualizer:
             [0, 0, 0],             # Origin
         ])
 
-        img_pts, _ = cv2.projectPoints(
-            axes_3d, normalizer.rvec, normalizer.tvec,
-            normalizer.camera_matrix, normalizer.dist_coeffs
-        )
+        try:
+            img_pts, _ = cv2.projectPoints(
+                axes_3d, normalizer.rvec, normalizer.tvec,
+                normalizer.camera_matrix, normalizer.dist_coeffs
+            )
+        except cv2.error:
+            return
 
         origin = tuple(img_pts[3].ravel().astype(int))
-        colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]  # BGR for XYZ
-        for i, color in enumerate(colors):
+        colors_solid = [(0, 0, 255), (0, 255, 0), (255, 0, 0)]  # BGR for XYZ
+        colors_dimmed = [(0, 0, 110), (0, 110, 0), (110, 0, 0)]
+
+        for i in range(3):
             end = tuple(img_pts[i].ravel().astype(int))
-            cv2.arrowedLine(frame, origin, end, color, 2, cv2.LINE_AA)
+            if is_gated:
+                self._draw_dashed_line(frame, origin, end, colors_dimmed[i], thickness=1, dash_len=6)
+                cv2.circle(frame, end, 2, colors_dimmed[i], -1, cv2.LINE_AA)
+            else:
+                cv2.arrowedLine(frame, origin, end, colors_solid[i], 2, cv2.LINE_AA)
 
     def _draw_text_panel(self, frame: np.ndarray, features) -> None:
         """Draw feature values and overlay timing as HUD text panel."""

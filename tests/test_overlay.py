@@ -329,7 +329,7 @@ def _run_pipeline_pass(video_path: str, overlay_mode: str, max_frames: int = 60)
 
         # Display Stage: Draw strictly on a copy of the frame
         viz_frame = frame.copy()
-        visualizer.draw(viz_frame, smooth_landmarks, features, normalizer)
+        visualizer.draw(viz_frame, smooth_landmarks, features, normalizer, pnp_success=pnp_success)
         overlay_times.append(visualizer.last_overlay_ms)
 
     t_end = time.perf_counter()

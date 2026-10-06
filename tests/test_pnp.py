@@ -154,6 +154,144 @@ class TestPnPNormalizer:
         normalizer.update_frame_size(1280, 720)
         assert normalizer.camera_matrix[0, 2] == 640.0  # cx updated
 
+    def test_stale_pose_invalidated_on_failure(self):
+        """When solve_pose fails, rvec, tvec, and rotation_matrix MUST be explicitly None."""
+        normalizer = PnPNormalizer(frame_width=1280, frame_height=720)
+        landmarks = make_frontal_face_landmarks()
+
+        # Step 1: Valid solve
+        success = normalizer.solve_pose(landmarks)
+        assert success is True
+        assert normalizer.rvec is not None
+        assert normalizer.tvec is not None
+        assert normalizer.rotation_matrix is not None
+        assert normalizer.get_euler_angles() is not None
+
+        # Step 2: Failed solve with None
+        success_fail = normalizer.solve_pose(None)
+        assert success_fail is False
+        assert normalizer.rvec is None
+        assert normalizer.tvec is None
+        assert normalizer.rotation_matrix is None
+        assert normalizer.get_euler_angles() is None
+
+        # Step 3: Re-acquire valid pose
+        assert normalizer.solve_pose(landmarks) is True
+        assert normalizer.rvec is not None
+
+        # Step 4: Failed solve with all-zeros / degenerate array
+        degenerate = np.zeros((478, 3), dtype=np.float64)
+        success_degen = normalizer.solve_pose(degenerate)
+        assert success_degen is False
+        assert normalizer.rvec is None
+        assert normalizer.tvec is None
+        assert normalizer.rotation_matrix is None
+        assert normalizer.get_euler_angles() is None
+
+        # Step 5: Failed solve with NaN
+        assert normalizer.solve_pose(landmarks) is True
+        nan_lms = np.full((478, 3), np.nan)
+        assert normalizer.solve_pose(nan_lms) is False
+        assert normalizer.rvec is None
+        assert normalizer.tvec is None
+        assert normalizer.rotation_matrix is None
+
+    def test_temporal_extrinsic_guess_and_reset(self):
+        """Iterative solver uses extrinsic guess for consecutive frames, and fallback on reset."""
+        normalizer = PnPNormalizer(frame_width=1280, frame_height=720)
+        lm1 = make_frontal_face_landmarks(offset_x=0, offset_y=0)
+        assert normalizer.solve_pose(lm1) is True
+        rvec1 = normalizer.rvec.copy()
+        tvec1 = normalizer.tvec.copy()
+
+        # Slight continuous motion (2px shift)
+        lm2 = make_frontal_face_landmarks(offset_x=2.0, offset_y=1.0)
+        assert normalizer.solve_pose(lm2) is True
+        rvec2 = normalizer.rvec.copy()
+        tvec2 = normalizer.tvec.copy()
+
+        # Motion should produce close, continuous pose vectors
+        np.testing.assert_allclose(rvec1, rvec2, atol=0.1)
+        np.testing.assert_allclose(tvec1, tvec2, atol=10.0)
+
+        # Test reset
+        normalizer.reset()
+        assert normalizer.rvec is None
+        assert normalizer.tvec is None
+        assert normalizer.rotation_matrix is None
+
+        # Re-acquisition after reset must succeed
+        assert normalizer.solve_pose(lm2) is True
+        assert normalizer.rvec is not None
+
+    def test_8_point_expanded_anchor_model(self):
+        """When landmarks 168 (nose bridge) and 9 (glabella) are present, 8-point model is used."""
+        from utils.landmarks import NOSE_BRIDGE, MID_EYEBROW
+        normalizer = PnPNormalizer(frame_width=1280, frame_height=720)
+        lms = make_frontal_face_landmarks()
+
+        cx = 1280 / 2.0
+        cy = 720 / 2.0
+        # Add nose bridge and sellion/glabella points along midline
+        lms[NOSE_BRIDGE] = [cx, cy - 55.0, 0.0]
+        lms[MID_EYEBROW] = [cx, cy - 75.0, 0.0]
+
+        success = normalizer.solve_pose(lms)
+        assert success is True
+        assert normalizer.rvec is not None
+        assert normalizer.tvec is not None
+
+        euler = normalizer.get_euler_angles()
+        assert euler is not None
+        pitch, yaw, roll = euler
+        assert abs(yaw) < 25.0
+        assert abs(pitch) < 30.0
+        assert abs(roll) < 20.0
+
+    def test_visualizer_axes_lost_and_gated_rendering(self):
+        """Visualizer must omit axes on lost pose and render dimmed dashed axes when gated."""
+        from unittest.mock import patch
+        from utils.visualization import Visualizer
+        from pipeline.feature_extractor import FrameFeatures
+
+        viz = Visualizer(overlay_mode="off", show_pose_axes=True)
+        normalizer = PnPNormalizer(frame_width=640, frame_height=480)
+        lms = make_frontal_face_landmarks(frame_width=640, frame_height=480)
+        assert normalizer.solve_pose(lms) is True
+
+        # Test 1: Successful valid pose -> calls _draw_pose_axes with is_gated=False
+        f_valid = np.zeros((480, 640, 3), dtype=np.uint8)
+        feat_valid = FrameFeatures(face_valid=True, imu_gated=False)
+        with patch.object(viz, "_draw_pose_axes", wraps=viz._draw_pose_axes) as mock_axes:
+            viz.draw(f_valid, lms, features=feat_valid, pnp_normalizer=normalizer, pnp_success=True)
+            assert mock_axes.call_count == 1
+            assert mock_axes.call_args[1]["is_gated"] is False
+        assert np.count_nonzero(f_valid) > 0
+
+        # Test 2: Pose lost (pnp_success=False) -> MUST NOT call _draw_pose_axes
+        f_lost = np.zeros((480, 640, 3), dtype=np.uint8)
+        feat_lost = FrameFeatures(face_valid=False, imu_gated=False, gating_reason="no_pose")
+        with patch.object(viz, "_draw_pose_axes") as mock_axes:
+            viz.draw(f_lost, lms, features=feat_lost, pnp_normalizer=normalizer, pnp_success=False)
+            assert mock_axes.call_count == 0, "Lost pose must not draw pose axes!"
+
+        # Test 3: Normalizer with rvec=None -> MUST NOT call _draw_pose_axes even if pnp_success=True
+        normalizer.reset()
+        f_none = np.zeros((480, 640, 3), dtype=np.uint8)
+        with patch.object(viz, "_draw_pose_axes") as mock_axes:
+            viz.draw(f_none, lms, features=feat_valid, pnp_normalizer=normalizer, pnp_success=True)
+            assert mock_axes.call_count == 0, "Normalizer with None rvec must not draw pose axes!"
+
+        # Test 4: Gated pose (face_valid=False due to pitch) -> calls _draw_pose_axes with is_gated=True
+        assert normalizer.solve_pose(lms) is True
+        f_gated = np.zeros((480, 640, 3), dtype=np.uint8)
+        feat_gated = FrameFeatures(face_valid=False, imu_gated=False, gating_reason="pitch=-32.0")
+        with patch.object(viz, "_draw_pose_axes", wraps=viz._draw_pose_axes) as mock_axes:
+            viz.draw(f_gated, lms, features=feat_gated, pnp_normalizer=normalizer, pnp_success=True)
+            assert mock_axes.call_count == 1
+            assert mock_axes.call_args[1]["is_gated"] is True
+        assert np.count_nonzero(f_gated) > 0
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

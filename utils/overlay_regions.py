@@ -8,8 +8,9 @@ Defines static NumPy index arrays and connection sets once at module startup:
   5. PnP rigid anchors: Magenta
   6. Eyebrows: Orchid
   7. Lips: Coral
-  8. Cheek patches: Rosy Peach
-  9. Full mesh tessellation: Muted Gray
+  8. Full Cheeks: Rosy Peach
+  9. Forehead: Warm Gold / Amber
+  10. Full mesh tessellation: Muted Gray
 
 All coordinates and connection indices reuse definitions from `utils.landmarks`
 and MediaPipe Tasks FaceLandmarksConnections.
@@ -31,6 +32,14 @@ from utils.landmarks import (
     RIGHT_CHEEK,
     LEFT_CHEEK,
     CHEEK_LANDMARKS,
+    FULL_RIGHT_CHEEK,
+    FULL_LEFT_CHEEK,
+    FULL_CHEEK_LANDMARKS,
+    RIGHT_CHEEK_OUTLINE,
+    LEFT_CHEEK_OUTLINE,
+    FOREHEAD_CONTOUR,
+    FOREHEAD_PATCH,
+    VASODILATION_LANDMARKS,
     RIGHT_EYE_OUTER,
     LEFT_EYE_OUTER,
     NOSE_TIP,
@@ -119,24 +128,25 @@ LEFT_IRIS_CONNECTIONS = np.array([
     (LEFT_IRIS_RING[3], LEFT_IRIS_RING[0]),
 ], dtype=np.int32)
 
-# Cheek patch polygon contours (5 edges per cheek)
+# Full cheek polygon contours (smooth 9-vertex closed perimeter loops)
 RIGHT_CHEEK_CONNECTIONS = np.array([
-    (RIGHT_CHEEK[0], RIGHT_CHEEK[1]),
-    (RIGHT_CHEEK[1], RIGHT_CHEEK[2]),
-    (RIGHT_CHEEK[2], RIGHT_CHEEK[3]),
-    (RIGHT_CHEEK[3], RIGHT_CHEEK[4]),
-    (RIGHT_CHEEK[4], RIGHT_CHEEK[0]),
+    (RIGHT_CHEEK_OUTLINE[i], RIGHT_CHEEK_OUTLINE[(i + 1) % len(RIGHT_CHEEK_OUTLINE)])
+    for i in range(len(RIGHT_CHEEK_OUTLINE))
 ], dtype=np.int32)
 
 LEFT_CHEEK_CONNECTIONS = np.array([
-    (LEFT_CHEEK[0], LEFT_CHEEK[1]),
-    (LEFT_CHEEK[1], LEFT_CHEEK[2]),
-    (LEFT_CHEEK[2], LEFT_CHEEK[3]),
-    (LEFT_CHEEK[3], LEFT_CHEEK[4]),
-    (LEFT_CHEEK[4], LEFT_CHEEK[0]),
+    (LEFT_CHEEK_OUTLINE[i], LEFT_CHEEK_OUTLINE[(i + 1) % len(LEFT_CHEEK_OUTLINE)])
+    for i in range(len(LEFT_CHEEK_OUTLINE))
 ], dtype=np.int32)
 
 CHEEK_CONNECTIONS = np.vstack([RIGHT_CHEEK_CONNECTIONS, LEFT_CHEEK_CONNECTIONS])
+FULL_CHEEK_CONNECTIONS = CHEEK_CONNECTIONS
+
+# Forehead polygon contour (27-landmark continuous closed loop from hairline to brows)
+FOREHEAD_CONNECTIONS = np.array([
+    (FOREHEAD_CONTOUR[i], FOREHEAD_CONTOUR[i + 1])
+    for i in range(len(FOREHEAD_CONTOUR) - 1)
+], dtype=np.int32)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -275,12 +285,23 @@ LIPS_REGION = _make_region(
     line_thickness=1,
 )
 
-# 8. Cheek Patches - Rosy Peach
+# 8. Full Cheeks - Rosy Peach
 CHEEK_PATCHES_REGION = _make_region(
-    name="Cheek Patches",
+    name="Cheeks",
     connections=CHEEK_CONNECTIONS,
-    point_indices=CHEEK_LANDMARKS,
+    point_indices=FULL_CHEEK_LANDMARKS,
     color=(160, 160, 255),  # Rosy Peach
+    line_thickness=1,
+    point_thickness=2,
+)
+FULL_CHEEKS_REGION = CHEEK_PATCHES_REGION
+
+# 9. Forehead - Warm Gold / Amber
+FOREHEAD_REGION = _make_region(
+    name="Forehead",
+    connections=FOREHEAD_CONNECTIONS,
+    point_indices=FOREHEAD_PATCH,
+    color=(0, 200, 255),  # Warm Gold / Amber
     line_thickness=1,
     point_thickness=2,
 )
@@ -295,7 +316,7 @@ FULL_MESH_REGION = _make_region(
 )
 
 
-# Ordered list of the 8 key regions for HUD rendering
+# Ordered list of the 9 key regions for HUD rendering
 KEY_REGIONS: Tuple[OverlayRegion, ...] = (
     RIGHT_EYELID_REGION,
     LEFT_EYELID_REGION,
@@ -305,6 +326,7 @@ KEY_REGIONS: Tuple[OverlayRegion, ...] = (
     EYEBROWS_REGION,
     LIPS_REGION,
     CHEEK_PATCHES_REGION,
+    FOREHEAD_REGION,
 )
 
 # All regions including full mesh

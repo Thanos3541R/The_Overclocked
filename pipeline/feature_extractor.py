@@ -28,6 +28,7 @@ from utils.landmarks import (
     RIGHT_EYE_EAR_INDICES, LEFT_EYE_EAR_INDICES,
     MAR_VERTICAL_PAIRS, MAR_HORIZONTAL,
     RIGHT_CHEEK, LEFT_CHEEK, CHEEK_LANDMARKS,
+    VASODILATION_LANDMARKS,
 )
 
 
@@ -707,9 +708,10 @@ class FeatureExtractor:
         return (sway, rigid_stabilization)
 
     def _compute_facial_flushing(self, frame: Optional[np.ndarray], landmarks: np.ndarray) -> Tuple[float, bool, float]:
-        """Measure micro-vascular facial flushing / vasodilation in cheek regions (Section A).
+        """Measure micro-vascular facial flushing / vasodilation across cheeks and forehead T-zone (Section A).
 
-        Calculates chromaticity ratio R / ((G + B)/2 + 1e-5) across MediaPipe cheek landmarks.
+        Calculates chromaticity ratio R / ((G + B)/2 + 1e-5) across MediaPipe full cheek
+        matrices and forehead frontal patch landmarks (VASODILATION_LANDMARKS).
         If frame is monochrome / NIR, flushing is cleanly marked invalid and delta set to 0.0.
         When RGB, flushing_delta evaluates relative surge over baseline (default 1.35 or calibrated).
         """
@@ -720,11 +722,15 @@ class FeatureExtractor:
             h, w = frame.shape[:2]
             r_vals, g_vals, b_vals = [], [], []
 
-            for idx in CHEEK_LANDMARKS:
+            for idx in VASODILATION_LANDMARKS:
                 if idx < len(landmarks):
                     pt = landmarks[idx]
                     px = int(pt[0] * w) if pt[0] <= 1.0 else int(pt[0])
                     py = int(pt[1] * h) if pt[1] <= 1.0 else int(pt[1])
+
+                    # Skip uninitialized / origin points from synthetic test mocks
+                    if px <= 3 and py <= 3:
+                        continue
 
                     y1 = max(0, py - 3)
                     y2 = min(h, py + 4)

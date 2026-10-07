@@ -25,6 +25,9 @@ from pipeline.one_euro_filter import OneEuroFilterBank
 from pipeline.pnp_normalizer import PnPNormalizer
 from pipeline.preprocessing import LightingNormalizer
 from utils.landmarks import (
+    FOREHEAD_CONTOUR,
+    FOREHEAD_PATCH,
+    FULL_CHEEK_LANDMARKS,
     LEFT_EYE_CONTOUR,
     LEFT_IRIS_CENTER,
     LEFT_IRIS_RING,
@@ -33,9 +36,13 @@ from utils.landmarks import (
     RIGHT_EYE_CONTOUR,
     RIGHT_IRIS_CENTER,
     RIGHT_IRIS_RING,
+    VASODILATION_LANDMARKS,
 )
 from utils.overlay_regions import (
     ALL_REGIONS,
+    CHEEK_PATCHES_REGION,
+    FOREHEAD_REGION,
+    FULL_CHEEKS_REGION,
     FULL_MESH_REGION,
     KEY_REGIONS,
     LEFT_EYELID_REGION,
@@ -53,8 +60,8 @@ from utils.visualization import Visualizer
 # ═══════════════════════════════════════════════════════════════════
 
 def test_key_regions_definitions():
-    """Verify that all 8 key regions and full mesh are properly defined."""
-    assert len(KEY_REGIONS) == 8, f"Expected 8 key regions, found {len(KEY_REGIONS)}"
+    """Verify that all 9 key regions and full mesh are properly defined."""
+    assert len(KEY_REGIONS) == 9, f"Expected 9 key regions, found {len(KEY_REGIONS)}"
     expected_names = [
         "R Eyelid",
         "L Eyelid",
@@ -63,7 +70,8 @@ def test_key_regions_definitions():
         "PnP Anchors",
         "Eyebrows",
         "Lips",
-        "Cheek Patches",
+        "Cheeks",
+        "Forehead",
     ]
     actual_names = [r.name for r in KEY_REGIONS]
     assert actual_names == expected_names
@@ -100,10 +108,28 @@ def test_key_regions_definitions():
     assert RIGHT_IRIS_CORNERS_REGION.color != LEFT_IRIS_CORNERS_REGION.color
     assert RIGHT_EYELID_REGION.color != LEFT_EYELID_REGION.color
 
+    # Forehead region checks
+    assert FOREHEAD_REGION.name == "Forehead"
+    assert len(FOREHEAD_REGION.connections) == len(FOREHEAD_CONTOUR) - 1
+    assert len(FOREHEAD_REGION.point_indices) == len(FOREHEAD_PATCH)
+    assert FOREHEAD_REGION.color == (0, 200, 255)  # Warm Gold / Amber
+
+    # Full cheeks checks
+    assert FULL_CHEEKS_REGION.name == "Cheeks"
+    assert len(FULL_CHEEKS_REGION.point_indices) == 44  # 22 per cheek
+    assert len(FULL_CHEEKS_REGION.connections) == 18   # 9 edges per cheek outline
+
     # Full mesh wireframe
     assert FULL_MESH_REGION.name == "Full Mesh"
     assert len(FULL_MESH_REGION.connections) == 2556
     assert FULL_MESH_REGION.connections.dtype == np.int32
+
+
+def test_vasodilation_landmarks_and_t_zone():
+    """Verify that vasodilation tracking landmarks include full cheeks and forehead patch."""
+    assert len(VASODILATION_LANDMARKS) == 64
+    assert set(FULL_CHEEK_LANDMARKS).issubset(set(VASODILATION_LANDMARKS))
+    assert set(FOREHEAD_PATCH).issubset(set(VASODILATION_LANDMARKS))
 
 
 def test_batch_draw_without_python_loops():

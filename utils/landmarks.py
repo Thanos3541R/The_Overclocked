@@ -128,11 +128,45 @@ CANONICAL_FACE_3D_8 = np.vstack([
 # ═══════════════════════════════════════════════════════════════════
 # Cheek Landmarks for Facial Flushing / Vasodilation
 # ═══════════════════════════════════════════════════════════════════
-# Subject's RIGHT cheek (viewer's left)
+# Legacy 5-point infraorbital cheek patches (kept for backward compatibility)
 RIGHT_CHEEK = [117, 118, 101, 205, 50]
-
-# Subject's LEFT cheek (viewer's right)
 LEFT_CHEEK = [346, 347, 330, 425, 280]
-
 CHEEK_LANDMARKS = RIGHT_CHEEK + LEFT_CHEEK
+
+# Full Cheek Regions (infraorbital rim, malar prominence, zygomatic arch, buccal area)
+# Subject's RIGHT cheek (viewer's left) - 22 anatomical landmarks
+FULL_RIGHT_CHEEK = [
+    116, 117, 118, 101, 123, 50, 205, 147, 187, 207, 216, 213, 192, 138, 214, 212, 172, 58, 132, 93, 234, 127
+]
+
+# Subject's LEFT cheek (viewer's right) - 22 anatomical landmarks
+FULL_LEFT_CHEEK = [
+    345, 346, 347, 330, 352, 280, 425, 376, 411, 427, 436, 433, 416, 367, 434, 432, 397, 288, 361, 323, 454, 356
+]
+
+# Combined 44-point full cheek matrix
+FULL_CHEEK_LANDMARKS = FULL_RIGHT_CHEEK + FULL_LEFT_CHEEK
+
+# Smooth closed perimeter contours for full cheek outlines (convex-like perimeter loops)
+RIGHT_CHEEK_OUTLINE = [101, 216, 212, 172, 58, 132, 93, 234, 127]
+LEFT_CHEEK_OUTLINE = [330, 436, 432, 397, 288, 361, 323, 454, 356]
+
+# ═══════════════════════════════════════════════════════════════════
+# Forehead Region Landmarks (Hairline Arc, Frontal Patch & Contours)
+# ═══════════════════════════════════════════════════════════════════
+# 27-landmark continuous closed polygon loop bounding the entire forehead:
+# Upper hairline arc (127 -> 10 -> 356) and lower supraorbital / glabella arc (356 -> 9 -> 127)
+FOREHEAD_CONTOUR = [
+    127, 162, 21, 54, 103, 67, 109, 10, 338, 297, 332, 284, 251, 389, 356,
+    300, 293, 334, 296, 336, 9, 107, 66, 105, 63, 70, 127
+]
+
+# 20 frontal bone interior landmarks for T-zone tracking and micro-vascular sampling
+FOREHEAD_PATCH = [
+    10, 151, 9, 8, 108, 69, 104, 68, 109, 67, 103, 54,
+    337, 299, 333, 298, 338, 297, 332, 284
+]
+
+# Comprehensive vasodilation tracking landmarks (full cheeks + forehead T-zone: 64 points)
+VASODILATION_LANDMARKS = FULL_CHEEK_LANDMARKS + FOREHEAD_PATCH
 

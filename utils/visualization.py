@@ -350,7 +350,7 @@ class Visualizer:
                 f"MAR: {features.mar:.3f}",
                 f"PERCLOS: {features.perclos:.3f}",
                 f"Yaw:{features.head_yaw:.1f} Pitch:{features.head_pitch:.1f} Roll:{features.head_roll:.1f}",
-                f"Saccade: {features.saccade_velocity:.1f} deg/s (lat: {features.saccade_latency_ms:.0f}ms)",
+                f"Saccade: {features.saccade_velocity:.1f} deg/s [dx:{getattr(features, 'raw_iris_dx', 0.0):.4f}] (lat: {features.saccade_latency_ms:.0f}ms)",
                 f"Blink Vel: dn {features.blink_closing_velocity:.2f} | up {features.blink_opening_velocity:.2f}",
                 f"Gaze Yaw Disp: {features.gaze_yaw_dispersion:.3f}",
                 f"Valid: {features.face_valid}" + (f" ({features.gating_reason})" if features.gating_reason else ""),

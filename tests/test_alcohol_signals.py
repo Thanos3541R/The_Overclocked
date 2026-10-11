@@ -83,9 +83,10 @@ class TestSaccadeDynamics:
         assert feat.saccade_velocity < 5.0, \
             f"Fixation velocity={feat.saccade_velocity:.1f} deg/s, expected < 5"
         assert feat.saccade_detected is False
+        assert feat.raw_iris_dx == 0.0
 
     def test_rapid_shift_produces_high_velocity(self):
-        """A rapid iris shift between frames should produce high velocity."""
+        """A rapid iris shift between frames should produce high velocity and positive raw_iris_dx."""
         ext = FeatureExtractor(fps=30.0)
 
         # Frame 0: center gaze
@@ -98,6 +99,8 @@ class TestSaccadeDynamics:
 
         assert feat.saccade_velocity > 20.0, \
             f"Saccade velocity={feat.saccade_velocity:.1f} deg/s, expected > 20"
+        assert feat.raw_iris_dx > 0.1, \
+            f"Expected positive raw_iris_dx, got {feat.raw_iris_dx}"
 
     def test_saccade_onset_offset_hysteresis(self):
         """Saccade detection should use hysteresis (onset > offset threshold)."""

@@ -74,6 +74,7 @@ class FrameFeatures:
     saccade_velocity: float = 0.0        # deg/s, peak angular velocity of iris
     saccade_detected: bool = False       # True during a rapid eye movement
     saccade_latency_ms: float = 0.0      # ms since last saccade ended (reaction time proxy)
+    raw_iris_dx: float = 0.0             # Raw normalized iris horizontal displacement per frame (|Δx|)
 
     # Blink velocity (involuntary, unfakeable)
     blink_closing_velocity: float = 0.0  # EAR units/s, downstroke speed
@@ -376,8 +377,8 @@ class FeatureExtractor:
         return (float(np.clip(x, -1.0, 1.0)), float(np.clip(y, -1.0, 1.0)))
 
     def _compute_saccade_dynamics(self, iris_x: float, iris_y: float,
-                                   timestamp: float) -> Tuple[float, bool, float]:
-        """Compute saccadic velocity, detect saccades, and measure latency.
+                                   timestamp: float) -> Tuple[float, bool, float, float]:
+        """Compute saccadic velocity, detect saccades, measure latency, and raw displacement.
 
         Uses frame-to-frame angular velocity of the averaged iris position.
         A saccade is detected when angular velocity exceeds onset threshold
@@ -397,23 +398,26 @@ class FeatureExtractor:
             timestamp: Current frame timestamp (seconds).
 
         Returns:
-            (velocity_deg_s, is_saccade, latency_ms)
+            (velocity_deg_s, is_saccade, latency_ms, raw_iris_dx)
         """
         if self._prev_iris_x is None or self._prev_timestamp is None:
             self._prev_iris_x = iris_x
             self._prev_iris_y = iris_y
             self._prev_timestamp = timestamp
-            return (0.0, False, 0.0)
+            return (0.0, False, 0.0, 0.0)
 
         dt = timestamp - self._prev_timestamp
         if dt <= 1e-6:
-            return (0.0, self._in_saccade, 0.0)
+            return (0.0, self._in_saccade, 0.0, 0.0)
         if dt > 0.5:
             # Gated period or frame drop exceeded 500ms — re-anchor without generating false derivative spike
             self._prev_iris_x = iris_x
             self._prev_iris_y = iris_y
             self._prev_timestamp = timestamp
-            return (self._last_features.saccade_velocity, False, 0.0)
+            return (self._last_features.saccade_velocity, False, 0.0, 0.0)
+
+        # Raw frame-to-frame iris displacement in normalized units
+        raw_dx = float(abs(iris_x - self._prev_iris_x))
 
         # Angular displacement in degrees
         dx_deg = (iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT
@@ -440,7 +444,7 @@ class FeatureExtractor:
         else:
             latency_ms = 0.0
 
-        return (velocity, self._in_saccade, latency_ms)
+        return (velocity, self._in_saccade, latency_ms, raw_dx)
 
     def _compute_blink_velocity(self, ear_avg: float,
                                  timestamp: float) -> Tuple[float, float]:
@@ -947,6 +951,7 @@ class FeatureExtractor:
             features.saccade_velocity = self._last_features.saccade_velocity
             features.saccade_detected = False
             features.saccade_latency_ms = self._last_features.saccade_latency_ms
+            features.raw_iris_dx = 0.0
             features.blink_closing_velocity = self._last_features.blink_closing_velocity
             features.blink_opening_velocity = self._last_features.blink_opening_velocity
             features.gaze_yaw_dispersion = self._last_features.gaze_yaw_dispersion
@@ -1039,7 +1044,7 @@ class FeatureExtractor:
         # ── Saccadic velocity & latency (Fransson et al. 2010) ──
         avg_iris_x = (features.left_iris_x + features.right_iris_x) / 2.0
         avg_iris_y = (features.left_iris_y + features.right_iris_y) / 2.0
-        features.saccade_velocity, features.saccade_detected, features.saccade_latency_ms = \
+        features.saccade_velocity, features.saccade_detected, features.saccade_latency_ms, features.raw_iris_dx = \
             self._compute_saccade_dynamics(avg_iris_x, avg_iris_y, timestamp)
 
         # ── Blink closing/opening velocity ──

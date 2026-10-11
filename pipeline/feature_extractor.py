@@ -1084,12 +1084,12 @@ class FeatureExtractor:
         features.blink_phase = self._blink_phase
 
         # ── Iris gaze ──
-        # Left eye (subject's left): iris 468, corners 263 (outer) & 362 (inner)
+        # Left eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
         features.left_iris_x, features.left_iris_y = self.compute_iris_position(
-            landmarks, LEFT_IRIS_CENTER, 263, 362)
-        # Right eye (subject's right): iris 473, corners 33 (outer) & 133 (inner)
+            landmarks, LEFT_IRIS_CENTER, 33, 133)
+        # Right eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
         features.right_iris_x, features.right_iris_y = self.compute_iris_position(
-            landmarks, RIGHT_IRIS_CENTER, 33, 133)
+            landmarks, RIGHT_IRIS_CENTER, 263, 362)
 
         # ── Saccadic velocity & latency (Fransson et al. 2010) ──
         avg_iris_x = (features.left_iris_x + features.right_iris_x) / 2.0

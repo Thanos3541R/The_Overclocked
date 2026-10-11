@@ -51,8 +51,10 @@ def make_full_landmarks(ear_val=0.30, iris_x_offset=0.0):
     lm[380] = [eye_cx2 + eye_w*0.15, eye_cy2 + half_v, 0]
 
     # Iris centers (positioned at eye centers + offset)
-    lm[473] = [eye_cx + iris_x_offset, eye_cy, 0]    # right iris center
-    lm[468] = [eye_cx2 + iris_x_offset, eye_cy2, 0]  # left iris center
+    # Landmark 468: viewer's left eye (corners 33 & 133)
+    # Landmark 473: viewer's right eye (corners 263 & 362)
+    lm[468] = [eye_cx + iris_x_offset, eye_cy, 0]
+    lm[473] = [eye_cx2 + iris_x_offset, eye_cy2, 0]
 
     # Mouth (for MAR)
     lm[61]  = [280, 350, 0]  # right mouth corner

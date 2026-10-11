@@ -55,6 +55,7 @@ class FrameFeatures:
     # Blink / micro-sleep detection
     blink_detected: bool = False
     microsleep_detected: bool = False
+    blink_phase: str = "open"  # "open", "closing", "closed", "opening"
 
     # Iris gaze (normalized [-1, 1])
     left_iris_x: float = 0.0
@@ -377,7 +378,8 @@ class FeatureExtractor:
         return (float(np.clip(x, -1.0, 1.0)), float(np.clip(y, -1.0, 1.0)))
 
     def _compute_saccade_dynamics(self, iris_x: float, iris_y: float,
-                                   timestamp: float) -> Tuple[float, bool, float, float]:
+                                   timestamp: float,
+                                   blink_phase: str = "open") -> Tuple[float, bool, float, float]:
         """Compute saccadic velocity, detect saccades, measure latency, and raw displacement.
 
         Uses frame-to-frame angular velocity of the averaged iris position.
@@ -396,6 +398,7 @@ class FeatureExtractor:
             iris_x: Average horizontal iris position (normalized [-1, 1]).
             iris_y: Average vertical iris position (normalized [-1, 1]).
             timestamp: Current frame timestamp (seconds).
+            blink_phase: Current blink FSM phase ("open", "closing", "closed", "opening").
 
         Returns:
             (velocity_deg_s, is_saccade, latency_ms, raw_iris_dx)
@@ -415,6 +418,47 @@ class FeatureExtractor:
             self._prev_iris_y = iris_y
             self._prev_timestamp = timestamp
             return (self._last_features.saccade_velocity, False, 0.0, 0.0)
+
+        # ── Blink Occlusion Guard ──
+        # When eyelids are closing, closed, or opening, skip displacement calculation
+        # and hold previous values to prevent false saccade triggers and preserve latency.
+        if blink_phase != "open":
+            self._was_in_blink = True
+            raw_dx = 0.0
+            velocity = self._last_features.saccade_velocity
+            saccade_detected = self._last_features.saccade_detected
+            self._in_saccade = saccade_detected
+
+            if self._in_saccade:
+                latency_ms = 0.0
+            elif self._last_saccade_end_time > 0:
+                latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
+            else:
+                latency_ms = 0.0
+
+            self._prev_iris_x = iris_x
+            self._prev_iris_y = iris_y
+            self._prev_timestamp = timestamp
+            return (velocity, saccade_detected, latency_ms, raw_dx)
+
+        if getattr(self, "_was_in_blink", False):
+            self._was_in_blink = False
+            # Reopening frame: re-anchor to current valid pupil position
+            # eliminating the false derivative spike against blink-occluded coordinates
+            self._prev_iris_x = iris_x
+            self._prev_iris_y = iris_y
+            self._prev_timestamp = timestamp
+            raw_dx = 0.0
+            velocity = 0.0
+            if self._in_saccade:
+                self._in_saccade = False
+                self._last_saccade_end_time = timestamp
+                latency_ms = 0.0
+            elif self._last_saccade_end_time > 0:
+                latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
+            else:
+                latency_ms = 0.0
+            return (velocity, False, latency_ms, raw_dx)
 
         # Raw frame-to-frame iris displacement in normalized units
         raw_dx = float(abs(iris_x - self._prev_iris_x))
@@ -952,6 +996,7 @@ class FeatureExtractor:
             features.saccade_detected = False
             features.saccade_latency_ms = self._last_features.saccade_latency_ms
             features.raw_iris_dx = 0.0
+            features.blink_phase = self._last_features.blink_phase
             features.blink_closing_velocity = self._last_features.blink_closing_velocity
             features.blink_opening_velocity = self._last_features.blink_opening_velocity
             features.gaze_yaw_dispersion = self._last_features.gaze_yaw_dispersion
@@ -1033,6 +1078,11 @@ class FeatureExtractor:
         else:
             features.perclos = 0.0
 
+        # ── Blink closing/opening velocity & FSM tracking ──
+        features.blink_closing_velocity, features.blink_opening_velocity = \
+            self._compute_blink_velocity(features.ear_avg, timestamp)
+        features.blink_phase = self._blink_phase
+
         # ── Iris gaze ──
         # Left eye (subject's left): iris 468, corners 263 (outer) & 362 (inner)
         features.left_iris_x, features.left_iris_y = self.compute_iris_position(
@@ -1045,11 +1095,7 @@ class FeatureExtractor:
         avg_iris_x = (features.left_iris_x + features.right_iris_x) / 2.0
         avg_iris_y = (features.left_iris_y + features.right_iris_y) / 2.0
         features.saccade_velocity, features.saccade_detected, features.saccade_latency_ms, features.raw_iris_dx = \
-            self._compute_saccade_dynamics(avg_iris_x, avg_iris_y, timestamp)
-
-        # ── Blink closing/opening velocity ──
-        features.blink_closing_velocity, features.blink_opening_velocity = \
-            self._compute_blink_velocity(features.ear_avg, timestamp)
+            self._compute_saccade_dynamics(avg_iris_x, avg_iris_y, timestamp, blink_phase=self._blink_phase)
 
         # ── Gaze yaw dispersion (σ_yaw) ──
         features.gaze_yaw_dispersion = self._compute_gaze_yaw_dispersion(avg_iris_x)

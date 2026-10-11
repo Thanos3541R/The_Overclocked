@@ -142,6 +142,109 @@ class TestSaccadeDynamics:
         if not feat.saccade_detected:
             assert feat.saccade_latency_ms > 0.0
 
+    def test_blink_sequence_does_not_reset_saccade_latency(self):
+        """Full open->closing->closed->opening->open cycle must not reset saccade_latency_ms to zero."""
+        ext = FeatureExtractor(fps=30.0, blink_threshold=0.20)
+
+        # 1. Trigger an initial saccade
+        lm0 = make_full_landmarks(ear_val=0.15, iris_x_offset=0.0)
+        ext.compute(lm0, timestamp=0.0, frame_id=0, face_valid=True)
+        lm_sac = make_full_landmarks(ear_val=0.15, iris_x_offset=18.0)
+        ext.compute(lm_sac, timestamp=1/30.0, frame_id=1, face_valid=True)
+
+        # 2. Fixate for 10 frames so saccade ends and latency accumulates
+        for i in range(2, 12):
+            lm = make_full_landmarks(ear_val=0.15, iris_x_offset=18.0)
+            feat = ext.compute(lm, timestamp=i/30.0, frame_id=i, face_valid=True)
+
+        assert feat.saccade_detected is False
+        latency_before_blink = feat.saccade_latency_ms
+        assert latency_before_blink > 0.0
+
+        # 3. Full blink cycle with simulated iris jitter/occlusion artifacts
+        # Closing (ear_val 0.12 -> 0.24, 0.08 -> 0.16)
+        closing_ears = [0.12, 0.08]
+        for j, ear in enumerate(closing_ears):
+            # Iris jumps around during closure (simulating occlusion artifact)
+            lm = make_full_landmarks(ear_val=ear, iris_x_offset=18.0 + (j * 10.0))
+            feat = ext.compute(lm, timestamp=(12+j)/30.0, frame_id=12+j, face_valid=True)
+            assert feat.blink_phase in ("closing", "closed")
+            assert feat.raw_iris_dx == 0.0
+            assert feat.saccade_detected is False
+            assert feat.saccade_latency_ms >= latency_before_blink
+
+        # Closed (ear_val 0.04 -> 0.08)
+        for j in range(2):
+            lm = make_full_landmarks(ear_val=0.04, iris_x_offset=30.0)
+            feat = ext.compute(lm, timestamp=(14+j)/30.0, frame_id=14+j, face_valid=True)
+            assert feat.blink_phase == "closed"
+            assert feat.raw_iris_dx == 0.0
+            assert feat.saccade_detected is False
+            assert feat.saccade_latency_ms >= latency_before_blink
+
+        # Opening (ear_val 0.10 -> 0.20)
+        opening_ears = [0.10]
+        for j, ear in enumerate(opening_ears):
+            lm = make_full_landmarks(ear_val=ear, iris_x_offset=25.0)
+            feat = ext.compute(lm, timestamp=(16+j)/30.0, frame_id=16+j, face_valid=True)
+            assert feat.blink_phase in ("opening", "open")
+            assert feat.saccade_detected is False
+            assert feat.saccade_latency_ms >= latency_before_blink
+
+        # Fully reopened (ear_val 0.15 -> 0.30)
+        for j in range(5):
+            lm = make_full_landmarks(ear_val=0.15, iris_x_offset=18.0)
+            feat = ext.compute(lm, timestamp=(17+j)/30.0, frame_id=17+j, face_valid=True)
+            assert feat.blink_phase == "open"
+            assert feat.saccade_detected is False
+            assert feat.saccade_latency_ms > latency_before_blink
+
+    def test_saccade_interrupted_by_blink(self):
+        """A saccade starts, a blink occurs, eye reopens; confirm latency and detection state are correct after reopening."""
+        ext = FeatureExtractor(fps=30.0, blink_threshold=0.20)
+
+        # Baseline frame
+        lm0 = make_full_landmarks(ear_val=0.15, iris_x_offset=0.0)
+        ext.compute(lm0, timestamp=0.0, frame_id=0, face_valid=True)
+
+        # 1. Saccade starts (large shift)
+        lm_sac = make_full_landmarks(ear_val=0.15, iris_x_offset=18.0)
+        feat_sac = ext.compute(lm_sac, timestamp=1/30.0, frame_id=1, face_valid=True)
+        assert feat_sac.saccade_detected is True
+        assert feat_sac.saccade_latency_ms == 0.0
+
+        # 2. Blink occurs immediately while saccade is active
+        # Closing (ear_val 0.12 -> 0.24)
+        lm_closing = make_full_landmarks(ear_val=0.12, iris_x_offset=20.0)
+        feat_c = ext.compute(lm_closing, timestamp=2/30.0, frame_id=2, face_valid=True)
+        assert feat_c.blink_phase in ("closing", "closed")
+        assert feat_c.saccade_detected is True
+        assert feat_c.saccade_latency_ms == 0.0
+        assert feat_c.raw_iris_dx == 0.0
+
+        # Closed (ear_val 0.04 -> 0.08)
+        lm_closed = make_full_landmarks(ear_val=0.04, iris_x_offset=20.0)
+        feat_closed = ext.compute(lm_closed, timestamp=3/30.0, frame_id=3, face_valid=True)
+        assert feat_closed.blink_phase == "closed"
+        assert feat_closed.saccade_detected is True
+        assert feat_closed.saccade_latency_ms == 0.0
+
+        # Opening (ear_val 0.10 -> 0.20)
+        lm_opening = make_full_landmarks(ear_val=0.10, iris_x_offset=20.0)
+        feat_o = ext.compute(lm_opening, timestamp=4/30.0, frame_id=4, face_valid=True)
+
+        # 3. Eye reopens and driver fixates at new position (ear_val 0.15 -> 0.30)
+        lm_reopen1 = make_full_landmarks(ear_val=0.15, iris_x_offset=20.0)
+        feat_reopen1 = ext.compute(lm_reopen1, timestamp=5/30.0, frame_id=5, face_valid=True)
+        assert feat_reopen1.blink_phase == "open"
+        assert feat_reopen1.saccade_detected is False
+
+        # Next fixation frame: latency begins accumulating from saccade end
+        lm_reopen2 = make_full_landmarks(ear_val=0.15, iris_x_offset=20.0)
+        feat_reopen2 = ext.compute(lm_reopen2, timestamp=6/30.0, frame_id=6, face_valid=True)
+        assert feat_reopen2.saccade_detected is False
+        assert feat_reopen2.saccade_latency_ms > 0.0
+
 
 class TestBlinkVelocity:
     """Test blink closing and opening velocity measurement."""

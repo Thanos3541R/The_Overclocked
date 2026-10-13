@@ -11,6 +11,7 @@ htmlcov/
 # Logs and run artifacts
 *.log
 output_features.csv
+my_video_features.csv
 captured_snapshot.jpg
 inspection_result.jpg
 panel_*.jpg

@@ -245,6 +245,8 @@ class FeatureExtractor:
         self.vor_min_head_speed = vor_min_head_speed
         self.vor_max_head_speed = vor_max_head_speed
         self._prev_head_yaw: Optional[float] = None
+        self._prev_head_pitch: Optional[float] = None
+        self._prev_head_roll: Optional[float] = None
         self._prev_head_timestamp: Optional[float] = None
         self._smoothed_vor_gain: float = 1.0
 
@@ -623,13 +625,11 @@ class FeatureExtractor:
         Sober: ~0.85-1.05. Impaired (BAC >= 0.05%): depressed (<0.7) or lagged.
         """
         if self._prev_head_yaw is None or self._prev_head_timestamp is None:
-            self._prev_head_yaw = head_yaw
-            self._prev_head_timestamp = timestamp
-            return self._smoothed_vor_gain
+            return float(self._smoothed_vor_gain)
 
         dt = timestamp - self._prev_head_timestamp
         if dt <= 1e-6:
-            return self._smoothed_vor_gain
+            return float(self._smoothed_vor_gain)
 
         head_vel = (head_yaw - self._prev_head_yaw) / dt   # deg/s
 
@@ -638,11 +638,10 @@ class FeatureExtractor:
 
             if self.vor_min_head_speed <= abs(head_vel) <= self.vor_max_head_speed:
                 raw_gain = -(eye_vel / head_vel)
-                clamped_gain = float(np.clip(raw_gain, 0.0, 2.0))
-                self._smoothed_vor_gain = 0.85 * self._smoothed_vor_gain + 0.15 * clamped_gain
+                if raw_gain > 0.05:
+                    clamped_gain = float(np.clip(raw_gain, 0.0, 2.0))
+                    self._smoothed_vor_gain = 0.85 * self._smoothed_vor_gain + 0.15 * clamped_gain
 
-        self._prev_head_yaw = head_yaw
-        self._prev_head_timestamp = timestamp
         return float(self._smoothed_vor_gain)
 
     def _compute_gen(self, avg_iris_x: float, timestamp: float) -> Tuple[bool, int, float]:
@@ -1030,6 +1029,8 @@ class FeatureExtractor:
             right_x, _ = self.compute_iris_position(landmarks, RIGHT_IRIS_CENTER, 263, 362)
             self._prev_iris_x = (left_x + right_x) / 2.0
             self._prev_head_yaw = head_yaw
+            self._prev_head_pitch = head_pitch
+            self._prev_head_roll = head_roll
 
         # ── EAR ──
         features.ear_right = self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)
@@ -1126,11 +1127,7 @@ class FeatureExtractor:
             dt_head = timestamp - self._prev_head_timestamp
             if dt_head > 1e-6:
                 d_yaw = head_yaw - self._prev_head_yaw
-                d_pitch = head_pitch - getattr(self, "_prev_head_pitch", head_pitch)
-                d_roll = head_roll - getattr(self, "_prev_head_roll", head_roll)
-                head_angular_vel = float(np.sqrt(d_yaw**2 + d_pitch**2 + d_roll**2) / dt_head)
-        self._prev_head_pitch = head_pitch
-        self._prev_head_roll = head_roll
+                head_angular_vel = float(abs(d_yaw) / dt_head)
 
         features.head_postural_sway, features.rigid_head_stabilization = \
             self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
@@ -1157,6 +1154,10 @@ class FeatureExtractor:
 
         self._prev_iris_x = avg_iris_x
         self._prev_iris_y = avg_iris_y
+        self._prev_head_yaw = head_yaw
+        self._prev_head_pitch = head_pitch
+        self._prev_head_roll = head_roll
+        self._prev_head_timestamp = timestamp
         self._prev_timestamp = timestamp
 
         self._last_features = features

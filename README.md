@@ -1,7 +1,7 @@
 # The Overclocked: Driver Monitoring System (DMS)
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Tests Passing](https://img.shields.io/badge/tests-157%2F157%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-164%2F164%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A research prototype that measures eyelid, eye, gaze, and head movements from a driver-facing camera (RGB webcam or monochrome NIR) and investigates whether those measurements can support passive impairment detection for a vehicle interlock.
@@ -15,7 +15,7 @@ A research prototype that measures eyelid, eye, gaze, and head movements from a 
 
 | Component | State |
 | :--- | :--- |
-| **Perception pipeline** (preprocessing, landmarks, smoothing, pose normalization, gating, feature extraction) | **Implemented.** 157 automated unit and integration tests passing (`pytest tests/ -v`). |
+| **Perception pipeline** (preprocessing, landmarks, smoothing, pose normalization, gating, feature extraction) | **Implemented.** 164 automated unit and integration tests passing (`pytest tests/ -v`). |
 | **Gaze features** (iris tracking, saccades, GEN, binocular vergence, VOR) | **Implemented.** Conjugate horizontal frame axis mapping (`[-1, 1]`) and bilateral symmetry verified. Degree-per-unit scaling in `config.py` is a placeholder. |
 | **Forehead & Full Cheeks Coverage** | **Implemented.** Full 27-landmark forehead contour loop + 20-point frontal patch and 44-point cheek matrices (22 per side) with 9-vertex closed perimeter outlines for T-zone tracking and HUD visualization. |
 | **Rule-based classifier, personal baseline calibration, Bayesian filter** | **Implemented.** Thresholds are design targets marked `[PLACEHOLDER]`. Not clinically validated. |
@@ -26,7 +26,7 @@ A research prototype that measures eyelid, eye, gaze, and head movements from a 
 
 ## What this project can and cannot claim
 
-- **Can claim:** A modular, reproducible edge measurement pipeline with comprehensive regression tests (157 passing), real-time CPU performance, and a disciplined engineering framework for evaluating physiological impairment signals.
+- **Can claim:** A modular, reproducible edge measurement pipeline with comprehensive regression tests (164 passing), real-time CPU performance, and a disciplined engineering framework for evaluating physiological impairment signals.
 - **Cannot claim:** That it detects intoxication in production, that any listed biomarker is "unfakeable," or that it meets automotive functional safety certification. ISO 26262 compliance requires rigorous process audits, formal Hazard Analysis and Risk Assessment (HARA), and safety-qualified tooling, not just unit tests.
 - **Regulatory context:** Published camera-based studies detect impairment from roughly 0.05% BAC upward. India's legal limit is 0.03%, so a passive vision system alone cannot be expected to reliably catch a driver right at the threshold without secondary sensor confirmation.
 
@@ -40,7 +40,7 @@ The system executes a modular, synchronized pipeline where raw camera frames pas
 flowchart TD
     A["Camera / video (RGB or Monochrome NIR)"] --> B["1. Preprocessing: CLAHE + adaptive gamma LUT"]
     B --> C["2. Landmarks: MediaPipe 478-pt FaceMesh + Adaptive ROI"]
-    C --> D["3. 1-Euro smoothing (<0.4ms vectorized)"]
+    C --> D["3. Split-bandwidth 1-Euro smoothing (3 decoupled profiles)"]
     D --> E["4. PnP 3D head pose (iterative solvePnP on 8 rigid anchors)"]
     E --> F["5. Pose-normalized landmarks"]
     F --> G["6. Gates: head pose gate, 5-pt Savitzky-Golay software IMU"]
@@ -53,12 +53,12 @@ flowchart TD
 ### Vibration and lighting handling
 
 1. **Lighting normalization:** Contrast Limited Adaptive Histogram Equalization (CLAHE, $8 \times 8$ grid, clip limit 2.0) combined with precomputed 256-entry lookup tables (LUT) for adaptive gamma correction on dark and dim frames (`pipeline/preprocessing.py`).
-2. **Landmark jitter:** Vectorized 1-Euro adaptive low-pass filter (Casiez et al., CHI 2012) operating across all 478 landmarks simultaneously in $<0.4\text{ ms}$ before pose solving (`pipeline/one_euro_filter.py`).
+2. **Decoupled landmark smoothing:** Vectorized 3-profile split-bandwidth 1-Euro adaptive low-pass filter operating across all 478 landmarks simultaneously in $<0.4\text{ ms}$ (`pipeline/one_euro_filter.py`). Decouples resting jitter cutoff ($f_{\text{c,min}} = 0.7\text{ Hz}$) on 460 rigid/PnP skull landmarks from fast dynamic eyelid motion ($3.0\text{ Hz}$, $\beta=0.80$) and ocular fixation ($1.5\text{ Hz}$, $\beta=0.40$).
 3. **Rigid head normalization:** Robust Perspective-n-Point (`cv2.solvePnP` with `SOLVEPNP_ITERATIVE` and temporal extrinsic guess reuse) against an expanded 8-point canonical face model (`CANONICAL_FACE_3D_8` adding nose bridge 168 and glabella 9). Eliminates vehicle bounce by computing internal facial metrics relative to the head frame (`pipeline/pnp_normalizer.py`).
 4. **Head pose gate:** Features freeze with holdover (`HOLD_LAST`) when $|\text{yaw}| > 35^\circ$, $\text{pitch} < -30^\circ$, or $\text{pitch} > 25^\circ$ (`pipeline/head_pose_estimator.py`). `[PLACEHOLDER]`
 5. **Software shock gate:** 5-point non-uniform Savitzky-Golay quadratic fit computing 3D nose-tip acceleration, decoupled from rotational motion ($\dot{\theta} < 20^\circ/\text{s}$). Freezes features for 150 ms if linear acceleration exceeds $2.5\text{ m/s}^2$ (`pipeline/imu_gate.py`). `[PLACEHOLDER]`
-6. **Motor event detection:** Saccades use dual-velocity hysteresis ($30^\circ/\text{s}$ onset, $15^\circ/\text{s}$ offset). Blinks use a 4-state Finite State Machine (`open` $\to$ `closing` $\to$ `closed` $\to$ `opening`).
-7. **Distant drivers:** An `AdaptiveROITracker` (`pipeline/face_mesh_detector.py`) with EMA temporal smoothing ($\alpha=0.35$) crops an expanded $2.0\times$ square bounding box directly from the raw frame, boosting effective face resolution $\sim 8\times$ inside the detector. When lost, it evaluates a Central Driver Quadrant crop ($[0.2W, 0.1H]$ to $[0.8W, 0.85H]$).
+6. **Motor event detection:** Saccades enforce a sub-pixel noise floor ($< 0.030$ normalized units) and dual-velocity hysteresis ($35^\circ/\text{s}$ onset, $20^\circ/\text{s}$ offset). Blinks use a 4-state Finite State Machine (`open` $\to$ `closing` $\to$ `closed` $\to$ `opening`).
+7. **Distant drivers:** An `AdaptiveROITracker` (`pipeline/face_mesh_detector.py`) with EMA temporal smoothing ($\alpha=0.15$) and a 2-pixel deadband crops an expanded $2.0\times$ square bounding box directly from the raw frame, boosting effective face resolution $\sim 8\times$ inside the detector without crop rounding oscillation. When lost, it evaluates a Central Driver Quadrant crop ($[0.2W, 0.1H]$ to $[0.8W, 0.85H]$).
 8. **Monochrome NIR invariance:** Auto-detects single-channel or monochrome 940nm NIR video. Automatically bypasses visible-spectrum chromaticity calculations (sclera redness, facial flushing) and reallocates diagnostic weights across structural markers in `pipeline/classifier.py`.
 
 ### Timing

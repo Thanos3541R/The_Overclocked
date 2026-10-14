@@ -9,7 +9,6 @@ The underlying assumption: if the entire face translates rapidly without
 corresponding head rotation, it's likely a vehicle shock (pothole, speed bump)
 rather than intentional driver movement.
 """
-import time
 import numpy as np
 from collections import deque
 from typing import Deque, Optional, Tuple
@@ -22,10 +21,10 @@ class SoftwareIMUGate:
     driver head movements (mirror checks, shoulder turns):
       1. Applies low-pass smoothing to the 3D translation vector (tvec) to eliminate
          high-frequency landmark tracking noise that corrupts finite differences.
-      2. Computes linear acceleration via a 5-point non-uniform Savitzky-Golay
+      2. Computes linear acceleration via a non-uniform Savitzky-Golay
          quadratic polynomial fit over a sliding window (drastically suppressing
          1/dt² noise amplification).
-      3. Computes angular rotational velocity from Euler angles.
+      3. Computes angular rotational velocity from Euler angles with wraparound handling.
       4. Only triggers feature freeze if linear acceleration exceeds the threshold
          AND rotational velocity is low (< 20 deg/s), because road shocks produce
          vertical chassis translation without intentional head rotation.
@@ -56,6 +55,11 @@ class SoftwareIMUGate:
         self.last_timestamp: Optional[float] = None
         self._freeze_until: float = 0.0
         self._history: Deque[Tuple[float, np.ndarray]] = deque(maxlen=self.window_size)
+
+    @staticmethod
+    def _wrap_angle_deg(delta: np.ndarray) -> np.ndarray:
+        """Wrap angular difference to [-180, 180] degrees to handle yaw crossing."""
+        return (delta + 180.0) % 360.0 - 180.0
 
     def _estimate_acceleration(self) -> float:
         """Estimate 3D linear acceleration magnitude (m/s²) using a non-uniform
@@ -124,6 +128,7 @@ class SoftwareIMUGate:
             False if operating normally.
         """
         if tvec is None:
+            self.last_timestamp = timestamp
             return timestamp < self._freeze_until
 
         pos = np.asarray(tvec, dtype=np.float64).flatten()[:3]
@@ -146,12 +151,13 @@ class SoftwareIMUGate:
         # 2. Savitzky-Golay polynomial acceleration estimate (m/s²)
         linear_accel_m_s2 = self._estimate_acceleration()
 
-        # 3. Compute head rotational velocity (deg/s) if euler angles available
+        # 3. Compute head rotational velocity (deg/s) with wrapped Euler angle differences
         rot_vel = 0.0
         if euler_angles is not None:
             curr_euler = np.asarray(euler_angles, dtype=np.float64)
             if self.last_euler is not None:
-                rot_vel = float(np.linalg.norm((curr_euler - self.last_euler) / dt))
+                euler_diff = self._wrap_angle_deg(curr_euler - self.last_euler)
+                rot_vel = float(np.linalg.norm(euler_diff / dt))
             self.last_euler = curr_euler.copy()
 
         # 4. Decoupled Shock Gate: Only trigger shock if linear acceleration is high
@@ -172,8 +178,10 @@ class SoftwareIMUGate:
 
     @property
     def is_frozen(self) -> bool:
-        """Check if currently in freeze state."""
-        return time.time() < self._freeze_until
+        """Check if currently in freeze state using pipeline timestamp."""
+        if self.last_timestamp is None:
+            return False
+        return self.last_timestamp < self._freeze_until
 
     def reset(self):
         """Reset gate state."""
@@ -183,4 +191,3 @@ class SoftwareIMUGate:
         self.last_timestamp = None
         self._freeze_until = 0.0
         self._history.clear()
-

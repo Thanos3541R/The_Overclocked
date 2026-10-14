@@ -414,9 +414,6 @@ class FeatureExtractor:
             return (0.0, self._in_saccade, 0.0, 0.0)
         if dt > 0.5:
             # Gated period or frame drop exceeded 500ms — re-anchor without generating false derivative spike
-            self._prev_iris_x = iris_x
-            self._prev_iris_y = iris_y
-            self._prev_timestamp = timestamp
             return (self._last_features.saccade_velocity, False, 0.0, 0.0)
 
         # ── Blink Occlusion Guard ──
@@ -436,18 +433,12 @@ class FeatureExtractor:
             else:
                 latency_ms = 0.0
 
-            self._prev_iris_x = iris_x
-            self._prev_iris_y = iris_y
-            self._prev_timestamp = timestamp
             return (velocity, saccade_detected, latency_ms, raw_dx)
 
         if getattr(self, "_was_in_blink", False):
             self._was_in_blink = False
             # Reopening frame: re-anchor to current valid pupil position
             # eliminating the false derivative spike against blink-occluded coordinates
-            self._prev_iris_x = iris_x
-            self._prev_iris_y = iris_y
-            self._prev_timestamp = timestamp
             raw_dx = 0.0
             velocity = 0.0
             if self._in_saccade:
@@ -624,7 +615,7 @@ class FeatureExtractor:
         loc = bool(vergence < self.loc_vergence_threshold_deg)
         return (float(vergence), loc)
 
-    def _compute_vor_gain(self, avg_iris_x: float, head_yaw: float, timestamp: float) -> float:
+    def _compute_vor_gain(self, avg_iris_x: float, head_yaw: float, timestamp: float, blink_phase: str = "open") -> float:
         """Compute Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842).
 
         VOR maintains gaze fixated on the road during natural head tremors/sway (2-25 deg/s).
@@ -642,7 +633,7 @@ class FeatureExtractor:
 
         head_vel = (head_yaw - self._prev_head_yaw) / dt   # deg/s
 
-        if self._prev_iris_x is not None:
+        if blink_phase == "open" and self._prev_iris_x is not None:
             eye_vel = (avg_iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT / dt  # deg/s
 
             if self.vor_min_head_speed <= abs(head_vel) <= self.vor_max_head_speed:
@@ -716,7 +707,7 @@ class FeatureExtractor:
         saccadic_samples = sum(1 for s in recent_samples if s)
         return float(saccadic_samples / len(recent_samples))
 
-    def _compute_postural_sway(self, head_pitch: float, head_roll: float, timestamp: float) -> Tuple[float, bool]:
+    def _compute_postural_sway(self, head_pitch: float, head_roll: float, timestamp: float, head_angular_vel: float = 0.0) -> Tuple[float, bool]:
         """Compute low-frequency involuntary head wobble/postural sway (Section A) and detect rigid head stabilization (Section B).
 
         NOTE: Seated postural sway is an experimental proxy of Romberg standing posturography;
@@ -724,6 +715,9 @@ class FeatureExtractor:
         filtered out. We isolate 0.5 - 2.0 Hz tremor by applying high-pass linear detrending across
         the recent window to reject road grade/banking drift and evaluating residual variance.
         """
+        if head_angular_vel > 5.0 and len(self._head_pose_history) > 0:
+            return (float(self._last_features.head_postural_sway), False)
+
         self._head_pose_history.append((timestamp, head_pitch, head_roll))
         cutoff = timestamp - self.sway_window_sec
         recent = [(t, p, r) for t, p, r in self._head_pose_history if t >= cutoff]
@@ -796,7 +790,11 @@ class FeatureExtractor:
                 mean_gb = float((np.mean(g_vals) + np.mean(b_vals)) / 2.0)
                 raw_ratio = float(mean_r / (mean_gb + 1e-5))
                 clamped = float(np.clip(raw_ratio, 0.5, 2.5))
-                self._smoothed_flushing = 0.90 * self._smoothed_flushing + 0.10 * clamped
+                if not getattr(self, "_flushing_initialized", False):
+                    self._smoothed_flushing = clamped
+                    self._flushing_initialized = True
+                else:
+                    self._smoothed_flushing = 0.90 * self._smoothed_flushing + 0.10 * clamped
                 flushing_delta = float((self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing))
                 return (float(self._smoothed_flushing), True, flushing_delta)
         except Exception:
@@ -953,7 +951,8 @@ class FeatureExtractor:
                 head_roll: float = 0.0,
                 imu_gated: bool = False,
                 gating_reason: str = "",
-                frame: Optional[np.ndarray] = None) -> FrameFeatures:
+                frame: Optional[np.ndarray] = None,
+                image_landmarks: Optional[np.ndarray] = None) -> FrameFeatures:
         """Compute all features for a single frame.
 
         Args:
@@ -965,6 +964,7 @@ class FeatureExtractor:
             imu_gated: True if IMU triggered a freeze.
             gating_reason: Human-readable gating reason.
             frame: Optional BGR frame array for color/vasodilation measurement.
+            image_landmarks: Optional un-rotated raw landmarks for visual skin sampling.
 
         Returns:
             FrameFeatures dataclass with all computed values.
@@ -1026,8 +1026,8 @@ class FeatureExtractor:
             self._prev_ear_timestamp = timestamp
             self._prev_head_timestamp = timestamp
             self._prev_ear_avg = (self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT) + self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)) / 2.0
-            left_x, _ = self.compute_iris_position(landmarks, LEFT_IRIS_CENTER, 263, 362)
-            right_x, _ = self.compute_iris_position(landmarks, RIGHT_IRIS_CENTER, 33, 133)
+            left_x, _ = self.compute_iris_position(landmarks, LEFT_IRIS_CENTER, 33, 133)
+            right_x, _ = self.compute_iris_position(landmarks, RIGHT_IRIS_CENTER, 263, 362)
             self._prev_iris_x = (left_x + right_x) / 2.0
             self._prev_head_yaw = head_yaw
 
@@ -1102,11 +1102,15 @@ class FeatureExtractor:
 
         # ── Advanced Oculomotor Impairment Signals ──
         # 1. Binocular vergence & Lack of Convergence (LOC - DRE sign)
-        features.vergence_angle_deg, features.lack_of_convergence = \
-            self._compute_binocular_vergence(features.left_iris_x, features.right_iris_x)
+        if self._blink_phase != "open" or abs(head_yaw) > 20.0:
+            features.vergence_angle_deg = self._last_features.vergence_angle_deg
+            features.lack_of_convergence = False
+        else:
+            features.vergence_angle_deg, features.lack_of_convergence = \
+                self._compute_binocular_vergence(features.left_iris_x, features.right_iris_x)
 
         # 2. Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842)
-        features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp)
+        features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase)
 
         # 3. Gaze-Evoked Nystagmus (GEN - Romano et al. 2017)
         features.gen_detected, features.gen_beat_count, features.gen_slow_phase_vel = \
@@ -1117,12 +1121,24 @@ class FeatureExtractor:
             self._compute_pursuit_fragmentation(features.saccade_detected, timestamp)
 
         # ── Postural Sway & Head Stabilization (Section A & B) ──
+        head_angular_vel = 0.0
+        if self._prev_head_yaw is not None and self._prev_head_timestamp is not None:
+            dt_head = timestamp - self._prev_head_timestamp
+            if dt_head > 1e-6:
+                d_yaw = head_yaw - self._prev_head_yaw
+                d_pitch = head_pitch - getattr(self, "_prev_head_pitch", head_pitch)
+                d_roll = head_roll - getattr(self, "_prev_head_roll", head_roll)
+                head_angular_vel = float(np.sqrt(d_yaw**2 + d_pitch**2 + d_roll**2) / dt_head)
+        self._prev_head_pitch = head_pitch
+        self._prev_head_roll = head_roll
+
         features.head_postural_sway, features.rigid_head_stabilization = \
-            self._compute_postural_sway(head_pitch, head_roll, timestamp)
+            self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
 
         # ── Facial Flushing / Vasodilation (Section A) ──
+        sample_lms = image_landmarks if image_landmarks is not None else landmarks
         features.facial_flushing_ratio, features.flushing_valid, features.flushing_delta = \
-            self._compute_facial_flushing(frame, landmarks)
+            self._compute_facial_flushing(frame, sample_lms)
 
         # ── Voluntary Masking Behaviors (Section B) ──
         if features.blink_detected:

@@ -82,7 +82,7 @@ class CSVLogger:
 
     def __init__(self, filepath: str):
         self.filepath = filepath
-        self._file = open(filepath, "w", newline="", buffering=1)
+        self._file = open(filepath, "w", newline="", buffering=1, encoding="utf-8")
         self._field_names = [f.name for f in fields(FrameFeatures)]
         self._writer = csv.DictWriter(self._file, fieldnames=self._field_names)
         self._writer.writeheader()
@@ -210,10 +210,23 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             landmarks = detector.detect(processed)
 
             if landmarks is None:
-                # No face detected — show frame without annotations
+                # Invalidate pose and log held-last gated frame so frame_ids never drop
+                normalizer.reset()
+                features = extractor.compute(
+                    landmarks=np.zeros((478, 3), dtype=np.float64),
+                    timestamp=timestamp,
+                    frame_id=frame_id,
+                    face_valid=False,
+                    imu_gated=False,
+                    gating_reason="no_face",
+                    frame=frame,
+                )
+                if csv_logger is not None:
+                    csv_logger.log(features)
+
                 if not args.headless:
                     viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                    visualizer.draw(viz_frame, None, None, None, pnp_success=False)
+                    visualizer.draw(viz_frame, None, features, None, pnp_success=False)
                     cv2.imshow("Driver Monitor", viz_frame)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q'):
@@ -224,7 +237,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         visualizer.cycle_overlay_mode()
                 continue
 
-            # ── Stage 3: 1-Euro Temporal Filtering ──
+            # ── Stage 3: Split-Bandwidth 1-Euro Temporal Filtering ──
             # Filter raw 2D/3D landmarks FIRST to eliminate detector sub-pixel jitter
             # before non-linear PnP optimization, preventing pose chatter.
             if filter_bank is None:
@@ -254,10 +267,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             imu_frozen = imu_gate.update(
                 timestamp=timestamp,
                 tvec=normalizer.tvec if pnp_success else None,
-                euler_angles=euler if pnp_success else None
+                euler_angles=euler if pnp_success else None,
             )
 
-            # ── Stage 8: Feature Extraction ──
+            # ── Stage 8: Feature Extraction (Pass raw frame + un-rotated image_landmarks) ──
             features = extractor.compute(
                 landmarks=norm_landmarks,
                 timestamp=timestamp,
@@ -268,14 +281,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 head_roll=pose_state.roll,
                 imu_gated=imu_frozen,
                 gating_reason=pose_state.gating_reason,
+                frame=frame,
+                image_landmarks=smooth_landmarks,
             )
-
-            # ── Stage 9: Smooth scalar features ──
-            if filter_bank is not None and pose_state.face_valid and not imu_frozen:
-                features.ear_avg = filter_bank.filter_scalar(
-                    timestamp, features.ear_avg, "ear_avg")
-                features.mar = filter_bank.filter_scalar(
-                    timestamp, features.mar, "mar")
 
             # ── Output ──
             if csv_logger is not None:

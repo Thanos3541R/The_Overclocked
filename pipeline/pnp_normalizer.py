@@ -9,7 +9,8 @@ Pipeline:
   2. Solve PnP using cv2.solvePnP with SOLVEPNP_ITERATIVE and useExtrinsicGuess=True
   3. Fall back to deterministic direct solvers (SOLVEPNP_SQPNP, SOLVEPNP_EPNP) on acquisition or failure
   4. Invalidate stale pose (rvec, tvec, rotation_matrix = None) on any solve failure
-  5. Transform landmarks from camera-space to face-centered space while preserving pixel coordinate range
+  5. Single-frame Euler jump rejection (>25 deg) with persistence escape (>= 2 frames)
+  6. Transform landmarks from camera-space to face-centered space while preserving pixel coordinate range
 """
 from typing import Optional, Tuple
 import cv2
@@ -27,19 +28,27 @@ from utils.landmarks import (
 
 
 class PnPNormalizer:
-    """Rigid face normalization via Perspective-n-Point."""
+    """Rigid face normalization via Perspective-n-Point with pose jump rejection."""
 
     def __init__(self, frame_width: int = 1280, frame_height: int = 720,
-                 focal_length: Optional[float] = None):
+                 focal_length: Optional[float] = None,
+                 max_euler_jump_deg: float = 25.0,
+                 max_jump_rejections: int = 2):
         """
         Args:
             frame_width: Camera frame width in pixels.
             frame_height: Camera frame height in pixels.
             focal_length: Camera focal length in pixels.
                           If None, approximated as frame_width.
+            max_euler_jump_deg: Max allowable Euler angle delta between consecutive frames (degrees)
+                                to reject single-frame PnP flips (e.g. Frame 113 artifact).
+            max_jump_rejections: Number of consecutive rejected frames before accepting the new pose
+                                 as a genuine fast head turn, preventing tracker deadlock.
         """
         self.frame_width = frame_width
         self.frame_height = frame_height
+        self.max_euler_jump_deg = float(max_euler_jump_deg)
+        self.max_jump_rejections = int(max_jump_rejections)
 
         f = focal_length if focal_length is not None else float(frame_width)
         cx = frame_width / 2.0
@@ -57,12 +66,22 @@ class PnPNormalizer:
         self.rvec: Optional[np.ndarray] = None
         self.tvec: Optional[np.ndarray] = None
         self.rotation_matrix: Optional[np.ndarray] = None
+        self._last_valid_euler: Optional[Tuple[float, float, float]] = None
+        self._jump_reject_count = 0
 
     def reset(self) -> None:
         """Explicitly clear stored pose state."""
         self.rvec = None
         self.tvec = None
         self.rotation_matrix = None
+        self._last_valid_euler = None
+        self._jump_reject_count = 0
+
+    @staticmethod
+    def _extract_euler(rotation_matrix: np.ndarray) -> Tuple[float, float, float]:
+        """Extract pitch, yaw, roll from a 3x3 rotation matrix via RQ decomposition."""
+        angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_matrix)
+        return float(angles[0]), float(angles[1]), float(angles[2])
 
     def solve_pose(self, landmarks: np.ndarray) -> bool:
         """Solve head pose from landmarks.
@@ -80,11 +99,12 @@ class PnPNormalizer:
         Returns:
             True if PnP solution found for this frame, False otherwise.
         """
-        # Save previous valid pose for extrinsic guess before invalidating
+        # Save previous valid pose for extrinsic guess and jump rejection
         prev_rvec = self.rvec.copy() if self.rvec is not None else None
         prev_tvec = self.tvec.copy() if self.tvec is not None else None
+        prev_euler = self._last_valid_euler
 
-        # Requirement 1: Invalidate stale pose immediately on every frame
+        # Invalidate stale pose immediately on every frame
         self.rvec = None
         self.tvec = None
         self.rotation_matrix = None
@@ -197,9 +217,37 @@ class PnPNormalizer:
             self.rotation_matrix = None
             return False
 
+        # Extract candidate rotation matrix and Euler angles
+        cand_rot_matrix, _ = cv2.Rodrigues(rvec)
+        cand_pitch, cand_yaw, cand_roll = self._extract_euler(cand_rot_matrix)
+
+        # Step C: Single-frame jump rejection defense with persistence escape
+        if prev_euler is not None:
+            p_prev, y_prev, r_prev = prev_euler
+            dp = abs(cand_pitch - p_prev)
+            dy = abs(cand_yaw - y_prev)
+            dr = abs(cand_roll - r_prev)
+            # Handle angle wraparound at +-180 deg
+            if dp > 180.0: dp = 360.0 - dp
+            if dy > 180.0: dy = 360.0 - dy
+            if dr > 180.0: dr = 360.0 - dr
+
+            if max(dp, dy, dr) > self.max_euler_jump_deg:
+                self._jump_reject_count += 1
+                if self._jump_reject_count < self.max_jump_rejections:
+                    # Single-frame transient glitch -> reject
+                    return False
+                # Jump persisted for >= max_jump_rejections frames -> accept real fast head turn
+                self._jump_reject_count = 0
+            else:
+                self._jump_reject_count = 0
+        else:
+            self._jump_reject_count = 0
+
         self.rvec = rvec
         self.tvec = tvec
-        self.rotation_matrix, _ = cv2.Rodrigues(rvec)
+        self.rotation_matrix = cand_rot_matrix
+        self._last_valid_euler = (cand_pitch, cand_yaw, cand_roll)
         return True
 
     def normalize_landmarks(self, landmarks: np.ndarray) -> np.ndarray:
@@ -253,12 +301,10 @@ class PnPNormalizer:
         Returns:
             (pitch, yaw, roll) in degrees, or None if no valid pose.
         """
-        if self.rotation_matrix is None:
+        if self.rotation_matrix is None or self._last_valid_euler is None:
             return None
 
-        angles, _, _, _, _, _ = cv2.RQDecomp3x3(self.rotation_matrix)
-        pitch, yaw, roll = angles[0], angles[1], angles[2]
-        return pitch, yaw, roll
+        return self._last_valid_euler
 
     def update_frame_size(self, width: int, height: int):
         """Update camera parameters if frame size changes."""

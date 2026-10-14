@@ -25,6 +25,9 @@ LEFT_MOUTH_CORNER = 291   # Left commissure
 NOSE_BRIDGE = 168         # Rhinion / sellion bridge
 MID_EYEBROW = 9           # Glabella / sellion midpoint
 
+RIGHT_EYE_INNER = 133     # Subject's right, inner canthus
+LEFT_EYE_INNER = 362      # Subject's left, inner canthus
+
 # Ordered list matching the canonical 3D model in pnp_normalizer.py
 PNP_LANDMARK_INDICES = [NOSE_TIP, CHIN, RIGHT_EYE_OUTER,
                         LEFT_EYE_OUTER, RIGHT_MOUTH_CORNER, LEFT_MOUTH_CORNER]
@@ -80,6 +83,12 @@ LEFT_IRIS_RING = [469, 470, 471, 472]
 # Subject's RIGHT eye iris (viewer's left)
 RIGHT_IRIS_CENTER = 473
 RIGHT_IRIS_RING = [474, 475, 476, 477]
+
+# Fast-moving oculomotor landmarks (8 vertical eyelid points + 10 iris points)
+# Kept on a high-bandwidth filter path so blink upstroke and saccade velocities are not damped
+DYNAMIC_EYELID_INDICES = [160, 158, 153, 144, 385, 387, 373, 380]
+DYNAMIC_IRIS_INDICES = [468, 469, 470, 471, 472, 473, 474, 475, 476, 477]
+DYNAMIC_EYELID_IRIS_INDICES = DYNAMIC_EYELID_INDICES + DYNAMIC_IRIS_INDICES
 
 # ═══════════════════════════════════════════════════════════════════
 # Mouth Landmarks for MAR (Mouth Aspect Ratio)

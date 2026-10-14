@@ -41,9 +41,9 @@ class PipelineConfig:
     roi_alpha: float = 0.15
 
     # ── 1-Euro Filter ──
-    landmark_min_cutoff: float = 0.7   # smoothing at rest
-    landmark_beta: float = 0.007       # speed coefficient
-    landmark_d_cutoff: float = 1.0     # derivative cutoff
+    landmark_min_cutoff: float = 0.8   # smoothing at rest
+    landmark_beta: float = 0.04       # speed coefficient
+    landmark_d_cutoff: float = 2.0     # derivative cutoff
     eyelid_min_cutoff: float = 2.0     # smoothing for fast eyelid landmarks
     eyelid_beta: float = 0.50          # speed coefficient for eyelids
     eyelid_d_cutoff: float = 8.0       # derivative cutoff for eyelids

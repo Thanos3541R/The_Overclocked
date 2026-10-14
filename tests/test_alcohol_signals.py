@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pytest
 from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
+from pipeline.one_euro_filter import OneEuroFilterBank
 from tests.test_ear import make_eye_landmarks
 from utils.landmarks import RIGHT_EYE_EAR_FLAT, LEFT_EYE_EAR_FLAT
 
@@ -318,6 +319,59 @@ class TestSaccadeDynamics:
         feat_reopen2 = ext.compute(lm_reopen2, timestamp=6/30.0, frame_id=6, face_valid=True)
         assert feat_reopen2.saccade_detected is False
         assert feat_reopen2.saccade_latency_ms > 0.0
+
+    def test_head_nod_up_down_does_not_cause_eye_sway_or_false_saccade(self):
+        """A 40px vertical + 15px horizontal head nod with pitch oscillation causes 0.0px relative sway and 0 false saccades."""
+        lm0 = make_full_landmarks(ear_val=0.30)
+        bank = OneEuroFilterBank(t0=0.0, x0=lm0)
+        ext = FeatureExtractor(fps=30.0)
+
+        # Baseline un-nodded relative distances
+        expected_rel_r_eyelid = lm0[160, 1] - 0.5 * (lm0[33, 1] + lm0[133, 1])
+        expected_rel_r_iris = lm0[468, 1] - 0.5 * (lm0[33, 1] + lm0[133, 1])
+        expected_rel_l_eyelid = lm0[385, 1] - 0.5 * (lm0[263, 1] + lm0[362, 1])
+        expected_rel_l_iris = lm0[473, 1] - 0.5 * (lm0[263, 1] + lm0[362, 1])
+
+        max_eyelid_sway = 0.0
+        max_iris_sway = 0.0
+
+        for i in range(60):
+            t = i / 30.0
+            y_nod = 40.0 * np.sin(2 * np.pi * 1.0 * t)
+            x_nod = 15.0 * np.cos(2 * np.pi * 1.0 * t)
+            pitch = 15.0 * np.sin(2 * np.pi * 1.0 * t)
+
+            raw_lm = make_full_landmarks(ear_val=0.30)
+            raw_lm[:, 0] += x_nod
+            raw_lm[:, 1] += y_nod
+
+            filtered_lm = bank.filter_landmarks(t, raw_lm)
+
+            # Check relative vertical distance between eye corners and eyelids/irises
+            filt_r_corner_y = 0.5 * (filtered_lm[33, 1] + filtered_lm[133, 1])
+            filt_r_eyelid_rel = filtered_lm[160, 1] - filt_r_corner_y
+            filt_r_iris_rel = filtered_lm[468, 1] - filt_r_corner_y
+
+            filt_l_corner_y = 0.5 * (filtered_lm[263, 1] + filtered_lm[362, 1])
+            filt_l_eyelid_rel = filtered_lm[385, 1] - filt_l_corner_y
+            filt_l_iris_rel = filtered_lm[473, 1] - filt_l_corner_y
+
+            sway_r_eyelid = abs(filt_r_eyelid_rel - expected_rel_r_eyelid)
+            sway_r_iris = abs(filt_r_iris_rel - expected_rel_r_iris)
+            sway_l_eyelid = abs(filt_l_eyelid_rel - expected_rel_l_eyelid)
+            sway_l_iris = abs(filt_l_iris_rel - expected_rel_l_iris)
+
+            max_eyelid_sway = max(max_eyelid_sway, sway_r_eyelid, sway_l_eyelid)
+            max_iris_sway = max(max_iris_sway, sway_r_iris, sway_l_iris)
+
+            feat = ext.compute(filtered_lm, timestamp=t, frame_id=i, face_valid=True, head_pitch=pitch)
+
+            assert feat.saccade_detected is False, f"False saccade triggered on frame {i} during head nod"
+            assert feat.saccade_velocity == 0.0, f"False saccade velocity {feat.saccade_velocity} on frame {i}"
+
+        # 1. Max relative vertical lag between eye corners and eyelids/irises is < 1e-4 px (0.0 sway)
+        assert max_eyelid_sway < 1e-4, f"Eyelid sway={max_eyelid_sway:.6f} px, expected < 1e-4"
+        assert max_iris_sway < 1e-4, f"Iris sway={max_iris_sway:.6f} px, expected < 1e-4"
 
 
 class TestBlinkVelocity:

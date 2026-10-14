@@ -222,6 +222,9 @@ class FeatureExtractor:
         # ── Saccade tracking state ──
         self._prev_iris_x: Optional[float] = None   # previous avg horizontal gaze
         self._prev_iris_y: Optional[float] = None
+        self._prev_left_iris_x: Optional[float] = None
+        self._prev_right_iris_x: Optional[float] = None
+        self._prev_eye_center_norm: Optional[np.ndarray] = None
         self._prev_timestamp: Optional[float] = None
         self._in_saccade: bool = False
         self._last_saccade_end_time: float = 0.0     # for latency computation
@@ -300,6 +303,9 @@ class FeatureExtractor:
         self._last_features = FrameFeatures()
         self._prev_iris_x = None
         self._prev_iris_y = None
+        self._prev_left_iris_x = None
+        self._prev_right_iris_x = None
+        self._prev_eye_center_norm = None
         self._prev_timestamp = None
         self._in_saccade = False
         self._last_saccade_end_time = 0.0
@@ -421,9 +427,25 @@ class FeatureExtractor:
 
         return (float(np.clip(x, -1.0, 1.0)), float(np.clip(y, -1.0, 1.0)))
 
+    @staticmethod
+    def _compute_eye_socket_center_norm(landmarks: np.ndarray) -> Optional[np.ndarray]:
+        if landmarks is None or landmarks.ndim != 2 or len(landmarks) <= 362:
+            return None
+        r_w = float(np.linalg.norm(landmarks[33, :2] - landmarks[133, :2]))
+        l_w = float(np.linalg.norm(landmarks[263, :2] - landmarks[362, :2]))
+        mean_w = max(0.5 * (r_w + l_w), 1.0)
+        center = 0.25 * (landmarks[33, :2] + landmarks[133, :2] + landmarks[263, :2] + landmarks[362, :2])
+        if np.isnan(center).any() or np.isinf(center).any():
+            return None
+        return center / mean_w
+
     def _compute_saccade_dynamics(self, iris_x: float, iris_y: float,
                                    timestamp: float,
-                                   blink_phase: str = "open") -> Tuple[float, bool, float, float]:
+                                   blink_phase: str = "open",
+                                   left_iris_x: Optional[float] = None,
+                                   right_iris_x: Optional[float] = None,
+                                   head_vel_deg_s: float = 0.0,
+                                   eye_socket_vel: float = 0.0) -> Tuple[float, bool, float, float]:
         """Compute saccadic velocity, detect saccades, measure latency, and raw displacement.
 
         Uses frame-to-frame angular velocity of the averaged iris position.
@@ -443,6 +465,10 @@ class FeatureExtractor:
             iris_y: Average vertical iris position (normalized [-1, 1]).
             timestamp: Current frame timestamp (seconds).
             blink_phase: Current blink FSM phase ("open", "closing", "closed", "opening").
+            left_iris_x: Optional left eye horizontal iris position for conjugate validation.
+            right_iris_x: Optional right eye horizontal iris position for conjugate validation.
+            head_vel_deg_s: Head angular speed in deg/s for VOR suppression.
+            eye_socket_vel: Normalized eye socket translation speed for motion suppression.
 
         Returns:
             (velocity_deg_s, is_saccade, latency_ms, raw_iris_dx)
@@ -455,6 +481,10 @@ class FeatureExtractor:
             self._prev_iris_x = iris_x
             self._prev_iris_y = iris_y
             self._prev_timestamp = timestamp
+            if left_iris_x is not None:
+                self._prev_left_iris_x = left_iris_x
+            if right_iris_x is not None:
+                self._prev_right_iris_x = right_iris_x
             return (0.0, False, 0.0, 0.0)
 
         dt = timestamp - self._prev_timestamp
@@ -468,6 +498,10 @@ class FeatureExtractor:
             self._prev_iris_x = iris_x
             self._prev_iris_y = iris_y
             self._prev_timestamp = timestamp
+            if left_iris_x is not None:
+                self._prev_left_iris_x = left_iris_x
+            if right_iris_x is not None:
+                self._prev_right_iris_x = right_iris_x
             return (0.0, False, 0.0, 0.0)
 
         # ── Blink Occlusion Guard ──
@@ -503,20 +537,34 @@ class FeatureExtractor:
                 latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
             else:
                 latency_ms = 0.0
+            if left_iris_x is not None:
+                self._prev_left_iris_x = left_iris_x
+            if right_iris_x is not None:
+                self._prev_right_iris_x = right_iris_x
             return (velocity, False, latency_ms, raw_dx)
 
         # Raw frame-to-frame iris displacement in normalized units
         raw_dx = float(abs(iris_x - self._prev_iris_x))
         raw_dy = float(abs(iris_y - self._prev_iris_y))
 
-        if np.hypot(raw_dx, raw_dy * 0.5) < 0.032:
+        if (left_iris_x is not None and right_iris_x is not None and
+                self._prev_left_iris_x is not None and self._prev_right_iris_x is not None):
+            dx_l = left_iris_x - self._prev_left_iris_x
+            dx_r = right_iris_x - self._prev_right_iris_x
+            if dx_l * dx_r <= 0.0:
+                effective_dx = 0.0
+            else:
+                effective_dx = float(min(abs(dx_l), abs(dx_r)))
+        else:
+            effective_dx = raw_dx
+
+        is_head_moving = (eye_socket_vel > 0.60) or (head_vel_deg_s > 12.0)
+        noise_floor = 0.032 if not is_head_moving else 0.18
+        if effective_dx < noise_floor:
             velocity = 0.0
         else:
-            # Angular displacement in degrees
-            dx_deg = (iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT
-            dy_deg = (iris_y - self._prev_iris_y) * _DEG_PER_IRIS_UNIT * 0.5
-            angular_displacement = np.sqrt(dx_deg**2 + dy_deg**2)
-            velocity = angular_displacement / dt  # deg/s
+            dx_deg = effective_dx * _DEG_PER_IRIS_UNIT
+            velocity = max(0.0, (dx_deg / dt) - (0.8 * head_vel_deg_s if is_head_moving else 0.0))
 
         # Saccade detection with hysteresis
         if not self._in_saccade:
@@ -536,7 +584,7 @@ class FeatureExtractor:
         else:
             latency_ms = 0.0
 
-        return (velocity, self._in_saccade, latency_ms, raw_dx)
+        return (velocity, self._in_saccade, latency_ms, effective_dx)
 
     def _compute_blink_velocity(self, ear_avg: float,
                                  timestamp: float) -> Tuple[float, float]:
@@ -1088,6 +1136,9 @@ class FeatureExtractor:
             right_x, right_y = self.compute_iris_position(iris_lms, RIGHT_IRIS_CENTER, 263, 362)
             self._prev_iris_x = (left_x + right_x) / 2.0
             self._prev_iris_y = (left_y + right_y) / 2.0
+            self._prev_left_iris_x = left_x
+            self._prev_right_iris_x = right_x
+            self._prev_eye_center_norm = self._compute_eye_socket_center_norm(iris_lms)
             self._prev_head_yaw = head_yaw
             self._prev_head_pitch = head_pitch
             self._prev_head_roll = head_roll
@@ -1153,11 +1204,34 @@ class FeatureExtractor:
         features.right_iris_x, features.right_iris_y = self.compute_iris_position(
             iris_lms, RIGHT_IRIS_CENTER, 263, 362)
 
+        # Compute head angular velocity & eye socket translation velocity for VOR / motion suppression
+        head_total_vel = 0.0
+        if self._prev_head_yaw is not None and self._prev_head_pitch is not None and self._prev_head_timestamp is not None:
+            dt_head = timestamp - self._prev_head_timestamp
+            if dt_head > 1e-6:
+                d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
+                d_pitch = (head_pitch - self._prev_head_pitch + 180.0) % 360.0 - 180.0
+                head_total_vel = float(np.hypot(d_yaw, d_pitch) / dt_head)
+
+        curr_socket = self._compute_eye_socket_center_norm(iris_lms)
+        eye_socket_vel = 0.0
+        if curr_socket is not None and self._prev_eye_center_norm is not None and self._prev_timestamp is not None:
+            dt_socket = timestamp - self._prev_timestamp
+            if dt_socket > 1e-6:
+                eye_socket_vel = float(np.linalg.norm(curr_socket - self._prev_eye_center_norm) / dt_socket)
+
         # ── Saccadic velocity & latency (Fransson et al. 2010) ──
         avg_iris_x = (features.left_iris_x + features.right_iris_x) / 2.0
         avg_iris_y = (features.left_iris_y + features.right_iris_y) / 2.0
         features.saccade_velocity, features.saccade_detected, features.saccade_latency_ms, features.raw_iris_dx = \
-            self._compute_saccade_dynamics(avg_iris_x, avg_iris_y, timestamp, blink_phase=self._blink_phase)
+            self._compute_saccade_dynamics(
+                avg_iris_x, avg_iris_y, timestamp,
+                blink_phase=self._blink_phase,
+                left_iris_x=features.left_iris_x,
+                right_iris_x=features.right_iris_x,
+                head_vel_deg_s=head_total_vel,
+                eye_socket_vel=eye_socket_vel,
+            )
 
         # ── Gaze yaw dispersion (σ_yaw) ──
         features.gaze_yaw_dispersion = self._compute_gaze_yaw_dispersion(avg_iris_x)
@@ -1213,6 +1287,9 @@ class FeatureExtractor:
         features.masking_divergence_score, features.masking_detected = \
             self._compute_anti_masking_divergence(features, timestamp)
 
+        self._prev_left_iris_x = features.left_iris_x
+        self._prev_right_iris_x = features.right_iris_x
+        self._prev_eye_center_norm = curr_socket
         self._prev_iris_x = avg_iris_x
         self._prev_iris_y = avg_iris_y
         self._prev_head_yaw = head_yaw

@@ -27,6 +27,17 @@ from utils.landmarks import (
     DYNAMIC_EYELID_IRIS_INDICES,
 )
 
+# Viewer's left eye (anchored by corners 33 & 133): 14 eyelid contour points + 5 iris points
+_RIGHT_EYE_OCULO_INDICES = [
+    7, 163, 144, 145, 153, 154, 155, 173, 157, 158, 159, 160, 161, 246,
+    468, 469, 470, 471, 472,
+]
+# Viewer's right eye (anchored by corners 263 & 362): 14 eyelid contour points + 5 iris points
+_LEFT_EYE_OCULO_INDICES = [
+    382, 381, 380, 374, 373, 390, 249, 466, 388, 387, 386, 385, 384, 398,
+    473, 474, 475, 476, 477,
+]
+
 
 class VectorizedOneEuroFilter:
     """1-Euro filter operating on (N, D) arrays (e.g., 478 landmarks × 3 coords).
@@ -153,6 +164,22 @@ class OneEuroFilterBank:
     tremor while tracking fast saccades.
     """
 
+    @staticmethod
+    def _compute_eye_anchors(lms: np.ndarray) -> np.ndarray:
+        anchors = np.zeros_like(lms, dtype=np.float64)
+        if lms.ndim != 2 or lms.shape[0] <= 362:
+            return anchors
+        n_pts = lms.shape[0]
+        c_r = 0.5 * (lms[33] + lms[133])
+        c_l = 0.5 * (lms[263] + lms[362])
+        r_idx = [i for i in _RIGHT_EYE_OCULO_INDICES if i < n_pts]
+        l_idx = [i for i in _LEFT_EYE_OCULO_INDICES if i < n_pts]
+        if r_idx:
+            anchors[r_idx] = c_r
+        if l_idx:
+            anchors[l_idx] = c_l
+        return anchors
+
     def __init__(self, t0: float, x0: np.ndarray,
                  landmark_min_cutoff: float = 0.7,
                  landmark_beta: float = 0.007,
@@ -220,8 +247,9 @@ class OneEuroFilterBank:
                 beta_vec[iris_indices, 0] = float(iris_beta)
                 d_cutoff_vec[iris_indices, 0] = float(iris_d_cutoff)
 
+            x0_init = (x0_arr - self._compute_eye_anchors(x0_arr)) if x0_arr.shape[0] > 362 else x0_arr
             self.landmark_filter = VectorizedOneEuroFilter(
-                t0, x0_arr,
+                t0, x0_init,
                 min_cutoff=min_cutoff_vec,
                 beta=beta_vec,
                 d_cutoff=d_cutoff_vec,
@@ -234,6 +262,7 @@ class OneEuroFilterBank:
                 d_cutoff=landmark_d_cutoff,
             )
 
+        self._last_output = x0_arr.copy()
         self._ear_filters = {}  # lazy-initialized scalar filters
         self._ear_min_cutoff = ear_min_cutoff
         self._ear_beta = ear_beta
@@ -251,12 +280,22 @@ class OneEuroFilterBank:
     def filter_landmarks(self, t: float, landmarks: np.ndarray) -> np.ndarray:
         """Filter landmark array."""
         lms = np.asarray(landmarks, dtype=np.float64)
+        if np.isnan(lms).any() or np.isinf(lms).any():
+            return getattr(self, "_last_output", self.landmark_filter.x_prev).copy()
         if (lms.shape != self.landmark_filter.x_prev.shape or
                 (isinstance(self.landmark_filter.min_cutoff, np.ndarray) and
                  self.landmark_filter.min_cutoff.shape[0] != lms.shape[0])):
             self.reset(t, lms)
-            return self.landmark_filter.x_prev.copy()
-        return self.landmark_filter(t, lms)
+            return self._last_output.copy()
+        if self._preserve_oculomotor and lms.ndim == 2 and lms.shape[0] > 362:
+            raw_anchors = self._compute_eye_anchors(lms)
+            rel_out = self.landmark_filter(t, lms - raw_anchors)
+            out = rel_out + self._compute_eye_anchors(rel_out)
+            self._last_output = out.copy()
+            return out
+        out = self.landmark_filter(t, lms)
+        self._last_output = out.copy()
+        return out
 
     def filter_scalar(self, t: float, value: float, key: str) -> float:
         """Filter a named scalar signal (e.g., 'ear_left', 'mar')."""
@@ -295,5 +334,9 @@ class OneEuroFilterBank:
                 ear_beta=self._ear_beta,
             )
         else:
-            self.landmark_filter.reset(t, landmarks)
+            if self._preserve_oculomotor and lms.ndim == 2 and lms.shape[0] > 362:
+                self.landmark_filter.reset(t, lms - self._compute_eye_anchors(lms))
+            else:
+                self.landmark_filter.reset(t, lms)
+            self._last_output = lms.copy()
             self._ear_filters.clear()

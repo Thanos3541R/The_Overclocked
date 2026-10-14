@@ -167,6 +167,8 @@ class AdaptiveROITracker:
 
         h_frame, w_frame = frame_shape[:2]
         if w_frame <= 0 or h_frame <= 0:
+            self._last_crop_bounds = None
+            self._last_frame_shape = None
             return 0, 0, 0, 0
 
         if not self.is_tracking or self.cx is None or self.cy is None or self.scale is None:
@@ -332,7 +334,7 @@ class FaceMeshDetector:
             min_tracking_confidence: Minimum landmark tracking confidence (default: 0.35).
             enable_adaptive_roi: Enable high-resolution adaptive ROI tracking.
             roi_margin: Margin multiplier for adaptive ROI crop.
-            roi_alpha: EMA smoothing coefficient for adaptive ROI tracker (default: 0.35).
+            roi_alpha: EMA smoothing coefficient for adaptive ROI tracker (default: 0.15).
         """
         self._n_landmarks = 478 if refine_landmarks else 468
         self._mode = "unknown"

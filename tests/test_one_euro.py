@@ -221,5 +221,35 @@ class TestOneEuroFilterBank:
         assert res.shape == (468, 3)
 
 
+    def test_dynamic_shape_change_without_explicit_reset(self):
+        """filter_landmarks automatically re-anchors without broadcast error when shape changes dynamically."""
+        bank = OneEuroFilterBank(t0=0.0, x0=np.zeros((478, 3)))
+        # Frame 1 with 468 points (MediaPipe fallback without irises)
+        out1 = bank.filter_landmarks(1.0, np.ones((468, 3)))
+        assert out1.shape == (468, 3)
+        # Frame 2 with 468 points - must not crash with broadcast error
+        out2 = bank.filter_landmarks(1.033, np.ones((468, 3)) * 2.0)
+        assert out2.shape == (468, 3)
+
+        # Switch back to 478 points dynamically
+        out3 = bank.filter_landmarks(2.0, np.ones((478, 3)))
+        assert out3.shape == (478, 3)
+        out4 = bank.filter_landmarks(2.033, np.ones((478, 3)) * 2.0)
+        assert out4.shape == (478, 3)
+
+        # Standalone VectorizedOneEuroFilter dynamic shape resilience
+        v_filter = VectorizedOneEuroFilter(
+            t0=0.0,
+            x0=np.zeros((478, 3)),
+            min_cutoff=np.ones((478, 1)),
+            beta=np.ones((478, 1)) * 0.1,
+            d_cutoff=np.ones((478, 1)),
+        )
+        r1 = v_filter(1.0, np.ones((468, 3)))
+        assert r1.shape == (468, 3)
+        r2 = v_filter(1.033, np.ones((468, 3)) * 2.0)
+        assert r2.shape == (468, 3)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

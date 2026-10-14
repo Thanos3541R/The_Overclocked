@@ -92,7 +92,9 @@ class VectorizedOneEuroFilter:
         x = np.asarray(x, dtype=np.float64)
 
         # If input shape changed dynamically, re-anchor state safely
-        if x.shape != self.x_prev.shape:
+        if (x.shape != self.x_prev.shape or
+                (isinstance(self.min_cutoff, np.ndarray) and
+                 self.min_cutoff.shape[0] != x.shape[0])):
             self.reset(t, x)
             return self.x_prev.copy()
 
@@ -120,6 +122,22 @@ class VectorizedOneEuroFilter:
         self.x_prev = np.asarray(x, dtype=np.float64).copy()
         self.dx_prev = np.zeros_like(self.x_prev)
         self.t_prev = float(t)
+        if (isinstance(self.min_cutoff, np.ndarray) and self.x_prev.ndim >= 1 and
+                self.min_cutoff.shape[0] != self.x_prev.shape[0]):
+            n_curr = self.min_cutoff.shape[0]
+            n_new = self.x_prev.shape[0]
+            if n_new < n_curr:
+                self.min_cutoff = self.min_cutoff[:n_new].copy()
+                self.beta = self.beta[:n_new].copy()
+                self.d_cutoff = self.d_cutoff[:n_new].copy()
+            else:
+                pad_len = n_new - n_curr
+                last_min = self.min_cutoff[-1:] if n_curr > 0 else np.array([[1.0]])
+                last_beta = self.beta[-1:] if n_curr > 0 else np.array([[0.007]])
+                last_d = self.d_cutoff[-1:] if n_curr > 0 else np.array([[1.0]])
+                self.min_cutoff = np.vstack([self.min_cutoff, np.repeat(last_min, pad_len, axis=0)])
+                self.beta = np.vstack([self.beta, np.repeat(last_beta, pad_len, axis=0)])
+                self.d_cutoff = np.vstack([self.d_cutoff, np.repeat(last_d, pad_len, axis=0)])
 
 
 class OneEuroFilterBank:
@@ -229,7 +247,13 @@ class OneEuroFilterBank:
 
     def filter_landmarks(self, t: float, landmarks: np.ndarray) -> np.ndarray:
         """Filter landmark array."""
-        return self.landmark_filter(t, landmarks)
+        lms = np.asarray(landmarks, dtype=np.float64)
+        if (lms.shape != self.landmark_filter.x_prev.shape or
+                (isinstance(self.landmark_filter.min_cutoff, np.ndarray) and
+                 self.landmark_filter.min_cutoff.shape[0] != lms.shape[0])):
+            self.reset(t, lms)
+            return self.landmark_filter.x_prev.copy()
+        return self.landmark_filter(t, lms)
 
     def filter_scalar(self, t: float, value: float, key: str) -> float:
         """Filter a named scalar signal (e.g., 'ear_left', 'mar')."""

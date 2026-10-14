@@ -447,6 +447,9 @@ class FeatureExtractor:
         Returns:
             (velocity_deg_s, is_saccade, latency_ms, raw_iris_dx)
         """
+        if np.isnan(iris_x) or np.isnan(iris_y):
+            return (0.0, False, 0.0, 0.0)
+
         if self._prev_iris_x is None or self._prev_iris_y is None or self._prev_timestamp is None:
             self._prev_iris_x = iris_x
             self._prev_iris_y = iris_y
@@ -458,7 +461,13 @@ class FeatureExtractor:
             return (0.0, self._in_saccade, 0.0, 0.0)
         if dt > 0.5:
             # Gated period or frame drop exceeded 500ms — re-anchor without generating false derivative spike
-            return (self._last_features.saccade_velocity, False, 0.0, 0.0)
+            if self._in_saccade:
+                self._in_saccade = False
+                self._last_saccade_end_time = timestamp
+            self._prev_iris_x = iris_x
+            self._prev_iris_y = iris_y
+            self._prev_timestamp = timestamp
+            return (0.0, False, 0.0, 0.0)
 
         # ── Blink Occlusion Guard ──
         # When eyelids are closing, closed, or opening, skip displacement calculation

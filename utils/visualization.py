@@ -176,7 +176,7 @@ class Visualizer:
                 region.draw(frame, pts, dimmed=dimmed)
 
             # Iris gaze crosshair markers
-            if self.show_iris:
+            if self.show_iris and len(pts) > max(LEFT_IRIS_CENTER, RIGHT_IRIS_CENTER):
                 c_r = RIGHT_IRIS_CORNERS_REGION.dimmed_color if dimmed else RIGHT_IRIS_CORNERS_REGION.color
                 c_l = LEFT_IRIS_CORNERS_REGION.dimmed_color if dimmed else LEFT_IRIS_CORNERS_REGION.color
                 cv2.drawMarker(frame, tuple(pts[LEFT_IRIS_CENTER]), c_r,

@@ -164,6 +164,22 @@ def test_iris_crosshair_marker_colors_match_regions():
         assert colors_called[idx_right] == LEFT_IRIS_CORNERS_REGION.color
 
 
+def test_overlay_draw_with_468_points():
+    """Verify that visualizer and overlay regions render cleanly on 468-point models without irises."""
+    viz = Visualizer(overlay_mode="regions", show_iris=True)
+    frame = np.zeros((300, 300, 3), dtype=np.uint8)
+    landmarks_468 = np.ones((468, 3), dtype=np.float64) * 150.0
+
+    # Must render without IndexError
+    rendered = viz.draw(frame.copy(), landmarks_468)
+    assert rendered.shape == frame.shape
+
+    # Full mesh mode with 468 points
+    viz_full = Visualizer(overlay_mode="full", show_iris=True)
+    rendered_full = viz_full.draw(frame.copy(), landmarks_468)
+    assert rendered_full.shape == frame.shape
+
+
 def test_vasodilation_landmarks_and_t_zone():
     """Verify that vasodilation tracking landmarks include full cheeks and forehead patch."""
     assert len(VASODILATION_LANDMARKS) == 64

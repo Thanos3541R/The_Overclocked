@@ -165,6 +165,24 @@ class TestSaccadeDynamics:
         feat_resumed = ext.compute(lm_shifted, timestamp=7/30.0, frame_id=7, face_valid=True)
         assert feat_resumed.saccade_detected is False
 
+        # Frame drop exceeding 500ms unlatches saccade and re-anchors so sub-onset drift does not latch
+        ext.compute(lm_saccade, timestamp=8/30.0, frame_id=8, face_valid=True)
+        assert ext._in_saccade is True
+        # 1.0 second frame drop
+        feat_dropped = ext.compute(lm_saccade, timestamp=38/30.0, frame_id=9, face_valid=True)
+        assert feat_dropped.saccade_detected is False
+        assert ext._in_saccade is False
+        # Subsequent drift with velocity ~22.7 deg/s (between offset=20 and onset=35) must NOT latch
+        lm_drift = make_full_landmarks(ear_val=0.30, iris_x_offset=18.0 + 1.0)
+        feat_post_drop = ext.compute(lm_drift, timestamp=39/30.0, frame_id=10, face_valid=True)
+        assert feat_post_drop.saccade_detected is False
+        assert ext._in_saccade is False
+
+        # Direct NaN input safety
+        v_nan, sac_nan, _, _ = ext._compute_saccade_dynamics(float('nan'), 0.0, timestamp=40/30.0)
+        assert v_nan == 0.0
+        assert sac_nan is False
+
     def test_latency_accumulates_during_fixation(self):
         """Saccade latency should increase during fixation after a saccade."""
         ext = FeatureExtractor(fps=30.0)

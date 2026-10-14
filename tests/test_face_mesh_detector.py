@@ -823,6 +823,15 @@ class TestTrackerRobustnessAndEdgeCases:
         assert tracker._last_crop_bounds is None
         assert tracker._last_frame_shape is None
 
+        # Degenerate frame dimensions (0, 0) or negative
+        tracker.is_tracking = True
+        tracker.cx, tracker.cy, tracker.scale = 300.0, 300.0, 50.0
+        assert tracker.get_crop_bounds((720, 1280)) != (0, 0, 0, 0)
+        assert tracker._last_crop_bounds is not None
+        assert tracker.get_crop_bounds((0, 0)) == (0, 0, 0, 0)
+        assert tracker._last_crop_bounds is None
+        assert tracker._last_frame_shape is None
+
     @patch("cv2.VideoCapture")
     @patch("sys.platform", "win32")
     def test_camera_whitespace_string_source(self, mock_cv2_cap):

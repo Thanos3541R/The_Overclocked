@@ -177,15 +177,19 @@ class OverlayRegion:
         """
         c = self.dimmed_color if dimmed else self.color
         # Batch draw lines
-        if len(self.connections) > 0:
-            lines = pts[self.connections]
-            cv2.polylines(frame, lines, isClosed=False, color=c,
-                          thickness=self.line_thickness, lineType=cv2.LINE_AA)
+        if len(self.connections) > 0 and len(pts) > 0:
+            valid_mask = (self.connections[:, 0] < len(pts)) & (self.connections[:, 1] < len(pts))
+            if np.any(valid_mask):
+                lines = pts[self.connections[valid_mask]]
+                cv2.polylines(frame, lines, isClosed=False, color=c,
+                              thickness=self.line_thickness, lineType=cv2.LINE_AA)
         # Batch draw landmark anchor points
-        if len(self.point_segments) > 0:
-            pt_segs = pts[self.point_segments]
-            cv2.polylines(frame, pt_segs, isClosed=False, color=c,
-                          thickness=self.point_thickness, lineType=cv2.LINE_AA)
+        if len(self.point_segments) > 0 and len(pts) > 0:
+            valid_pts = (self.point_segments[:, 0] < len(pts)) & (self.point_segments[:, 1] < len(pts))
+            if np.any(valid_pts):
+                pt_segs = pts[self.point_segments[valid_pts]]
+                cv2.polylines(frame, pt_segs, isClosed=False, color=c,
+                              thickness=self.point_thickness, lineType=cv2.LINE_AA)
 
 
 def _make_region(

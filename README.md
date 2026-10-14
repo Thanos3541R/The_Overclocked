@@ -1,7 +1,7 @@
 # The Overclocked: Driver Monitoring System (DMS)
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Tests Passing](https://img.shields.io/badge/tests-164%2F164%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-169%2F169%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A research prototype that measures eyelid, eye, gaze, and head movements from a driver-facing camera (RGB webcam or monochrome NIR) and investigates whether those measurements can support passive impairment detection for a vehicle interlock.
@@ -15,7 +15,7 @@ A research prototype that measures eyelid, eye, gaze, and head movements from a 
 
 | Component | State |
 | :--- | :--- |
-| **Perception pipeline** (preprocessing, landmarks, smoothing, pose normalization, gating, feature extraction) | **Implemented.** 164 automated unit and integration tests passing (`pytest tests/ -v`). |
+| **Perception pipeline** (preprocessing, landmarks, smoothing, pose normalization, gating, feature extraction) | **Implemented.** 169 automated unit and integration tests passing (`pytest tests/ -v`). |
 | **Gaze features** (iris tracking, saccades, GEN, binocular vergence, VOR) | **Implemented.** Conjugate horizontal frame axis mapping (`[-1, 1]`) and bilateral symmetry verified. Degree-per-unit scaling in `config.py` is a placeholder. |
 | **Forehead & Full Cheeks Coverage** | **Implemented.** Full 27-landmark forehead contour loop + 20-point frontal patch and 44-point cheek matrices (22 per side) with 9-vertex closed perimeter outlines for T-zone tracking and HUD visualization. |
 | **Rule-based classifier, personal baseline calibration, Bayesian filter** | **Implemented.** Thresholds are design targets marked `[PLACEHOLDER]`. Not clinically validated. |
@@ -26,7 +26,7 @@ A research prototype that measures eyelid, eye, gaze, and head movements from a 
 
 ## What this project can and cannot claim
 
-- **Can claim:** A modular, reproducible edge measurement pipeline with comprehensive regression tests (164 passing), real-time CPU performance, and a disciplined engineering framework for evaluating physiological impairment signals.
+- **Can claim:** A modular, reproducible edge measurement pipeline with comprehensive regression tests (169 passing), real-time CPU performance, and a disciplined engineering framework for evaluating physiological impairment signals.
 - **Cannot claim:** That it detects intoxication in production, that any listed biomarker is "unfakeable," or that it meets automotive functional safety certification. ISO 26262 compliance requires rigorous process audits, formal Hazard Analysis and Risk Assessment (HARA), and safety-qualified tooling, not just unit tests.
 - **Regulatory context:** Published camera-based studies detect impairment from roughly 0.05% BAC upward. India's legal limit is 0.03%, so a passive vision system alone cannot be expected to reliably catch a driver right at the threshold without secondary sensor confirmation.
 
@@ -204,7 +204,7 @@ python train_baseline.py --data-dir ./idd_output/ --output-model models/trained_
 ```bash
 pytest tests/ -v
 ```
-All **158 unit, geometric, invariance, and integration tests** execute in $\approx 30\text{ seconds}$ with a 100% pass rate.
+All **169 unit, geometric, invariance, and integration tests** execute in $\approx 45\text{ seconds}$ with a 100% pass rate.
 
 ---
 
@@ -240,7 +240,7 @@ driver-monitor/
 │   └── visualization.py       # OpenCV HUD telemetry display & region legend
 └── tests/
     ├── sample_driver_video.mp4 # Video fixture for regression & invariance benchmarking
-    └── test_*.py              # 16 test modules (155 automated unit & integration tests)
+    └── test_*.py              # 16 test modules (169 automated unit & integration tests)
 ```
 
 ---

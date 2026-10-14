@@ -204,7 +204,7 @@ python train_baseline.py --data-dir ./idd_output/ --output-model models/trained_
 ```bash
 pytest tests/ -v
 ```
-All **155 unit, geometric, invariance, and integration tests** execute in $\approx 30\text{ seconds}$ with a 100% pass rate.
+All **158 unit, geometric, invariance, and integration tests** execute in $\approx 30\text{ seconds}$ with a 100% pass rate.
 
 ---
 
@@ -215,15 +215,12 @@ driver-monitor/
 ├── config.py                 # Central configuration dataclass; thresholds marked [PLACEHOLDER]
 ├── main.py                   # Real-time application with color-coded HUD and CSV logging
 ├── inspect_driver.py         # Diagnostic tool for single-image, live capture, or video inspection
-├── export_feature_output.py  # Feature extraction export tool (TXT, JSON, CSV)
 ├── extract_video_features.py # Batch video analyzer with Section A/B report generation
 ├── idd_ingest.py             # Batch ingestion engine for Toyota IDD driving dataset
 ├── train_baseline.py         # ML training pipeline with GroupKFold & 203 window features
 ├── requirements.txt          # Python package dependencies
 ├── models/
-│   ├── face_landmarker.task  # MediaPipe 478-point landmark bundle (auto-downloads if absent)
-│   ├── baseline_impairment_model.joblib # Baseline classifier artifact (demonstration only)
-│   └── training_report.json  # Cross-validation performance report
+│   └── face_landmarker.task  # MediaPipe 478-point landmark bundle (auto-downloads if absent)
 ├── pipeline/
 │   ├── frame_capture.py       # Polymorphic camera/video reader (DirectShow, MJPG, RGB & NIR)
 │   ├── preprocessing.py       # CLAHE & adaptive Gamma LUT low-light enhancer

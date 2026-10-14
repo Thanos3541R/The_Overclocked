@@ -289,6 +289,48 @@ class FeatureExtractor:
         self._stare_iris_samples: Deque[Tuple[float, float]] = deque(maxlen=max(int(10.0 * fps), 1))
         self._just_resumed_from_gate: bool = False
 
+    def reset(self) -> None:
+        """Clear rolling deques, histories, and previous-frame temporal tracking state.
+
+        Essential when a scene cut, camera transition, or identity switch occurs.
+        """
+        self._ear_history.clear()
+        self._consecutive_closed = 0
+        self._consecutive_yawn = 0
+        self._last_features = FrameFeatures()
+        self._prev_iris_x = None
+        self._prev_iris_y = None
+        self._prev_timestamp = None
+        self._in_saccade = False
+        self._last_saccade_end_time = 0.0
+        self._prev_ear_avg = None
+        self._prev_ear_timestamp = None
+        self._blink_phase = "open"
+        self._closing_velocities.clear()
+        self._opening_velocities.clear()
+        self._last_blink_closing_vel = 0.0
+        self._last_blink_opening_vel = 0.0
+        self._gaze_yaw_history.clear()
+        self._prev_head_yaw = None
+        self._prev_head_pitch = None
+        self._prev_head_roll = None
+        self._prev_head_timestamp = None
+        self._smoothed_vor_gain = 1.0
+        self._gen_drift_detected = False
+        self._gen_drift_vel = 0.0
+        self._gen_beat_times.clear()
+        self._pursuit_history.clear()
+        self._head_pose_history.clear()
+        self._smoothed_flushing = 1.0
+        self._ear_time_history.clear()
+        self._last_blink_time = 0.0
+        self._blink_times.clear()
+        self._stare_start_time = None
+        self._stare_anchor_x = None
+        self._stare_anchor_y = None
+        self._stare_iris_samples.clear()
+        self._just_resumed_from_gate = False
+
     @staticmethod
     def compute_ear(landmarks: np.ndarray, indices: list) -> float:
         """Compute Eye Aspect Ratio (Soukupová & Čech 2016).
@@ -631,7 +673,8 @@ class FeatureExtractor:
         if dt <= 1e-6:
             return float(self._smoothed_vor_gain)
 
-        head_vel = (head_yaw - self._prev_head_yaw) / dt   # deg/s
+        d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
+        head_vel = d_yaw / dt   # deg/s
 
         if blink_phase == "open" and self._prev_iris_x is not None:
             eye_vel = (avg_iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT / dt  # deg/s
@@ -1126,7 +1169,7 @@ class FeatureExtractor:
         if self._prev_head_yaw is not None and self._prev_head_timestamp is not None:
             dt_head = timestamp - self._prev_head_timestamp
             if dt_head > 1e-6:
-                d_yaw = head_yaw - self._prev_head_yaw
+                d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
                 head_angular_vel = float(abs(d_yaw) / dt_head)
 
         features.head_postural_sway, features.rigid_head_stabilization = \

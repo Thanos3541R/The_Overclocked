@@ -57,7 +57,8 @@ class TrainingBuffer:
         stride_sec: float = 1.5,
         min_fill_ratio: float = 0.70,
         gated_strategy: GatedFrameStrategy = GatedFrameStrategy.HOLD_LAST,
-        max_session_hours: float = 1.0
+        max_session_hours: float = 1.0,
+        default_label: Optional[str] = None
     ):
         """
         Initialize the training data buffer.
@@ -70,6 +71,7 @@ class TrainingBuffer:
             min_fill_ratio: Minimum fraction of non-empty window frames required (default 0.70).
             gated_strategy: Strategy for handling gated/frozen frames.
             max_session_hours: Maximum session duration to keep in the buffer.
+            default_label: Optional default ground-truth label for extracted windows.
         """
         self.subject_id = subject_id
         self.fps = fps
@@ -77,6 +79,7 @@ class TrainingBuffer:
         self.stride_sec = stride_sec
         self.min_fill_ratio = min_fill_ratio
         self.gated_strategy = gated_strategy
+        self.default_label = default_label
         
         self.window_frames = int(window_size_sec * fps)
         self.stride_frames = int(stride_sec * fps)
@@ -168,9 +171,13 @@ class TrainingBuffer:
                         oldest_vec[:-7] = self._last_valid_vector[:-7]
                     self._buffer.append((oldest_ts, oldest_vec, oldest_is_gated))
 
-    def extract_windows(self) -> List[TrainingWindow]:
+    def extract_windows(self, label: Optional[str] = None) -> List[TrainingWindow]:
         """
         Extract fixed-size windows from the accumulated buffer.
+        
+        Args:
+            label: Optional ground truth label to assign to all extracted windows.
+                   If None, defaults to self.default_label.
         
         Returns:
             A list of TrainingWindow dataclasses.
@@ -181,6 +188,7 @@ class TrainingBuffer:
         windows = []
         buf_list = list(self._buffer)
         n_samples = len(buf_list)
+        win_label = label if label is not None else self.default_label
         
         min_required_frames = int(self.window_frames * self.min_fill_ratio)
         
@@ -221,7 +229,7 @@ class TrainingBuffer:
                     window_start_time=current_window_start,
                     window_end_time=current_window_end,
                     n_gated_frames=n_gated,
-                    label=None
+                    label=win_label
                 )
                 windows.append(win)
                 
@@ -229,14 +237,15 @@ class TrainingBuffer:
             
         return windows
 
-    def save_to_disk(self, path: str):
+    def save_to_disk(self, path: str, label: Optional[str] = None):
         """
         Save all accumulated windows to a .npz file.
         
         Args:
             path: Target file path.
+            label: Optional ground truth label to assign to windows.
         """
-        windows = self.extract_windows()
+        windows = self.extract_windows(label=label)
         if not windows:
             return
             

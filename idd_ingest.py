@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Dict, Optional
+import re
 import cv2
 import numpy as np
 
@@ -121,6 +122,10 @@ class IDDDatasetDiscovery:
                 
                 if vid_path.exists():
                     session_id = vid_path.stem
+                    if sub_id == "unknown" or sub_id.startswith("sub_"):
+                        stem_base = re.sub(r'[_-]?part[_-]?\d+$', '', vid_path.stem, flags=re.IGNORECASE).strip()
+                        if stem_base:
+                            sub_id = stem_base
                     clips.append(ClipInfo(
                         video_path=str(vid_path.absolute()),
                         subject_id=sub_id,
@@ -175,6 +180,12 @@ class IDDDatasetDiscovery:
                 # Infer by position if not matched
                 condition = parts[0].lower() if parts[0].lower() in valid_conditions else parts[1].lower()
                 subject_id = parts[1] if parts[0].lower() in valid_conditions else parts[0]
+
+            if subject_id == "unknown":
+                # For filenames like ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_part025.mp4 or 3part_016.mp4
+                stem_base = re.sub(r'[_-]?part[_-]?\d+$', '', vid.stem, flags=re.IGNORECASE).strip()
+                if stem_base:
+                    subject_id = stem_base
                 
             clips.append(ClipInfo(
                 video_path=str(vid.absolute()),
@@ -191,8 +202,8 @@ def process_clip(
     clip: ClipInfo, 
     output_dir: Path,
     config: PipelineConfig,
-    window_sec: float = 3.0,
-    stride_sec: float = 1.5,
+    window_sec: float = 2.0,
+    stride_sec: float = 1.0,
     min_fill_ratio: float = 0.70,
     assumed_fps: float = 30.0,
     gated_strategy: str = "hold_last",
@@ -292,10 +303,13 @@ def process_clip(
         stride_sec=stride_sec,
         min_fill_ratio=min_fill_ratio,
         gated_strategy=strategy_enum,
+        default_label=clip.condition_label,
     )
 
     # 1-Euro filter bank (lazy-initialized on first valid frame)
     filter_bank = None
+    prev_gray_small = None
+    prev_face_center = None
     
     frames_processed = 0
     frames_valid = 0
@@ -312,6 +326,15 @@ def process_clip(
             frames_processed += 1
             timestamp = (frame_id - 1) / fps  # seconds
             
+            # Scene cut detection via downsampled grayscale frame MAD
+            gray_small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (160, 90))
+            is_scene_cut = False
+            if prev_gray_small is not None:
+                mad = float(np.mean(np.abs(gray_small.astype(np.int16) - prev_gray_small.astype(np.int16))))
+                if mad > 22.0:
+                    is_scene_cut = True
+            prev_gray_small = gray_small
+            
             # Stage 1: Preprocessing
             processed = preprocessor.process(frame)
             
@@ -319,7 +342,26 @@ def process_clip(
             landmarks = detector.detect(processed)
             
             if landmarks is None:
+                prev_face_center = None
                 continue
+
+            # Identity switch detection via face center jump
+            cx = float(np.mean(landmarks[:, 0]))
+            cy = float(np.mean(landmarks[:, 1]))
+            if prev_face_center is not None:
+                prev_cx, prev_cy = prev_face_center
+                center_jump = float(np.hypot(cx - prev_cx, cy - prev_cy) / max(frame_w, 1))
+                if center_jump > 0.18:
+                    is_scene_cut = True
+            prev_face_center = (cx, cy)
+
+            if is_scene_cut:
+                if hasattr(detector, 'reset'):
+                    detector.reset()
+                filter_bank = None
+                normalizer.reset()
+                imu_gate.reset()
+                extractor.reset()
             
             # Stage 3: 1-Euro Temporal Filtering
             # Filter raw 2D/3D landmarks FIRST to eliminate detector sub-pixel jitter
@@ -356,18 +398,23 @@ def process_clip(
             if imu_frozen:
                 frames_gated += 1
 
+            current_face_valid = pose_state.face_valid and not is_scene_cut
+            gating_reason = "scene_cut" if is_scene_cut else pose_state.gating_reason
+
             # Stage 8: Feature extraction
+            # Pass raw frame (not processed) and image_landmarks=smooth_landmarks for uncorrupted facial flushing
             features = extractor.compute(
                 landmarks=norm_landmarks,
                 timestamp=timestamp,
                 frame_id=frame_id,
-                face_valid=pose_state.face_valid,
+                face_valid=current_face_valid,
                 head_yaw=pose_state.yaw,
                 head_pitch=pose_state.pitch,
                 head_roll=pose_state.roll,
                 imu_gated=imu_frozen,
-                gating_reason=pose_state.gating_reason,
-                frame=processed,
+                gating_reason=gating_reason,
+                frame=frame,
+                image_landmarks=smooth_landmarks,
             )
             
             # Stage 9: Accumulate into training buffer
@@ -389,14 +436,12 @@ def process_clip(
             cv2.destroyAllWindows()
             
     # Extract windows and tag with condition label
-    windows = training_buffer.extract_windows()
-    for w in windows:
-        w.label = clip.condition_label
+    windows = training_buffer.extract_windows(label=clip.condition_label)
     n_windows = len(windows)
     
     # Save to disk
     out_file = output_dir / f"{clip.subject_id}_{clip.session_id}.npz"
-    training_buffer.save_to_disk(str(out_file))
+    training_buffer.save_to_disk(str(out_file), label=clip.condition_label)
     
     processing_time = time.time() - start_time
     
@@ -417,8 +462,8 @@ def main():
     parser = argparse.ArgumentParser(description="Ingest Toyota IDD dataset for DMS training.")
     parser.add_argument("--idd-root", required=True, help="Root directory of the IDD dataset")
     parser.add_argument("--output-dir", default="./idd_output/", help="Output directory for .npz files")
-    parser.add_argument("--window-sec", type=float, default=3.0, help="Feature window duration in seconds (default 3.0s)")
-    parser.add_argument("--stride-sec", type=float, default=1.5, help="Window stride in seconds (default 1.5s)")
+    parser.add_argument("--window-sec", type=float, default=2.0, help="Feature window duration in seconds (default 2.0s)")
+    parser.add_argument("--stride-sec", type=float, default=1.0, help="Window stride in seconds (default 1.0s)")
     parser.add_argument("--min-fill-ratio", type=float, default=0.70, help="Minimum non-empty fill ratio (default 0.70)")
     parser.add_argument("--max-clips", type=int, default=None, help="Max clips to process (for debugging)")
     parser.add_argument("--fps", type=float, default=30.0, help="Assumed FPS if metadata unavailable")
@@ -460,6 +505,7 @@ def main():
     fail_count = 0
     total_frames_processed = 0
     total_proc_time = 0.0
+    condition_counts: Dict[str, int] = {}
     extractors_by_subject: Dict[str, FeatureExtractor] = {}
     
     for i, clip in enumerate(clips):

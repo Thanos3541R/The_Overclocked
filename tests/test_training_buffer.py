@@ -87,3 +87,24 @@ def test_reset():
     tb.reset()
     assert len(tb) == 0
     assert tb.subject_id == "test"
+
+def test_label_persistence(tmp_path):
+    tb = TrainingBuffer(subject_id="sub_label", default_label="sober", window_size_sec=1.0, stride_sec=1.0, fps=10)
+    for i in range(15):
+        tb.add_sample(FrameFeatures(timestamp=i*0.1))
+    
+    # Check default_label propagation
+    windows = tb.extract_windows()
+    assert len(windows) > 0
+    assert windows[0].label == "sober"
+
+    # Check explicit label override
+    windows_override = tb.extract_windows(label="impaired")
+    assert windows_override[0].label == "impaired"
+
+    # Check save_to_disk preserves label
+    file_path = os.path.join(tmp_path, "labeled_buffer.npz")
+    tb.save_to_disk(file_path, label="drunk")
+    data = np.load(file_path)
+    assert "labels" in data
+    assert data["labels"][0] == "drunk"

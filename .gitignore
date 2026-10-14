@@ -12,10 +12,15 @@ htmlcov/
 *.log
 output_features.csv
 my_video_features.csv
+video_features*
+feature_extraction_output*
 captured_snapshot.jpg
 inspection_result.jpg
 panel_*.jpg
 run_edits.py
+idd_output/
+models/*.joblib
+models/training_report.json
 
 # OS generated files
 .DS_Store

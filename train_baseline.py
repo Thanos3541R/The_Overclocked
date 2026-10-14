@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
@@ -114,12 +115,90 @@ def compute_window_summary_features(
         for fname in feature_names:
             flat_names.append(f"{fname}_{stat}")
 
+    # Compute within-window self-normalizing kinetic & aperture features
+    extra_cols = []
+    extra_names = []
+
+    p90_name = "ear_avg_p90" if "ear_avg_p90" in flat_names else ("ear_left_p90" if "ear_left_p90" in flat_names else None)
+    p10_name = "ear_avg_p10" if "ear_avg_p10" in flat_names else ("ear_left_p10" if "ear_left_p10" in flat_names else None)
+    mean_name = "ear_avg_mean" if "ear_avg_mean" in flat_names else ("ear_left_mean" if "ear_left_mean" in flat_names else None)
+
+    if p90_name and p10_name:
+        p90_idx = flat_names.index(p90_name)
+        p10_idx = flat_names.index(p10_name)
+        ear_aperture_range = (features_2d[:, p90_idx] - features_2d[:, p10_idx]).astype(np.float32)
+        extra_cols.append(ear_aperture_range[:, None])
+        extra_names.append("ear_aperture_range")
+
+    if mean_name and p90_name:
+        mean_idx = flat_names.index(mean_name)
+        p90_idx = flat_names.index(p90_name)
+        ear_norm_mean = (features_2d[:, mean_idx] / np.maximum(features_2d[:, p90_idx], 0.15)).astype(np.float32)
+        extra_cols.append(ear_norm_mean[:, None])
+        extra_names.append("ear_normalized_mean")
+
+    open_name = "blink_opening_velocity_mean" if "blink_opening_velocity_mean" in flat_names else None
+    close_name = "blink_closing_velocity_mean" if "blink_closing_velocity_mean" in flat_names else None
+    if open_name and close_name:
+        open_idx = flat_names.index(open_name)
+        close_idx = flat_names.index(close_name)
+        blink_ratio = (features_2d[:, open_idx] / np.maximum(features_2d[:, close_idx], 0.10)).astype(np.float32)
+        extra_cols.append(blink_ratio[:, None])
+        extra_names.append("blink_up_to_down_ratio")
+
+    if extra_cols:
+        features_2d = np.hstack([features_2d] + extra_cols).astype(np.float32)
+        flat_names.extend(extra_names)
+
     if subjects is not None:
         features_2d, flat_names = compute_subject_invariant_delta_features(
             features_2d, flat_names, subjects
         )
 
     return features_2d, flat_names
+
+
+def filter_involuntary_features(
+    X_2d: np.ndarray,
+    feature_names: List[str]
+) -> Tuple[np.ndarray, List[str]]:
+    """Filter 2D feature matrix to retain only involuntary micromotions and autonomic signals.
+
+    Excludes raw voluntary/posture shortcut columns (head_yaw_*, head_pitch_*, head_roll_*,
+    mar_*, left_iris_x_*, left_iris_y_*, right_iris_x_*, right_iris_y_*, and imu_gated_*),
+    retaining only head tremor/instability (head_yaw_std, head_pitch_std, head_roll_std)
+    and all involuntary oculomotor/autonomic features.
+    """
+    keep_indices = []
+    keep_names = []
+
+    for idx, name in enumerate(feature_names):
+        # Retain head instability/tremor standard deviation
+        if name in ("head_yaw_std", "head_pitch_std", "head_roll_std"):
+            keep_indices.append(idx)
+            keep_names.append(name)
+            continue
+
+        # Exclude other head pose statistics (voluntary head positions)
+        if name.startswith(("head_yaw_", "head_pitch_", "head_roll_")):
+            continue
+
+        # Exclude voluntary mouth movements (speech, yawns)
+        if name.startswith("mar_") or name.startswith("yawn_"):
+            continue
+
+        # Exclude voluntary gaze coordinates
+        if name.startswith(("left_iris_x_", "left_iris_y_", "right_iris_x_", "right_iris_y_")):
+            continue
+
+        # Exclude gating mask shortcut
+        if name.startswith("imu_gated_"):
+            continue
+
+        keep_indices.append(idx)
+        keep_names.append(name)
+
+    return X_2d[:, keep_indices], keep_names
 
 
 def load_dataset_from_npz(npz_paths: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
@@ -267,23 +346,27 @@ def train_and_evaluate(
         val_subjects = np.unique(subjects[val_idx])
 
         if _HAVE_XGB and use_xgboost:
-            clf = XGBClassifier(
+            base_clf = XGBClassifier(
                 n_estimators=100,
                 max_depth=4,
-                learning_rate=0.08,
+                learning_rate=0.05,
+                reg_lambda=1.0,
                 scale_pos_weight=computed_scale,
                 random_state=random_state,
                 eval_metric="logloss"
             )
         else:
-            clf = HistGradientBoostingClassifier(
+            base_clf = HistGradientBoostingClassifier(
                 max_iter=100,
                 max_depth=4,
-                learning_rate=0.08,
+                learning_rate=0.05,
+                min_samples_leaf=20,
+                l2_regularization=1.0,
                 class_weight="balanced",
                 random_state=random_state
             )
 
+        clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv=3)
         clf.fit(X_train, y_train)
         models.append(clf)
 
@@ -323,7 +406,24 @@ def train_and_evaluate(
 
     # Feature Importance estimation
     top_features = []
-    if _HAVE_XGB and use_xgboost and hasattr(models[0], "feature_importances_"):
+    has_fi = False
+    if hasattr(models[0], "calibrated_classifiers_"):
+        sub_ests = [c.estimator if hasattr(c, "estimator") else c.base_estimator for c in models[0].calibrated_classifiers_]
+        if sub_ests and hasattr(sub_ests[0], "feature_importances_"):
+            all_fi = []
+            for m in models:
+                for c in m.calibrated_classifiers_:
+                    sub = c.estimator if hasattr(c, "estimator") else c.base_estimator
+                    all_fi.append(sub.feature_importances_)
+            mean_importances = np.mean(all_fi, axis=0)
+            sorted_indices = np.argsort(mean_importances)[::-1]
+            for idx in sorted_indices[:20]:
+                top_features.append({
+                    "feature": feature_names[idx],
+                    "importance": float(mean_importances[idx])
+                })
+            has_fi = True
+    elif hasattr(models[0], "feature_importances_"):
         mean_importances = np.mean([m.feature_importances_ for m in models], axis=0)
         sorted_indices = np.argsort(mean_importances)[::-1]
         for idx in sorted_indices[:20]:
@@ -331,8 +431,9 @@ def train_and_evaluate(
                 "feature": feature_names[idx],
                 "importance": float(mean_importances[idx])
             })
-    else:
-        # Permutation importance on the final fold
+        has_fi = True
+
+    if not has_fi:
         perm_res = permutation_importance(models[0], X[:100], y[:100], n_repeats=3, random_state=random_state)
         sorted_indices = np.argsort(perm_res.importances_mean)[::-1]
         for idx in sorted_indices[:20]:
@@ -345,7 +446,7 @@ def train_and_evaluate(
         "n_samples": int(len(y)),
         "n_features": int(X.shape[1]),
         "n_subjects": int(len(unique_subjects)),
-        "model_type": "XGBClassifier" if (_HAVE_XGB and use_xgboost) else "HistGradientBoostingClassifier",
+        "model_type": "CalibratedClassifierCV(XGBClassifier)" if (_HAVE_XGB and use_xgboost) else "CalibratedClassifierCV(HistGradientBoostingClassifier)",
         "scale_pos_weight": computed_scale,
         "oof_metrics": {
             "roc_auc": overall_roc,
@@ -360,23 +461,28 @@ def train_and_evaluate(
         "top_features": top_features,
     }
 
-    # Retrain final model on all data for deployment
+    # Retrain final calibrated model on all data for deployment
     if _HAVE_XGB and use_xgboost:
-        final_model = XGBClassifier(
+        base_final = XGBClassifier(
             n_estimators=120,
             max_depth=4,
-            learning_rate=0.08,
+            learning_rate=0.05,
+            reg_lambda=1.0,
             scale_pos_weight=computed_scale,
-            random_state=random_state
+            random_state=random_state,
+            eval_metric="logloss"
         )
     else:
-        final_model = HistGradientBoostingClassifier(
+        base_final = HistGradientBoostingClassifier(
             max_iter=120,
             max_depth=4,
-            learning_rate=0.08,
+            learning_rate=0.05,
+            min_samples_leaf=20,
+            l2_regularization=1.0,
             class_weight="balanced",
             random_state=random_state
         )
+    final_model = CalibratedClassifierCV(estimator=base_final, method="sigmoid", cv=3)
     final_model.fit(X, y)
 
     return results, final_model
@@ -391,6 +497,8 @@ def main():
     parser.add_argument("--n-splits", type=int, default=5, help="Number of GroupKFold cross-validation splits")
     parser.add_argument("--scale-pos-weight", type=float, default=None, help="Positive class weight ratio (default auto)")
     parser.add_argument("--no-xgb", action="store_true", help="Force sklearn HistGradientBoosting over XGBoost")
+    parser.add_argument("--involuntary-only", action="store_true", default=True, help="Restrict features to involuntary oculomotor and autonomic signals (default True)")
+    parser.add_argument("--all-features", dest="involuntary_only", action="store_false", help="Include all voluntary posture and shortcut features")
 
     args = parser.parse_args()
 
@@ -420,6 +528,10 @@ def main():
     print(f"Aggregating 3D window tensors {X_3d.shape} into 2D summary statistics (7 per signal)...")
     X_2d, flat_feature_names = compute_window_summary_features(X_3d, raw_feat_names, subjects=subjects)
     print(f"Generated feature matrix: {X_2d.shape[0]} windows x {X_2d.shape[1]} summary features.")
+
+    if args.involuntary_only:
+        X_2d, flat_feature_names = filter_involuntary_features(X_2d, flat_feature_names)
+        print(f"Applied involuntary-only feature restriction: {X_2d.shape[1]} channels retained.")
 
     results, final_model = train_and_evaluate(
         X=X_2d,

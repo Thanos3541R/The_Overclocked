@@ -18,12 +18,13 @@ from tests.test_ear import make_eye_landmarks
 from utils.landmarks import RIGHT_EYE_EAR_FLAT, LEFT_EYE_EAR_FLAT
 
 
-def make_full_landmarks(ear_val=0.30, iris_x_offset=0.0):
+def make_full_landmarks(ear_val=0.30, iris_x_offset=0.0, iris_y_offset=0.0):
     """Create synthetic (478, 3) landmarks with configurable EAR and iris position.
 
     Args:
         ear_val: Approximate EAR to produce (controls vertical opening).
         iris_x_offset: Horizontal offset for iris from eye center (pixels).
+        iris_y_offset: Vertical offset for iris from eye center (pixels).
     """
     lm = np.zeros((478, 3), dtype=np.float64)
 
@@ -53,8 +54,8 @@ def make_full_landmarks(ear_val=0.30, iris_x_offset=0.0):
     # Iris centers (positioned at eye centers + offset)
     # Landmark 468: viewer's left eye (corners 33 & 133)
     # Landmark 473: viewer's right eye (corners 263 & 362)
-    lm[468] = [eye_cx + iris_x_offset, eye_cy, 0]
-    lm[473] = [eye_cx2 + iris_x_offset, eye_cy2, 0]
+    lm[468] = [eye_cx + iris_x_offset, eye_cy + iris_y_offset, 0]
+    lm[473] = [eye_cx2 + iris_x_offset, eye_cy2 + iris_y_offset, 0]
 
     # Mouth (for MAR)
     lm[61]  = [280, 350, 0]  # right mouth corner
@@ -122,6 +123,47 @@ class TestSaccadeDynamics:
         lm_drift = make_full_landmarks(ear_val=0.30, iris_x_offset=20.0)
         feat_drift = ext.compute(lm_drift, timestamp=2/30.0, frame_id=2, face_valid=True)
         # Velocity is now lower but may still be above offset — depends on shift size
+
+    def test_subpixel_saccade_noise_deadzone_and_hysteresis(self):
+        """Rest-state sub-pixel gaze noise (< 0.6 px / hypot < 0.030) yields velocity = 0.0 and saccade_detected = False."""
+        ext = FeatureExtractor(fps=30.0)
+        assert ext.saccade_onset_velocity == 35.0
+        assert ext.saccade_offset_velocity == 20.0
+
+        # Frame 0: Baseline center gaze
+        lm0 = make_full_landmarks(ear_val=0.30, iris_x_offset=0.0)
+        ext.compute(lm0, timestamp=0.0, frame_id=0, face_valid=True)
+
+        # Frame 1: Sub-pixel noise (< 0.6 px, hypot < 0.030)
+        lm_noise = make_full_landmarks(ear_val=0.30, iris_x_offset=0.5, iris_y_offset=0.5)
+        feat_noise = ext.compute(lm_noise, timestamp=1/30.0, frame_id=1, face_valid=True)
+        assert feat_noise.saccade_velocity == 0.0
+        assert feat_noise.saccade_detected is False
+
+        # Frame 2: Pure vertical sensor tremor (< 0.6 px equivalent)
+        lm_vnoise = make_full_landmarks(ear_val=0.30, iris_x_offset=0.5, iris_y_offset=1.0)
+        feat_vnoise = ext.compute(lm_vnoise, timestamp=2/30.0, frame_id=2, face_valid=True)
+        assert feat_vnoise.saccade_velocity == 0.0
+        assert feat_vnoise.saccade_detected is False
+
+        # Frame 3: Large shift (> 35 deg/s) triggers saccade
+        lm_saccade = make_full_landmarks(ear_val=0.30, iris_x_offset=18.0)
+        feat_saccade = ext.compute(lm_saccade, timestamp=3/30.0, frame_id=3, face_valid=True)
+        assert feat_saccade.saccade_velocity > 35.0
+        assert feat_saccade.saccade_detected is True
+
+        # Robustness against partial None state in _compute_saccade_dynamics
+        ext._prev_iris_y = None
+        vel, is_sac, lat, rdx = ext._compute_saccade_dynamics(0.5, 0.5, timestamp=4/30.0)
+        assert vel == 0.0
+        assert is_sac is False
+
+        # Gate resume re-anchors both horizontal and vertical iris positions without spurious spike
+        ext.compute(lm0, timestamp=5/30.0, frame_id=5, face_valid=True)
+        ext.compute(lm0, timestamp=6/30.0, frame_id=6, face_valid=False)  # Gated frame
+        lm_shifted = make_full_landmarks(ear_val=0.30, iris_x_offset=2.0, iris_y_offset=2.0)
+        feat_resumed = ext.compute(lm_shifted, timestamp=7/30.0, frame_id=7, face_valid=True)
+        assert feat_resumed.saccade_detected is False
 
     def test_latency_accumulates_during_fixation(self):
         """Saccade latency should increase during fixation after a saccade."""

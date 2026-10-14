@@ -167,8 +167,8 @@ class FeatureExtractor:
                  microsleep_frames: int = 15,
                  yawn_frames: int = 30,
                  gaze_dispersion_window_sec: float = 15.0,
-                 saccade_onset_velocity: float = 30.0,
-                 saccade_offset_velocity: float = 15.0,
+                 saccade_onset_velocity: float = 35.0,
+                 saccade_offset_velocity: float = 20.0,
                  eccentric_gaze_threshold: float = 0.35,
                  gen_drift_min_vel: float = 2.0,
                  gen_drift_max_vel: float = 18.0,
@@ -447,7 +447,7 @@ class FeatureExtractor:
         Returns:
             (velocity_deg_s, is_saccade, latency_ms, raw_iris_dx)
         """
-        if self._prev_iris_x is None or self._prev_timestamp is None:
+        if self._prev_iris_x is None or self._prev_iris_y is None or self._prev_timestamp is None:
             self._prev_iris_x = iris_x
             self._prev_iris_y = iris_y
             self._prev_timestamp = timestamp
@@ -497,13 +497,16 @@ class FeatureExtractor:
 
         # Raw frame-to-frame iris displacement in normalized units
         raw_dx = float(abs(iris_x - self._prev_iris_x))
+        raw_dy = float(abs(iris_y - self._prev_iris_y))
 
-        # Angular displacement in degrees
-        dx_deg = (iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT
-        dy_deg = (iris_y - self._prev_iris_y) * _DEG_PER_IRIS_UNIT
-        angular_displacement = np.sqrt(dx_deg**2 + dy_deg**2)
-
-        velocity = angular_displacement / dt  # deg/s
+        if np.hypot(raw_dx, raw_dy * 0.5) < 0.030:
+            velocity = 0.0
+        else:
+            # Angular displacement in degrees
+            dx_deg = (iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT
+            dy_deg = (iris_y - self._prev_iris_y) * _DEG_PER_IRIS_UNIT
+            angular_displacement = np.sqrt(dx_deg**2 + dy_deg**2)
+            velocity = angular_displacement / dt  # deg/s
 
         # Saccade detection with hysteresis
         if not self._in_saccade:
@@ -1024,6 +1027,7 @@ class FeatureExtractor:
 
         if not face_valid or imu_gated:
             self._just_resumed_from_gate = True
+            self._in_saccade = False
             # Hold last valid features, but update metadata
             features.ear_left = self._last_features.ear_left
             features.ear_right = self._last_features.ear_right
@@ -1064,13 +1068,15 @@ class FeatureExtractor:
 
         if getattr(self, "_just_resumed_from_gate", False):
             self._just_resumed_from_gate = False
+            self._in_saccade = False
             self._prev_timestamp = timestamp
             self._prev_ear_timestamp = timestamp
             self._prev_head_timestamp = timestamp
             self._prev_ear_avg = (self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT) + self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)) / 2.0
-            left_x, _ = self.compute_iris_position(landmarks, LEFT_IRIS_CENTER, 33, 133)
-            right_x, _ = self.compute_iris_position(landmarks, RIGHT_IRIS_CENTER, 263, 362)
+            left_x, left_y = self.compute_iris_position(landmarks, LEFT_IRIS_CENTER, 33, 133)
+            right_x, right_y = self.compute_iris_position(landmarks, RIGHT_IRIS_CENTER, 263, 362)
             self._prev_iris_x = (left_x + right_x) / 2.0
+            self._prev_iris_y = (left_y + right_y) / 2.0
             self._prev_head_yaw = head_yaw
             self._prev_head_pitch = head_pitch
             self._prev_head_roll = head_roll

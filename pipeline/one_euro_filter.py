@@ -17,10 +17,14 @@ Split-Bandwidth Oculomotor Preservation:
 This implementation is fully vectorized with NumPy — no Python loops
 over individual landmarks or coordinates.
 """
-from typing import Union
+from typing import Optional, Union
 import numpy as np
 
-from utils.landmarks import DYNAMIC_EYELID_IRIS_INDICES
+from utils.landmarks import (
+    DYNAMIC_EYELID_INDICES,
+    DYNAMIC_IRIS_INDICES,
+    DYNAMIC_EYELID_IRIS_INDICES,
+)
 
 
 class VectorizedOneEuroFilter:
@@ -122,54 +126,78 @@ class OneEuroFilterBank:
     """Manages a split-bandwidth vectorized 1-Euro filter for (478, 3) landmarks
     plus optional scalar filters.
 
-    Structural/PnP landmarks use low cutoff (1.0 Hz) to eliminate pose chatter,
-    while fast oculomotor landmarks (eyelids & irises) use high bandwidth
-    (8.0 Hz min_cutoff, 0.80 beta, 10.0 Hz d_cutoff) so involuntary blink
-    reopening velocity and saccadic dynamics are preserved without damping.
+    Structural/PnP landmarks use low cutoff (0.7 Hz) to eliminate pose chatter,
+    eyelid landmarks use (3.0 Hz min_cutoff, 0.80 beta, 10.0 Hz d_cutoff) for fast blink kinetics,
+    and iris landmarks use (1.5 Hz min_cutoff, 0.40 beta, 5.0 Hz d_cutoff) to eliminate sub-pixel
+    tremor while tracking fast saccades.
     """
 
     def __init__(self, t0: float, x0: np.ndarray,
-                 landmark_min_cutoff: float = 1.0,
+                 landmark_min_cutoff: float = 0.7,
                  landmark_beta: float = 0.007,
                  landmark_d_cutoff: float = 1.0,
-                 oculomotor_min_cutoff: float = 8.0,
-                 oculomotor_beta: float = 0.80,
-                 oculomotor_d_cutoff: float = 10.0,
+                 eyelid_min_cutoff: float = 3.0,
+                 eyelid_beta: float = 0.80,
+                 eyelid_d_cutoff: float = 10.0,
+                 iris_min_cutoff: float = 1.5,
+                 iris_beta: float = 0.40,
+                 iris_d_cutoff: float = 5.0,
                  preserve_oculomotor: bool = True,
                  ear_min_cutoff: float = 1.5,
-                 ear_beta: float = 0.003):
+                 ear_beta: float = 0.003,
+                 oculomotor_min_cutoff: Optional[float] = None,
+                 oculomotor_beta: Optional[float] = None,
+                 oculomotor_d_cutoff: Optional[float] = None):
         """
         Args:
             t0: Initial timestamp.
             x0: Initial landmarks, shape (N, 3).
-            landmark_min_cutoff: Smoothing for rigid/structural landmarks (default 1.0 Hz).
+            landmark_min_cutoff: Smoothing for rigid/structural landmarks (default 0.7 Hz).
             landmark_beta: Speed coefficient for rigid/structural landmarks (default 0.007).
             landmark_d_cutoff: Derivative cutoff for rigid/structural landmarks (default 1.0 Hz).
-            oculomotor_min_cutoff: Smoothing for fast eyelid/iris landmarks (default 8.0 Hz).
-            oculomotor_beta: Speed coefficient for fast eyelid/iris landmarks (default 0.80).
-            oculomotor_d_cutoff: Derivative cutoff for fast eyelid/iris landmarks (default 10.0 Hz).
-            preserve_oculomotor: If True, applies high-bandwidth profile to DYNAMIC_EYELID_IRIS_INDICES.
+            eyelid_min_cutoff: Smoothing for fast eyelid landmarks (default 3.0 Hz).
+            eyelid_beta: Speed coefficient for fast eyelid landmarks (default 0.80).
+            eyelid_d_cutoff: Derivative cutoff for fast eyelid landmarks (default 10.0 Hz).
+            iris_min_cutoff: Smoothing for iris landmarks (default 1.5 Hz).
+            iris_beta: Speed coefficient for iris landmarks (default 0.40).
+            iris_d_cutoff: Derivative cutoff for iris landmarks (default 5.0 Hz).
+            preserve_oculomotor: If True, applies high-bandwidth profiles to eyelid and iris landmarks.
             ear_min_cutoff: Smoothing for auxiliary scalar signals.
             ear_beta: Speed coefficient for auxiliary scalar signals.
+            oculomotor_min_cutoff: Optional override for legacy oculomotor cutoff.
+            oculomotor_beta: Optional override for legacy oculomotor beta.
+            oculomotor_d_cutoff: Optional override for legacy oculomotor derivative cutoff.
         """
-        x0_arr = np.asarray(x0, dtype=np.float64)
+        if oculomotor_min_cutoff is not None:
+            eyelid_min_cutoff = oculomotor_min_cutoff
+            iris_min_cutoff = oculomotor_min_cutoff
+        if oculomotor_beta is not None:
+            eyelid_beta = oculomotor_beta
+            iris_beta = oculomotor_beta
+        if oculomotor_d_cutoff is not None:
+            eyelid_d_cutoff = oculomotor_d_cutoff
+            iris_d_cutoff = oculomotor_d_cutoff
 
-        if (preserve_oculomotor and x0_arr.ndim == 2 and
-                x0_arr.shape[0] > max(DYNAMIC_EYELID_IRIS_INDICES)):
-            n_pts = x0_arr.shape[0]
+        x0_arr = np.asarray(x0, dtype=np.float64)
+        n_pts = x0_arr.shape[0] if x0_arr.ndim >= 1 else 0
+
+        eyelid_indices = [i for i in DYNAMIC_EYELID_INDICES if i < n_pts]
+        iris_indices = [i for i in DYNAMIC_IRIS_INDICES if i < n_pts]
+
+        if preserve_oculomotor and x0_arr.ndim == 2 and (eyelid_indices or iris_indices):
             min_cutoff_vec = np.full((n_pts, 1), float(landmark_min_cutoff), dtype=np.float64)
             beta_vec = np.full((n_pts, 1), float(landmark_beta), dtype=np.float64)
             d_cutoff_vec = np.full((n_pts, 1), float(landmark_d_cutoff), dtype=np.float64)
 
-            min_cutoff_vec[DYNAMIC_EYELID_IRIS_INDICES, 0] = max(
-                float(landmark_min_cutoff), float(oculomotor_min_cutoff)
-            )
-            beta_vec[DYNAMIC_EYELID_IRIS_INDICES, 0] = max(
-                float(landmark_beta), float(oculomotor_beta)
-            )
-            d_cutoff_vec[DYNAMIC_EYELID_IRIS_INDICES, 0] = max(
-                float(landmark_d_cutoff), float(oculomotor_d_cutoff)
-            )
+            if eyelid_indices:
+                min_cutoff_vec[eyelid_indices, 0] = float(eyelid_min_cutoff)
+                beta_vec[eyelid_indices, 0] = float(eyelid_beta)
+                d_cutoff_vec[eyelid_indices, 0] = float(eyelid_d_cutoff)
+
+            if iris_indices:
+                min_cutoff_vec[iris_indices, 0] = float(iris_min_cutoff)
+                beta_vec[iris_indices, 0] = float(iris_beta)
+                d_cutoff_vec[iris_indices, 0] = float(iris_d_cutoff)
 
             self.landmark_filter = VectorizedOneEuroFilter(
                 t0, x0_arr,
@@ -188,6 +216,16 @@ class OneEuroFilterBank:
         self._ear_filters = {}  # lazy-initialized scalar filters
         self._ear_min_cutoff = ear_min_cutoff
         self._ear_beta = ear_beta
+        self._landmark_min_cutoff = landmark_min_cutoff
+        self._landmark_beta = landmark_beta
+        self._landmark_d_cutoff = landmark_d_cutoff
+        self._eyelid_min_cutoff = eyelid_min_cutoff
+        self._eyelid_beta = eyelid_beta
+        self._eyelid_d_cutoff = eyelid_d_cutoff
+        self._iris_min_cutoff = iris_min_cutoff
+        self._iris_beta = iris_beta
+        self._iris_d_cutoff = iris_d_cutoff
+        self._preserve_oculomotor = preserve_oculomotor
 
     def filter_landmarks(self, t: float, landmarks: np.ndarray) -> np.ndarray:
         """Filter landmark array."""
@@ -207,5 +245,26 @@ class OneEuroFilterBank:
 
     def reset(self, t: float, landmarks: np.ndarray):
         """Reset all filters."""
-        self.landmark_filter.reset(t, landmarks)
-        self._ear_filters.clear()
+        lms = np.asarray(landmarks, dtype=np.float64)
+        if (lms.shape != self.landmark_filter.x_prev.shape or
+                (isinstance(self.landmark_filter.min_cutoff, np.ndarray) and
+                 self.landmark_filter.min_cutoff.shape[0] != lms.shape[0])):
+            self.__init__(
+                t0=t,
+                x0=lms,
+                landmark_min_cutoff=self._landmark_min_cutoff,
+                landmark_beta=self._landmark_beta,
+                landmark_d_cutoff=self._landmark_d_cutoff,
+                eyelid_min_cutoff=self._eyelid_min_cutoff,
+                eyelid_beta=self._eyelid_beta,
+                eyelid_d_cutoff=self._eyelid_d_cutoff,
+                iris_min_cutoff=self._iris_min_cutoff,
+                iris_beta=self._iris_beta,
+                iris_d_cutoff=self._iris_d_cutoff,
+                preserve_oculomotor=self._preserve_oculomotor,
+                ear_min_cutoff=self._ear_min_cutoff,
+                ear_beta=self._ear_beta,
+            )
+        else:
+            self.landmark_filter.reset(t, landmarks)
+            self._ear_filters.clear()

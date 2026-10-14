@@ -500,7 +500,7 @@ class TestFaceMeshDetectorContract:
         detector = FaceMeshDetector()
         assert detector.enable_adaptive_roi is True
         assert detector.roi_margin == 2.0
-        assert detector.roi_tracker.alpha == 0.35
+        assert detector.roi_tracker.alpha == 0.15
         assert detector.roi_tracker.margin == 2.0
         assert detector.n_landmarks == 478
         detector.close()
@@ -775,6 +775,53 @@ class TestTrackerRobustnessAndEdgeCases:
         assert tracker.is_tracking
         assert tracker.cx == 150.0
         assert tracker.cy == 250.0
+
+    def test_adaptive_roi_default_alpha_and_deadband(self):
+        """AdaptiveROITracker defaults to alpha=0.15 and enforces 2-pixel deadband."""
+        tracker = AdaptiveROITracker()
+        assert tracker.alpha == 0.15
+        assert tracker._last_crop_bounds is None
+
+        frame_shape = (720, 1280)
+        # Seed tracker
+        tracker.update(create_synthetic_landmarks(cx=640.0, cy=360.0, width=100.0, height=100.0))
+        bounds0 = tracker.get_crop_bounds(frame_shape)
+        assert bounds0 == (540, 260, 740, 460)
+        assert tracker._last_crop_bounds == bounds0
+
+        # Sub-pixel shift (<= 2 pixels deadband)
+        tracker.cx += 1.5
+        bounds1 = tracker.get_crop_bounds(frame_shape)
+        assert bounds1 == bounds0
+
+        # Step shift > 2 pixels -> must update without false suppression
+        tracker.cx += 10.0
+        bounds2 = tracker.get_crop_bounds(frame_shape)
+        assert bounds2 != bounds0
+        assert tracker._last_crop_bounds == bounds2
+
+        # Reset clears deadband state
+        tracker.reset()
+        assert tracker._last_crop_bounds is None
+        assert tracker._last_frame_shape is None
+
+        # Deadband works with python list frame_shape and 3D tuple
+        tracker.update(create_synthetic_landmarks(cx=640.0, cy=360.0, width=100.0, height=100.0))
+        b_list = tracker.get_crop_bounds([720, 1280, 3])
+        assert tracker._last_crop_bounds == (540, 260, 740, 460)
+        tracker.cx += 1.0
+        assert tracker.get_crop_bounds([720, 1280, 3]) == b_list
+
+        # Dynamic aspect ratio switch (landscape -> portrait) recomputes without deadband freeze
+        b_portrait = tracker.get_crop_bounds((1280, 720, 3))
+        assert b_portrait != b_list
+        assert tracker._last_frame_shape == (1280, 720)
+
+        # Inactive tracking clears last crop bounds
+        tracker.is_tracking = False
+        assert tracker.get_crop_bounds((720, 1280)) == (0, 0, 1280, 720)
+        assert tracker._last_crop_bounds is None
+        assert tracker._last_frame_shape is None
 
     @patch("cv2.VideoCapture")
     @patch("sys.platform", "win32")

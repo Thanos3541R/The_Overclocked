@@ -234,23 +234,23 @@ LEFT_EYELID_REGION = _make_region(
 )
 
 # 3. Right Iris + Eye Corners (viewer's left) - Amber / Gold
-# Iris center (473), outer canthus (33), inner canthus (133)
+# Iris center (468), outer canthus (33), inner canthus (133)
 RIGHT_IRIS_CORNERS_REGION = _make_region(
     name="R Iris/Corners",
-    connections=RIGHT_IRIS_CONNECTIONS,
-    point_indices=[RIGHT_IRIS_CENTER, RIGHT_EYE_OUTER, RIGHT_EYE_INNER],
+    connections=LEFT_IRIS_CONNECTIONS,
+    point_indices=[LEFT_IRIS_CENTER, RIGHT_EYE_OUTER, RIGHT_EYE_INNER],
     color=(0, 215, 255),  # Amber / Gold
     line_thickness=1,
     point_thickness=3,
 )
 
 # 4. Left Iris + Eye Corners (viewer's right) - Spring Green
-# Iris center (468), outer canthus (263), inner canthus (362)
+# Iris center (473), outer canthus (263), inner canthus (362)
 # Distinct shade from right eye
 LEFT_IRIS_CORNERS_REGION = _make_region(
     name="L Iris/Corners",
-    connections=LEFT_IRIS_CONNECTIONS,
-    point_indices=[LEFT_IRIS_CENTER, LEFT_EYE_OUTER, LEFT_EYE_INNER],
+    connections=RIGHT_IRIS_CONNECTIONS,
+    point_indices=[RIGHT_IRIS_CENTER, LEFT_EYE_OUTER, LEFT_EYE_INNER],
     color=(50, 255, 120),  # Spring Green
     line_thickness=1,
     point_thickness=3,

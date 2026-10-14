@@ -179,9 +179,9 @@ class Visualizer:
             if self.show_iris:
                 c_r = RIGHT_IRIS_CORNERS_REGION.dimmed_color if dimmed else RIGHT_IRIS_CORNERS_REGION.color
                 c_l = LEFT_IRIS_CORNERS_REGION.dimmed_color if dimmed else LEFT_IRIS_CORNERS_REGION.color
-                cv2.drawMarker(frame, tuple(pts[RIGHT_IRIS_CENTER]), c_r,
+                cv2.drawMarker(frame, tuple(pts[LEFT_IRIS_CENTER]), c_r,
                                cv2.MARKER_CROSS, 8, 1, line_type=cv2.LINE_AA)
-                cv2.drawMarker(frame, tuple(pts[LEFT_IRIS_CENTER]), c_l,
+                cv2.drawMarker(frame, tuple(pts[RIGHT_IRIS_CENTER]), c_l,
                                cv2.MARKER_CROSS, 8, 1, line_type=cv2.LINE_AA)
 
             t1 = time.perf_counter()

@@ -260,6 +260,9 @@ def process_clip(
         refine_landmarks=config.refine_landmarks,
         min_detection_confidence=config.min_detection_confidence,
         min_tracking_confidence=config.min_tracking_confidence,
+        enable_adaptive_roi=config.enable_adaptive_roi,
+        roi_margin=config.roi_margin,
+        roi_alpha=config.roi_alpha,
     )
     normalizer = PnPNormalizer(
         frame_width=frame_w,
@@ -372,6 +375,13 @@ def process_clip(
                     x0=landmarks,
                     landmark_min_cutoff=config.landmark_min_cutoff,
                     landmark_beta=config.landmark_beta,
+                    landmark_d_cutoff=config.landmark_d_cutoff,
+                    eyelid_min_cutoff=config.eyelid_min_cutoff,
+                    eyelid_beta=config.eyelid_beta,
+                    eyelid_d_cutoff=config.eyelid_d_cutoff,
+                    iris_min_cutoff=config.iris_min_cutoff,
+                    iris_beta=config.iris_beta,
+                    iris_d_cutoff=config.iris_d_cutoff,
                     ear_min_cutoff=config.ear_min_cutoff,
                     ear_beta=config.ear_beta,
                 )

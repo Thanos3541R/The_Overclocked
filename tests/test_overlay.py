@@ -11,6 +11,7 @@ Verifies:
 """
 import time
 from typing import Dict, List, Tuple
+from unittest.mock import patch
 import cv2
 import numpy as np
 import pytest
@@ -37,6 +38,10 @@ from utils.landmarks import (
     RIGHT_IRIS_CENTER,
     RIGHT_IRIS_RING,
     VASODILATION_LANDMARKS,
+    RIGHT_EYE_OUTER,
+    RIGHT_EYE_INNER,
+    LEFT_EYE_OUTER,
+    LEFT_EYE_INNER,
 )
 from utils.overlay_regions import (
     ALL_REGIONS,
@@ -50,6 +55,8 @@ from utils.overlay_regions import (
     PNP_ANCHORS_REGION,
     RIGHT_EYELID_REGION,
     RIGHT_IRIS_CORNERS_REGION,
+    LEFT_IRIS_CONNECTIONS,
+    RIGHT_IRIS_CONNECTIONS,
     OverlayRegion,
 )
 from utils.visualization import Visualizer
@@ -104,9 +111,19 @@ def test_key_regions_definitions():
             if c_base > 0:
                 assert c_dim < c_base
 
-    # Check distinct shades for Left vs Right iris + corners
+    # Check distinct shades and correct anatomical connections for Left vs Right iris + corners
     assert RIGHT_IRIS_CORNERS_REGION.color != LEFT_IRIS_CORNERS_REGION.color
     assert RIGHT_EYELID_REGION.color != LEFT_EYELID_REGION.color
+    assert np.array_equal(
+        RIGHT_IRIS_CORNERS_REGION.point_indices,
+        [LEFT_IRIS_CENTER, RIGHT_EYE_OUTER, RIGHT_EYE_INNER]
+    )
+    assert np.array_equal(RIGHT_IRIS_CORNERS_REGION.connections, LEFT_IRIS_CONNECTIONS)
+    assert np.array_equal(
+        LEFT_IRIS_CORNERS_REGION.point_indices,
+        [RIGHT_IRIS_CENTER, LEFT_EYE_OUTER, LEFT_EYE_INNER]
+    )
+    assert np.array_equal(LEFT_IRIS_CORNERS_REGION.connections, RIGHT_IRIS_CONNECTIONS)
 
     # Forehead region checks
     assert FOREHEAD_REGION.name == "Forehead"
@@ -123,6 +140,28 @@ def test_key_regions_definitions():
     assert FULL_MESH_REGION.name == "Full Mesh"
     assert len(FULL_MESH_REGION.connections) == 2556
     assert FULL_MESH_REGION.connections.dtype == np.int32
+
+
+def test_iris_crosshair_marker_colors_match_regions():
+    """Verify that visualizer crosshair markers match region colors and anatomical wiring."""
+    viz = Visualizer(overlay_mode="regions", show_iris=True)
+    frame = np.zeros((300, 300, 3), dtype=np.uint8)
+    landmarks = np.zeros((478, 3), dtype=np.float64)
+    # Put viewer's left iris at (100, 150) and viewer's right iris at (200, 150)
+    landmarks[LEFT_IRIS_CENTER] = [100.0, 150.0, 0.0]
+    landmarks[RIGHT_IRIS_CENTER] = [200.0, 150.0, 0.0]
+
+    with patch("cv2.drawMarker") as mock_marker:
+        viz.draw(frame, landmarks)
+        calls = mock_marker.call_args_list
+        pts_called = [c[0][1] for c in calls]
+        colors_called = [c[0][2] for c in calls]
+        assert (100, 150) in pts_called
+        assert (200, 150) in pts_called
+        idx_left = pts_called.index((100, 150))
+        idx_right = pts_called.index((200, 150))
+        assert colors_called[idx_left] == RIGHT_IRIS_CORNERS_REGION.color
+        assert colors_called[idx_right] == LEFT_IRIS_CORNERS_REGION.color
 
 
 def test_vasodilation_landmarks_and_t_zone():

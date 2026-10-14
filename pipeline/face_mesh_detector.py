@@ -30,7 +30,7 @@ class AdaptiveROITracker:
     from the raw frame, enabling distant faces to fill 60-80% of MediaPipe's receptive field (~8x resolution boost).
     """
 
-    def __init__(self, alpha: float = 0.35, margin: float = 2.0):
+    def __init__(self, alpha: float = 0.15, margin: float = 2.0):
         """
         Args:
             alpha: EMA smoothing coefficient (0.0 < alpha <= 1.0).
@@ -47,6 +47,8 @@ class AdaptiveROITracker:
         self.cy: Optional[float] = None
         self.scale: Optional[float] = None
         self.is_tracking: bool = False
+        self._last_crop_bounds: Optional[Tuple[int, int, int, int]] = None
+        self._last_frame_shape: Optional[Tuple[int, int]] = None
 
     def reset(self) -> None:
         """Reset tracking state."""
@@ -54,6 +56,8 @@ class AdaptiveROITracker:
         self.cy = None
         self.scale = None
         self.is_tracking = False
+        self._last_crop_bounds = None
+        self._last_frame_shape = None
 
     @staticmethod
     def compute_bbox(landmarks: np.ndarray) -> Tuple[float, float, float, float]:
@@ -166,6 +170,8 @@ class AdaptiveROITracker:
             return 0, 0, 0, 0
 
         if not self.is_tracking or self.cx is None or self.cy is None or self.scale is None:
+            self._last_crop_bounds = None
+            self._last_frame_shape = None
             return 0, 0, w_frame, h_frame
 
         max_size = min(w_frame, h_frame)
@@ -189,6 +195,14 @@ class AdaptiveROITracker:
         x2 = x1 + crop_size
         y2 = y1 + crop_size
 
+        target_shape = (int(h_frame), int(w_frame))
+        if self._last_crop_bounds is not None and self._last_frame_shape == target_shape:
+            px1, py1, px2, py2 = self._last_crop_bounds
+            if max(abs(x1 - px1), abs(y1 - py1), abs(x2 - px2), abs(y2 - py2)) <= 2:
+                return self._last_crop_bounds
+
+        self._last_crop_bounds = (x1, y1, x2, y2)
+        self._last_frame_shape = target_shape
         return x1, y1, x2, y2
 
     def crop_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
@@ -309,7 +323,7 @@ class FaceMeshDetector:
                  min_tracking_confidence: float = 0.35,
                  enable_adaptive_roi: bool = True,
                  roi_margin: float = 2.0,
-                 roi_alpha: float = 0.35):
+                 roi_alpha: float = 0.15):
         """
         Args:
             max_faces: Maximum faces to detect (1 for driver-only).

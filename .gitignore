@@ -31,3 +31,4 @@ ehthumbs.db
 venv/
 .venv/
 env/
+.agents/

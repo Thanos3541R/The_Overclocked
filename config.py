@@ -38,11 +38,18 @@ class PipelineConfig:
     min_tracking_confidence: float = 0.35
     enable_adaptive_roi: bool = True
     roi_margin: float = 2.0
+    roi_alpha: float = 0.15
 
     # ── 1-Euro Filter ──
-    landmark_min_cutoff: float = 1.0   # smoothing at rest
+    landmark_min_cutoff: float = 0.7   # smoothing at rest
     landmark_beta: float = 0.007       # speed coefficient
     landmark_d_cutoff: float = 1.0     # derivative cutoff
+    eyelid_min_cutoff: float = 3.0     # smoothing for fast eyelid landmarks
+    eyelid_beta: float = 0.80          # speed coefficient for eyelids
+    eyelid_d_cutoff: float = 10.0      # derivative cutoff for eyelids
+    iris_min_cutoff: float = 1.5       # smoothing for iris landmarks
+    iris_beta: float = 0.40            # speed coefficient for irises
+    iris_d_cutoff: float = 5.0         # derivative cutoff for irises
     ear_min_cutoff: float = 1.5        # less smoothing for EAR signal
     ear_beta: float = 0.003
 
@@ -59,8 +66,8 @@ class PipelineConfig:
     microsleep_frames: int = 15        # at 30fps = 500ms  # [PLACEHOLDER]
     yawn_frames: int = 30              # at 30fps = 1 second
     gaze_dispersion_window_sec: float = 15.0  # rolling σ_yaw window (seconds)
-    saccade_onset_velocity: float = 30.0      # deg/s: movement above this flags saccade start  # [PLACEHOLDER]
-    saccade_offset_velocity: float = 15.0     # deg/s: movement below this flags saccade end (hysteresis)  # [PLACEHOLDER]
+    saccade_onset_velocity: float = 35.0      # deg/s: movement above this flags saccade start  # [PLACEHOLDER]
+    saccade_offset_velocity: float = 20.0     # deg/s: movement below this flags saccade end (hysteresis)  # [PLACEHOLDER]
 
     # ── Advanced Oculomotor Impairment Signals ──
     eccentric_gaze_threshold: float = 0.35    # normalized iris_x threshold for GEN evaluation (~15-20 deg)  # [PLACEHOLDER]

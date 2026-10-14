@@ -154,12 +154,12 @@ class TestOneEuroFilterBank:
         betas = bank.landmark_filter.beta
         d_cutoffs = bank.landmark_filter.d_cutoff
 
-        # All 460 structural landmarks
+        # All 440 structural landmarks
         all_indices = set(range(478))
         oculomotor_indices = set(DYNAMIC_EYELID_INDICES + DYNAMIC_IRIS_INDICES)
         structural_indices = list(all_indices - oculomotor_indices)
-        assert len(structural_indices) == 460
-        assert len(DYNAMIC_EYELID_INDICES) == 8
+        assert len(structural_indices) == 440
+        assert len(DYNAMIC_EYELID_INDICES) == 28
         assert len(DYNAMIC_IRIS_INDICES) == 10
 
         # Structural landmarks: min_cutoff = 0.7 Hz, beta = 0.007, d_cutoff = 1.0 Hz
@@ -168,17 +168,17 @@ class TestOneEuroFilterBank:
             assert betas[idx, 0] == 0.007
             assert d_cutoffs[idx, 0] == 1.0
 
-        # Eyelid landmarks: min_cutoff = 3.0 Hz, beta = 0.80, d_cutoff = 10.0 Hz
+        # Eyelid landmarks: min_cutoff = 2.0 Hz, beta = 0.50, d_cutoff = 8.0 Hz
         for idx in DYNAMIC_EYELID_INDICES:
-            assert min_cutoffs[idx, 0] == 3.0
-            assert betas[idx, 0] == 0.80
-            assert d_cutoffs[idx, 0] == 10.0
+            assert min_cutoffs[idx, 0] == 2.0
+            assert betas[idx, 0] == 0.50
+            assert d_cutoffs[idx, 0] == 8.0
 
-        # Iris landmarks: min_cutoff = 1.5 Hz, beta = 0.40, d_cutoff = 5.0 Hz
+        # Iris landmarks: min_cutoff = 1.0 Hz, beta = 0.20, d_cutoff = 3.0 Hz
         for idx in DYNAMIC_IRIS_INDICES:
-            assert min_cutoffs[idx, 0] == 1.5
-            assert betas[idx, 0] == 0.40
-            assert d_cutoffs[idx, 0] == 5.0
+            assert min_cutoffs[idx, 0] == 1.0
+            assert betas[idx, 0] == 0.20
+            assert d_cutoffs[idx, 0] == 3.0
 
     def test_split_bandwidth_smoothing_cutoffs_468_points(self):
         """OneEuroFilterBank decouples cutoffs for 468-point models (refine_landmarks=False)."""
@@ -190,12 +190,12 @@ class TestOneEuroFilterBank:
         betas = bank.landmark_filter.beta
         d_cutoffs = bank.landmark_filter.d_cutoff
 
-        # All 460 structural landmarks
+        # All 440 structural landmarks
         all_indices = set(range(468))
         eyelid_indices = set(DYNAMIC_EYELID_INDICES)
         structural_indices = list(all_indices - eyelid_indices)
-        assert len(structural_indices) == 460
-        assert len(DYNAMIC_EYELID_INDICES) == 8
+        assert len(structural_indices) == 440
+        assert len(DYNAMIC_EYELID_INDICES) == 28
 
         # Structural landmarks: min_cutoff = 0.7 Hz, beta = 0.007, d_cutoff = 1.0 Hz
         for idx in structural_indices:
@@ -203,11 +203,11 @@ class TestOneEuroFilterBank:
             assert betas[idx, 0] == 0.007
             assert d_cutoffs[idx, 0] == 1.0
 
-        # Eyelid landmarks: min_cutoff = 3.0 Hz, beta = 0.80, d_cutoff = 10.0 Hz
+        # Eyelid landmarks: min_cutoff = 2.0 Hz, beta = 0.50, d_cutoff = 8.0 Hz
         for idx in DYNAMIC_EYELID_INDICES:
-            assert min_cutoffs[idx, 0] == 3.0
-            assert betas[idx, 0] == 0.80
-            assert d_cutoffs[idx, 0] == 10.0
+            assert min_cutoffs[idx, 0] == 2.0
+            assert betas[idx, 0] == 0.50
+            assert d_cutoffs[idx, 0] == 8.0
 
     def test_filter_bank_reset_with_differing_shape(self):
         """reset() re-anchors filter state cleanly when landmark shape changes dynamically."""

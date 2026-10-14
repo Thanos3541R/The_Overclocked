@@ -44,12 +44,12 @@ class PipelineConfig:
     landmark_min_cutoff: float = 0.7   # smoothing at rest
     landmark_beta: float = 0.007       # speed coefficient
     landmark_d_cutoff: float = 1.0     # derivative cutoff
-    eyelid_min_cutoff: float = 3.0     # smoothing for fast eyelid landmarks
-    eyelid_beta: float = 0.80          # speed coefficient for eyelids
-    eyelid_d_cutoff: float = 10.0      # derivative cutoff for eyelids
-    iris_min_cutoff: float = 1.5       # smoothing for iris landmarks
-    iris_beta: float = 0.40            # speed coefficient for irises
-    iris_d_cutoff: float = 5.0         # derivative cutoff for irises
+    eyelid_min_cutoff: float = 2.0     # smoothing for fast eyelid landmarks
+    eyelid_beta: float = 0.50          # speed coefficient for eyelids
+    eyelid_d_cutoff: float = 8.0       # derivative cutoff for eyelids
+    iris_min_cutoff: float = 1.0       # smoothing for iris landmarks
+    iris_beta: float = 0.20            # speed coefficient for irises
+    iris_d_cutoff: float = 3.0         # derivative cutoff for irises
     ear_min_cutoff: float = 1.5        # less smoothing for EAR signal
     ear_beta: float = 0.003
 

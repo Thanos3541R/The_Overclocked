@@ -165,7 +165,7 @@ class Visualizer:
         if (landmarks is not None and getattr(landmarks, "ndim", 0) >= 2 and
                 landmarks.shape[1] >= 2 and len(landmarks) > 0 and self.overlay_mode != "off"):
             # Convert smoothed landmarks to int pixel coordinates ONCE per frame
-            pts = landmarks[:, :2].astype(np.int32)
+            pts = np.rint(landmarks[:, :2]).astype(np.int32)
             dimmed = is_gated
 
             # Full mesh wireframe if active
@@ -304,7 +304,7 @@ class Visualizer:
         axes_3d = np.float64([
             [axis_length, 0, 0],   # X (Red)
             [0, axis_length, 0],   # Y (Green)
-            [0, 0, axis_length],   # Z (Blue)
+            [0, 0, -axis_length],  # Z (Blue)
             [0, 0, 0],             # Origin
         ])
 

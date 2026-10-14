@@ -23,9 +23,13 @@ from typing import Dict, List, Optional, Any
 import cv2
 import numpy as np
 
+from config import DEFAULT_CONFIG, PipelineConfig
 from pipeline.preprocessing import LightingNormalizer
 from pipeline.face_mesh_detector import FaceMeshDetector
+from pipeline.one_euro_filter import OneEuroFilterBank
 from pipeline.pnp_normalizer import PnPNormalizer
+from pipeline.head_pose_estimator import HeadPoseGate
+from pipeline.imu_gate import SoftwareIMUGate
 from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
 from pipeline.classifier import ImpairmentClassifier, ImpairmentAssessment
 from pipeline.calibration import PersonalBaselineCalibrator
@@ -75,10 +79,55 @@ def extract_video_features(video_path: str,
     print(f"{'-'*75}")
 
     # Initialize DMS pipeline components
-    prep = LightingNormalizer()
-    detector = FaceMeshDetector()
+    config = DEFAULT_CONFIG
+    prep = LightingNormalizer(
+        clip_limit=config.clahe_clip_limit,
+        tile_grid_size=config.clahe_tile_grid,
+        low_light_threshold=config.low_light_threshold,
+        gamma_dark=config.gamma_dark,
+        gamma_dim=config.gamma_dim,
+    )
+    detector = FaceMeshDetector(
+        max_faces=config.max_faces,
+        refine_landmarks=config.refine_landmarks,
+        min_detection_confidence=config.min_detection_confidence,
+        min_tracking_confidence=config.min_tracking_confidence,
+        enable_adaptive_roi=config.enable_adaptive_roi,
+        roi_margin=config.roi_margin,
+        roi_alpha=config.roi_alpha,
+    )
     pnp = PnPNormalizer(width, height)
-    extractor = FeatureExtractor(fps=fps)
+    pose_gate = HeadPoseGate(
+        yaw_limit=config.yaw_limit,
+        pitch_down_limit=config.pitch_down_limit,
+        pitch_up_limit=config.pitch_up_limit,
+    )
+    imu_gate = SoftwareIMUGate(
+        accel_threshold=config.head_accel_threshold,
+        freeze_duration_ms=config.imu_freeze_ms,
+        window_size=config.imu_accel_window,
+    )
+    filter_bank: Optional[OneEuroFilterBank] = None
+    extractor = FeatureExtractor(
+        blink_threshold=config.ear_blink_threshold,
+        mar_yawn_threshold=config.mar_yawn_threshold,
+        perclos_window_sec=config.perclos_window_sec,
+        perclos_alert_threshold=config.perclos_alert_threshold,
+        microsleep_frames=config.microsleep_frames,
+        yawn_frames=config.yawn_frames,
+        gaze_dispersion_window_sec=config.gaze_dispersion_window_sec,
+        saccade_onset_velocity=config.saccade_onset_velocity,
+        saccade_offset_velocity=config.saccade_offset_velocity,
+        eccentric_gaze_threshold=config.eccentric_gaze_threshold,
+        gen_drift_min_vel=config.gen_drift_min_vel,
+        gen_drift_max_vel=config.gen_drift_max_vel,
+        gen_reset_min_vel=config.gen_reset_min_vel,
+        loc_vergence_threshold_deg=config.loc_vergence_threshold_deg,
+        vor_min_head_speed=config.vor_min_head_speed,
+        vor_max_head_speed=config.vor_max_head_speed,
+        pursuit_window_sec=config.pursuit_window_sec,
+        fps=fps,
+    )
     classifier = ImpairmentClassifier()
     calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=fps)
     bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
@@ -111,27 +160,57 @@ def extract_video_features(video_path: str,
 
             # 2. 478 3D facial landmark detection with iris refinement
             landmarks = detector.detect(processed_frame)
-            face_valid = landmarks is not None
 
-            if face_valid:
+            if landmarks is not None:
                 face_detected_frames += 1
-                # 3. PnP 3D head pose estimation
-                pnp.solve_pose(landmarks)
-                euler = pnp.get_euler_angles()
-                pitch, yaw, roll = euler if euler is not None else (0.0, 0.0, 0.0)
 
-                # 4. Feature extraction (including Section A involuntary, Section B voluntary, and M_mask)
+                # 3. Split-Bandwidth 1-Euro Temporal Filtering
+                if filter_bank is None:
+                    filter_bank = OneEuroFilterBank(
+                        t0=timestamp,
+                        x0=landmarks,
+                        landmark_min_cutoff=config.landmark_min_cutoff,
+                        landmark_beta=config.landmark_beta,
+                        landmark_d_cutoff=config.landmark_d_cutoff,
+                        eyelid_min_cutoff=config.eyelid_min_cutoff,
+                        eyelid_beta=config.eyelid_beta,
+                        eyelid_d_cutoff=config.eyelid_d_cutoff,
+                        iris_min_cutoff=config.iris_min_cutoff,
+                        iris_beta=config.iris_beta,
+                        iris_d_cutoff=config.iris_d_cutoff,
+                        ear_min_cutoff=config.ear_min_cutoff,
+                        ear_beta=config.ear_beta,
+                    )
+                    smooth_landmarks = landmarks
+                else:
+                    smooth_landmarks = filter_bank.filter_landmarks(timestamp, landmarks)
+
+                # 4. PnP 3D Head Pose Estimation & Normalization
+                pnp_success = pnp.solve_pose(smooth_landmarks)
+                norm_landmarks = pnp.normalize_landmarks(smooth_landmarks)
+                euler = pnp.get_euler_angles()
+                pose_state = pose_gate.check(euler)
+
+                # 5. Software IMU Gating
+                imu_frozen = imu_gate.update(
+                    timestamp=timestamp,
+                    tvec=pnp.tvec if pnp_success else None,
+                    euler_angles=euler if pnp_success else None,
+                )
+
+                # 6. Feature extraction
                 features = extractor.compute(
-                    landmarks=landmarks,
+                    landmarks=norm_landmarks,
                     timestamp=timestamp,
                     frame_id=processed_count,
-                    face_valid=True,
-                    head_yaw=yaw,
-                    head_pitch=pitch,
-                    head_roll=roll,
-                    imu_gated=False,
-                    gating_reason='',
-                    frame=frame
+                    face_valid=pose_state.face_valid,
+                    head_yaw=pose_state.yaw,
+                    head_pitch=pose_state.pitch,
+                    head_roll=pose_state.roll,
+                    imu_gated=imu_frozen,
+                    gating_reason=pose_state.gating_reason,
+                    frame=frame,
+                    image_landmarks=smooth_landmarks,
                 )
 
                 # Online Personal Baseline Auto-Calibration
@@ -139,13 +218,15 @@ def extract_video_features(video_path: str,
                 if calibrator.is_calibrated:
                     calibrator.apply_to(extractor, classifier)
             else:
+                pnp.reset()
                 features = extractor.compute(
-                    landmarks=np.zeros((478, 3)),
+                    landmarks=np.zeros((478, 3), dtype=np.float64),
                     timestamp=timestamp,
                     frame_id=processed_count,
                     face_valid=False,
+                    imu_gated=False,
                     gating_reason='No face detected',
-                    frame=frame
+                    frame=frame,
                 )
 
             # 5. Temporal classification and anti-masking assessment
@@ -166,7 +247,7 @@ def extract_video_features(video_path: str,
             rec = {
                 'frame_id': processed_count,
                 'timestamp': round(timestamp, 3),
-                'face_valid': face_valid,
+                'face_valid': bool(features.face_valid),
                 # Ocular & Facial
                 'ear_avg': round(features.ear_avg, 4),
                 'ear_left': round(features.ear_left, 4),

@@ -185,7 +185,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     # ── Main loop ──
     paused = False
     frame_id = 0
-    t0 = time.time()
+    t0 = time.perf_counter()
 
     try:
         while capture.is_open():
@@ -201,8 +201,11 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             if frame is None:
                 break
 
-            timestamp = time.time() - t0
             frame_id += 1
+            if capture.is_camera:
+                timestamp = time.perf_counter() - t0
+            else:
+                timestamp = (frame_id - 1) / max(capture.fps, 1.0)
 
             # ── Stage 1: Preprocessing ──
             processed = preprocessor.process(frame)

@@ -115,7 +115,7 @@ def draw_static_annotation(frame: np.ndarray, landmarks: np.ndarray,
         axes_3d = np.array([
             [axis_len, 0.0, 0.0],
             [0.0, axis_len, 0.0],
-            [0.0, 0.0, axis_len],
+            [0.0, 0.0, -axis_len],
             [0.0, 0.0, 0.0]
         ], dtype=np.float64)
         img_pts, _ = cv2.projectPoints(axes_3d, pnp.rvec, pnp.tvec,

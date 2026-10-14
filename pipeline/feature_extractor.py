@@ -509,12 +509,12 @@ class FeatureExtractor:
         raw_dx = float(abs(iris_x - self._prev_iris_x))
         raw_dy = float(abs(iris_y - self._prev_iris_y))
 
-        if np.hypot(raw_dx, raw_dy * 0.5) < 0.030:
+        if np.hypot(raw_dx, raw_dy * 0.5) < 0.032:
             velocity = 0.0
         else:
             # Angular displacement in degrees
             dx_deg = (iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT
-            dy_deg = (iris_y - self._prev_iris_y) * _DEG_PER_IRIS_UNIT
+            dy_deg = (iris_y - self._prev_iris_y) * _DEG_PER_IRIS_UNIT * 0.5
             angular_displacement = np.sqrt(dx_deg**2 + dy_deg**2)
             velocity = angular_displacement / dt  # deg/s
 
@@ -1083,8 +1083,9 @@ class FeatureExtractor:
             self._prev_ear_timestamp = timestamp
             self._prev_head_timestamp = timestamp
             self._prev_ear_avg = (self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT) + self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)) / 2.0
-            left_x, left_y = self.compute_iris_position(landmarks, LEFT_IRIS_CENTER, 33, 133)
-            right_x, right_y = self.compute_iris_position(landmarks, RIGHT_IRIS_CENTER, 263, 362)
+            iris_lms = image_landmarks if image_landmarks is not None else landmarks
+            left_x, left_y = self.compute_iris_position(iris_lms, LEFT_IRIS_CENTER, 33, 133)
+            right_x, right_y = self.compute_iris_position(iris_lms, RIGHT_IRIS_CENTER, 263, 362)
             self._prev_iris_x = (left_x + right_x) / 2.0
             self._prev_iris_y = (left_y + right_y) / 2.0
             self._prev_head_yaw = head_yaw
@@ -1144,12 +1145,13 @@ class FeatureExtractor:
         features.blink_phase = self._blink_phase
 
         # ── Iris gaze ──
+        iris_lms = image_landmarks if image_landmarks is not None else landmarks
         # Left eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
         features.left_iris_x, features.left_iris_y = self.compute_iris_position(
-            landmarks, LEFT_IRIS_CENTER, 33, 133)
+            iris_lms, LEFT_IRIS_CENTER, 33, 133)
         # Right eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
         features.right_iris_x, features.right_iris_y = self.compute_iris_position(
-            landmarks, RIGHT_IRIS_CENTER, 263, 362)
+            iris_lms, RIGHT_IRIS_CENTER, 263, 362)
 
         # ── Saccadic velocity & latency (Fransson et al. 2010) ──
         avg_iris_x = (features.left_iris_x + features.right_iris_x) / 2.0

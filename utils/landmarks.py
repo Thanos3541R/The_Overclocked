@@ -84,9 +84,14 @@ LEFT_IRIS_RING = [469, 470, 471, 472]
 RIGHT_IRIS_CENTER = 473
 RIGHT_IRIS_RING = [474, 475, 476, 477]
 
-# Fast-moving oculomotor landmarks (8 vertical eyelid points + 10 iris points)
+# Fast-moving oculomotor landmarks (28 eyelid contour points + 10 iris points)
 # Kept on a high-bandwidth filter path so blink upstroke and saccade velocities are not damped
-DYNAMIC_EYELID_INDICES = [160, 158, 153, 144, 385, 387, 373, 380]
+DYNAMIC_EYELID_INDICES = [
+    # Right eye contour excluding rigid corners 33 & 133 (14 points)
+    7, 163, 144, 145, 153, 154, 155, 173, 157, 158, 159, 160, 161, 246,
+    # Left eye contour excluding rigid corners 263 & 362 (14 points)
+    382, 381, 380, 374, 373, 390, 249, 466, 388, 387, 386, 385, 384, 398,
+]
 DYNAMIC_IRIS_INDICES = [468, 469, 470, 471, 472, 473, 474, 475, 476, 477]
 DYNAMIC_EYELID_IRIS_INDICES = DYNAMIC_EYELID_INDICES + DYNAMIC_IRIS_INDICES
 
@@ -129,8 +134,8 @@ CANONICAL_FACE_3D = np.array([
 CANONICAL_FACE_3D_8 = np.vstack([
     CANONICAL_FACE_3D,
     np.array([
-        [0.0,   -22.0,    15.0],       # Nose bridge (idx 168)
-        [0.0,   -45.0,    22.0],       # Mid-eyebrow / glabella (idx 9)
+        [0.0,   -37.8,    14.0],       # Nose bridge / sellion (idx 168, between the eyes)
+        [0.0,   -50.0,    18.0],       # Mid-eyebrow / glabella (idx 9, above the eyes)
     ], dtype=np.float64),
 ])
 

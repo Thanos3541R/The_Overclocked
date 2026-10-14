@@ -148,8 +148,8 @@ class OneEuroFilterBank:
     plus optional scalar filters.
 
     Structural/PnP landmarks use low cutoff (0.7 Hz) to eliminate pose chatter,
-    eyelid landmarks use (3.0 Hz min_cutoff, 0.80 beta, 10.0 Hz d_cutoff) for fast blink kinetics,
-    and iris landmarks use (1.5 Hz min_cutoff, 0.40 beta, 5.0 Hz d_cutoff) to eliminate sub-pixel
+    eyelid landmarks use (2.0 Hz min_cutoff, 0.50 beta, 8.0 Hz d_cutoff) for fast blink kinetics,
+    and iris landmarks use (1.0 Hz min_cutoff, 0.20 beta, 3.0 Hz d_cutoff) to eliminate sub-pixel
     tremor while tracking fast saccades.
     """
 
@@ -157,12 +157,12 @@ class OneEuroFilterBank:
                  landmark_min_cutoff: float = 0.7,
                  landmark_beta: float = 0.007,
                  landmark_d_cutoff: float = 1.0,
-                 eyelid_min_cutoff: float = 3.0,
-                 eyelid_beta: float = 0.80,
-                 eyelid_d_cutoff: float = 10.0,
-                 iris_min_cutoff: float = 1.5,
-                 iris_beta: float = 0.40,
-                 iris_d_cutoff: float = 5.0,
+                 eyelid_min_cutoff: float = 2.0,
+                 eyelid_beta: float = 0.50,
+                 eyelid_d_cutoff: float = 8.0,
+                 iris_min_cutoff: float = 1.0,
+                 iris_beta: float = 0.20,
+                 iris_d_cutoff: float = 3.0,
                  preserve_oculomotor: bool = True,
                  ear_min_cutoff: float = 1.5,
                  ear_beta: float = 0.003,
@@ -176,12 +176,12 @@ class OneEuroFilterBank:
             landmark_min_cutoff: Smoothing for rigid/structural landmarks (default 0.7 Hz).
             landmark_beta: Speed coefficient for rigid/structural landmarks (default 0.007).
             landmark_d_cutoff: Derivative cutoff for rigid/structural landmarks (default 1.0 Hz).
-            eyelid_min_cutoff: Smoothing for fast eyelid landmarks (default 3.0 Hz).
-            eyelid_beta: Speed coefficient for fast eyelid landmarks (default 0.80).
-            eyelid_d_cutoff: Derivative cutoff for fast eyelid landmarks (default 10.0 Hz).
-            iris_min_cutoff: Smoothing for iris landmarks (default 1.5 Hz).
-            iris_beta: Speed coefficient for iris landmarks (default 0.40).
-            iris_d_cutoff: Derivative cutoff for iris landmarks (default 5.0 Hz).
+            eyelid_min_cutoff: Smoothing for fast eyelid landmarks (default 2.0 Hz).
+            eyelid_beta: Speed coefficient for fast eyelid landmarks (default 0.50).
+            eyelid_d_cutoff: Derivative cutoff for fast eyelid landmarks (default 8.0 Hz).
+            iris_min_cutoff: Smoothing for iris landmarks (default 1.0 Hz).
+            iris_beta: Speed coefficient for iris landmarks (default 0.20).
+            iris_d_cutoff: Derivative cutoff for iris landmarks (default 3.0 Hz).
             preserve_oculomotor: If True, applies high-bandwidth profiles to eyelid and iris landmarks.
             ear_min_cutoff: Smoothing for auxiliary scalar signals.
             ear_beta: Speed coefficient for auxiliary scalar signals.

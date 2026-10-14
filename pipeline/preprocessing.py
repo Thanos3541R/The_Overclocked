@@ -93,7 +93,14 @@ class LightingNormalizer:
             color_frame = np.clip(color_frame, 0, 255).astype(np.uint8)
 
         yuv = cv2.cvtColor(color_frame, cv2.COLOR_BGR2YUV)
-        yuv[:, :, 0] = self.clahe.apply(yuv[:, :, 0])
+        raw_y = yuv[:, :, 0]
+        raw_lum = float(raw_y.mean())
+        clahe_y = self.clahe.apply(raw_y)
+        if raw_lum >= 95.0:
+            # Blend 35% CLAHE + 65% original Y in well-lit scenes to prevent eyeglass glare amplification
+            yuv[:, :, 0] = cv2.addWeighted(clahe_y, 0.35, raw_y, 0.65, 0)
+        else:
+            yuv[:, :, 0] = clahe_y
         mean_lum = float(yuv[:, :, 0].mean())
 
         if mean_lum < self.low_light_threshold:

@@ -9,10 +9,11 @@ Split-Bandwidth Oculomotor Preservation:
   A low derivative cutoff (d_cutoff = 1.0 Hz) causes the closing and opening velocity
   vectors to cancel out at the reversal point, dropping the filter cutoff back to
   min_cutoff (1.0 Hz) and crushing blink upstroke velocity by >75%.
-  OneEuroFilterBank solves this in a single vectorized pass by assigning a high-bandwidth
-  profile (min_cutoff=8.0 Hz, beta=0.80, d_cutoff=10.0 Hz) to the 18 fast-moving eyelid
-  and iris landmarks (DYNAMIC_EYELID_IRIS_INDICES) while keeping all structural and
-  PnP skull-anchor landmarks heavily smoothed (min_cutoff=1.0 Hz, beta=0.007, d_cutoff=1.0 Hz).
+  OneEuroFilterBank solves this in a single vectorized pass by assigning decoupled
+  smoothing profiles across 3 functional groups:
+    - Structural/skull (460 points): min_cutoff=0.7 Hz, beta=0.007, d_cutoff=1.0 Hz
+    - Eyelid landmarks (8 points): min_cutoff=3.0 Hz, beta=0.80, d_cutoff=10.0 Hz
+    - Iris landmarks (10 points): min_cutoff=1.5 Hz, beta=0.40, d_cutoff=5.0 Hz
 
 This implementation is fully vectorized with NumPy — no Python loops
 over individual landmarks or coordinates.
@@ -86,10 +87,12 @@ class VectorizedOneEuroFilter:
             Filtered signal, same shape as x.
         """
         dt = float(t) - self.t_prev
-        if dt <= 1e-9:
+        if dt <= 1e-9 or np.isnan(dt) or np.isinf(dt):
             return self.x_prev.copy()
 
         x = np.asarray(x, dtype=np.float64)
+        if np.isnan(x).any() or np.isinf(x).any():
+            return self.x_prev.copy()
 
         # If input shape changed dynamically, re-anchor state safely
         if (x.shape != self.x_prev.shape or
@@ -135,9 +138,9 @@ class VectorizedOneEuroFilter:
                 last_min = self.min_cutoff[-1:] if n_curr > 0 else np.array([[1.0]])
                 last_beta = self.beta[-1:] if n_curr > 0 else np.array([[0.007]])
                 last_d = self.d_cutoff[-1:] if n_curr > 0 else np.array([[1.0]])
-                self.min_cutoff = np.vstack([self.min_cutoff, np.repeat(last_min, pad_len, axis=0)])
-                self.beta = np.vstack([self.beta, np.repeat(last_beta, pad_len, axis=0)])
-                self.d_cutoff = np.vstack([self.d_cutoff, np.repeat(last_d, pad_len, axis=0)])
+                self.min_cutoff = np.concatenate([self.min_cutoff, np.repeat(last_min, pad_len, axis=0)], axis=0)
+                self.beta = np.concatenate([self.beta, np.repeat(last_beta, pad_len, axis=0)], axis=0)
+                self.d_cutoff = np.concatenate([self.d_cutoff, np.repeat(last_d, pad_len, axis=0)], axis=0)
 
 
 class OneEuroFilterBank:
@@ -257,6 +260,8 @@ class OneEuroFilterBank:
 
     def filter_scalar(self, t: float, value: float, key: str) -> float:
         """Filter a named scalar signal (e.g., 'ear_left', 'mar')."""
+        if np.isnan(value) or np.isinf(value):
+            return value
         if key not in self._ear_filters:
             self._ear_filters[key] = VectorizedOneEuroFilter(
                 t, np.array([value]),

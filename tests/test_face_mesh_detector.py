@@ -832,6 +832,31 @@ class TestTrackerRobustnessAndEdgeCases:
         assert tracker._last_crop_bounds is None
         assert tracker._last_frame_shape is None
 
+        # 1D or empty frame shape tuple
+        tracker.is_tracking = True
+        tracker.cx, tracker.cy, tracker.scale = 300.0, 300.0, 50.0
+        assert tracker.get_crop_bounds((720, 1280)) != (0, 0, 0, 0)
+        assert tracker.get_crop_bounds((720,)) == (0, 0, 0, 0)
+        assert tracker._last_crop_bounds is None
+        assert tracker.get_crop_bounds(()) == (0, 0, 0, 0)
+
+        # 1D or non-2D image array passed to crop_frame
+        empty_1d = np.zeros(0, dtype=np.uint8)
+        c_out, b_out = tracker.crop_frame(empty_1d)
+        assert b_out == (0, 0, 0, 0)
+        assert c_out is empty_1d
+
+        # NaN and Inf coordinates in tracker state trigger safe reset
+        tracker.is_tracking = True
+        tracker.cx, tracker.cy, tracker.scale = float('nan'), 300.0, 50.0
+        assert tracker.get_crop_bounds((720, 1280)) == (0, 0, 1280, 720)
+        assert tracker.is_tracking is False
+
+        tracker.is_tracking = True
+        tracker.cx, tracker.cy, tracker.scale = 300.0, float('inf'), 50.0
+        assert tracker.get_crop_bounds((720, 1280)) == (0, 0, 1280, 720)
+        assert tracker.is_tracking is False
+
     @patch("cv2.VideoCapture")
     @patch("sys.platform", "win32")
     def test_camera_whitespace_string_source(self, mock_cv2_cap):

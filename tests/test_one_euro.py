@@ -250,6 +250,41 @@ class TestOneEuroFilterBank:
         r2 = v_filter(1.033, np.ones((468, 3)) * 2.0)
         assert r2.shape == (468, 3)
 
+    def test_1d_parameter_array_resilience(self):
+        """1D parameter arrays (shape (N,)) cleanly expand and pad without vstack ValueError."""
+        v_filter = VectorizedOneEuroFilter(
+            t0=0.0,
+            x0=np.zeros((10, 2)),
+            min_cutoff=np.ones(10),
+            beta=np.ones(10) * 0.1,
+            d_cutoff=np.ones(10),
+        )
+        # Expand from 10 to 15 points
+        out = v_filter(1.0, np.ones((15, 2)))
+        assert out.shape == (15, 2)
+        assert v_filter.min_cutoff.shape == (15,)
+
+    def test_nan_and_inf_input_immunity(self):
+        """Filter gracefully rejects NaN and Inf inputs without permanently poisoning internal state."""
+        bank = OneEuroFilterBank(t0=0.0, x0=np.zeros((478, 3)))
+        # Valid frame 1
+        valid_out = bank.filter_landmarks(1.0, np.ones((478, 3)))
+        assert not np.isnan(valid_out).any()
+
+        # Frame 2 contains NaNs (detector failure / occlusion)
+        nan_input = np.full((478, 3), np.nan)
+        held_out = bank.filter_landmarks(1.033, nan_input)
+        # Should return held previous clean state without NaN corruption
+        assert not np.isnan(held_out).any()
+        assert np.array_equal(held_out, valid_out)
+
+        # Frame 3 contains valid numbers again - filter must NOT be poisoned
+        resumed_out = bank.filter_landmarks(1.066, np.ones((478, 3)) * 2.0)
+        assert not np.isnan(resumed_out).any()
+
+        # Scalar filter with NaN
+        assert bank.filter_scalar(1.0, float('nan'), "ear_left") != 0.0 or np.isnan(bank.filter_scalar(1.0, float('nan'), "ear_left"))
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

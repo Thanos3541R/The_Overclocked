@@ -447,7 +447,8 @@ class FeatureExtractor:
         Returns:
             (velocity_deg_s, is_saccade, latency_ms, raw_iris_dx)
         """
-        if np.isnan(iris_x) or np.isnan(iris_y):
+        if (np.isnan(iris_x) or np.isnan(iris_y) or np.isinf(iris_x) or np.isinf(iris_y) or
+                np.isnan(timestamp) or np.isinf(timestamp)):
             return (0.0, False, 0.0, 0.0)
 
         if self._prev_iris_x is None or self._prev_iris_y is None or self._prev_timestamp is None:

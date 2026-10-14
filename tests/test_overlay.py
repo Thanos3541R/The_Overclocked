@@ -180,6 +180,37 @@ def test_overlay_draw_with_468_points():
     assert rendered_full.shape == frame.shape
 
 
+def test_overlay_draw_with_empty_or_1d_landmarks():
+    """Verify that visualizer gracefully handles empty or 1D landmark arrays."""
+    viz = Visualizer(overlay_mode="regions", show_iris=True)
+    frame = np.zeros((300, 300, 3), dtype=np.uint8)
+
+    # Empty 1D array
+    out1 = viz.draw(frame.copy(), np.zeros(0))
+    assert out1.shape == frame.shape
+
+    # 1D array of landmarks
+    out2 = viz.draw(frame.copy(), np.zeros(478))
+    assert out2.shape == frame.shape
+
+    # Region with negative or out-of-bound connection indices
+    from utils.overlay_regions import OverlayRegion
+    bad_conn = np.array([[-1, 2], [1, 999], [0, 1]], dtype=np.int32)
+    bad_pts = np.array([[-1, -1], [999, 999], [0, 0]], dtype=np.int32)
+    reg = OverlayRegion(
+        name="BadRegion",
+        connections=bad_conn,
+        point_indices=np.array([0, 1], dtype=np.int32),
+        point_segments=bad_pts,
+        color=(0, 255, 0),
+        dimmed_color=(0, 128, 0),
+        line_thickness=1,
+        point_thickness=2,
+    )
+    # Must draw without IndexError or wrapping to negative indices
+    reg.draw(frame, np.ones((5, 2), dtype=np.int32) * 50)
+
+
 def test_vasodilation_landmarks_and_t_zone():
     """Verify that vasodilation tracking landmarks include full cheeks and forehead patch."""
     assert len(VASODILATION_LANDMARKS) == 64

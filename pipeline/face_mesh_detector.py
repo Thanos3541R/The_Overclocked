@@ -163,6 +163,8 @@ class AdaptiveROITracker:
             (x_crop_min, y_crop_min, x_crop_max, y_crop_max)
         """
         if len(frame_shape) < 2:
+            self._last_crop_bounds = None
+            self._last_frame_shape = None
             return 0, 0, 0, 0
 
         h_frame, w_frame = frame_shape[:2]
@@ -174,6 +176,11 @@ class AdaptiveROITracker:
         if not self.is_tracking or self.cx is None or self.cy is None or self.scale is None:
             self._last_crop_bounds = None
             self._last_frame_shape = None
+            return 0, 0, w_frame, h_frame
+
+        if (np.isnan(self.cx) or np.isnan(self.cy) or np.isnan(self.scale) or
+                np.isinf(self.cx) or np.isinf(self.cy) or np.isinf(self.scale)):
+            self.reset()
             return 0, 0, w_frame, h_frame
 
         max_size = min(w_frame, h_frame)
@@ -216,8 +223,13 @@ class AdaptiveROITracker:
         Returns:
             Tuple of (cropped_image, (x_crop_min, y_crop_min, x_crop_max, y_crop_max)).
         """
+        if frame is None or not isinstance(frame, np.ndarray) or frame.ndim < 2:
+            return frame, (0, 0, 0, 0)
+
         bounds = self.get_crop_bounds(frame.shape)
         x1, y1, x2, y2 = bounds
+        if x2 <= x1 or y2 <= y1:
+            return frame, (0, 0, 0, 0)
         crop = frame[y1:y2, x1:x2]
         return crop, bounds
 

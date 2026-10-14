@@ -162,7 +162,8 @@ class Visualizer:
 
         # ── Color-Coded Landmark Overlay (Vectorized Batch) ──
         t0 = time.perf_counter()
-        if landmarks is not None and self.overlay_mode != "off":
+        if (landmarks is not None and getattr(landmarks, "ndim", 0) >= 2 and
+                landmarks.shape[1] >= 2 and len(landmarks) > 0 and self.overlay_mode != "off"):
             # Convert smoothed landmarks to int pixel coordinates ONCE per frame
             pts = landmarks[:, :2].astype(np.int32)
             dimmed = is_gated

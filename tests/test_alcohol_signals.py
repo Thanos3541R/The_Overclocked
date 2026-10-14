@@ -178,10 +178,22 @@ class TestSaccadeDynamics:
         assert feat_post_drop.saccade_detected is False
         assert ext._in_saccade is False
 
-        # Direct NaN input safety
+        # Direct NaN / Inf input safety
         v_nan, sac_nan, _, _ = ext._compute_saccade_dynamics(float('nan'), 0.0, timestamp=40/30.0)
         assert v_nan == 0.0
         assert sac_nan is False
+
+        v_inf, sac_inf, _, _ = ext._compute_saccade_dynamics(float('inf'), 0.0, timestamp=41/30.0)
+        assert v_inf == 0.0
+        assert sac_inf is False
+
+        v_t_nan, sac_t_nan, _, _ = ext._compute_saccade_dynamics(0.1, 0.0, timestamp=float('nan'))
+        assert v_t_nan == 0.0
+        assert sac_t_nan is False
+
+        v_t_inf, sac_t_inf, _, _ = ext._compute_saccade_dynamics(0.1, 0.0, timestamp=float('inf'))
+        assert v_t_inf == 0.0
+        assert sac_t_inf is False
 
     def test_latency_accumulates_during_fixation(self):
         """Saccade latency should increase during fixation after a saccade."""

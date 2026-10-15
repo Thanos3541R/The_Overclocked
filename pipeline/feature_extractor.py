@@ -1306,7 +1306,9 @@ class FeatureExtractor:
 
         # ── Advanced Oculomotor Impairment Signals ──
         # 1. Binocular vergence & Lack of Convergence (LOC - DRE sign)
-        if self._blink_phase != "open" or abs(head_yaw) > 20.0:
+        # Gate on blink, extreme yaw (>20°), steep pitch (>15°), and eccentric gaze (>0.30)
+        # where eyeball geometry naturally foreshortens the abducting eye
+        if self._blink_phase != "open" or abs(head_yaw) > 20.0 or abs(head_pitch) > 15.0 or abs(avg_iris_x) > 0.30:
             features.vergence_angle_deg = self._last_features.vergence_angle_deg
             features.lack_of_convergence = False
         else:

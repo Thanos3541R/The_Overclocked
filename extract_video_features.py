@@ -39,7 +39,8 @@ from pipeline.bayesian_filter import BayesianEvidenceAccumulator
 def extract_video_features(video_path: str,
                            output_dir: str = ".",
                            max_frames: Optional[int] = None,
-                           headless: bool = True) -> Dict[str, Any]:
+                           headless: bool = True,
+                           csv_path: Optional[str] = None) -> Dict[str, Any]:
     """Process a video file and extract voluntary, involuntary, and anti-masking features.
 
     Args:
@@ -47,6 +48,7 @@ def extract_video_features(video_path: str,
         output_dir: Directory to save generated output files.
         max_frames: Optional maximum frames to process.
         headless: If False, displays OpenCV visualization window during processing.
+        csv_path: Optional specific path or filename to write output CSV.
 
     Returns:
         Summary dictionary of video analysis.
@@ -66,6 +68,10 @@ def extract_video_features(video_path: str,
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     duration_sec = total_video_frames / fps if total_video_frames > 0 else 0.0
+
+    # Scale temporal frame counts dynamically to actual video FPS (e.g. 500ms microsleep, 1.0s yawn)
+    scaled_microsleep_frames = max(5, int(round(0.50 * fps)))
+    scaled_yawn_frames = max(10, int(round(1.0 * fps)))
 
     print(f"\n{'='*75}")
     print(f"  VIDEO FEATURE EXTRACTION & ANTI-MASKING ANALYSIS")
@@ -113,8 +119,8 @@ def extract_video_features(video_path: str,
         mar_yawn_threshold=config.mar_yawn_threshold,
         perclos_window_sec=config.perclos_window_sec,
         perclos_alert_threshold=config.perclos_alert_threshold,
-        microsleep_frames=config.microsleep_frames,
-        yawn_frames=config.yawn_frames,
+        microsleep_frames=scaled_microsleep_frames,
+        yawn_frames=scaled_yawn_frames,
         gaze_dispersion_window_sec=config.gaze_dispersion_window_sec,
         saccade_onset_velocity=config.saccade_onset_velocity,
         saccade_offset_velocity=config.saccade_offset_velocity,
@@ -254,6 +260,13 @@ def extract_video_features(video_path: str,
                 'ear_right': round(features.ear_right, 4),
                 'mar': round(features.mar, 4),
                 'perclos': round(features.perclos, 4),
+                'blink_phase': str(features.blink_phase),
+                'blink_detected': bool(features.blink_detected),
+                'microsleep_detected': bool(features.microsleep_detected),
+                'yawn_detected': bool(features.yawn_detected),
+                'saccade_velocity': round(features.saccade_velocity, 2),
+                'saccade_detected': bool(features.saccade_detected),
+                'saccade_latency_ms': round(features.saccade_latency_ms, 1),
                 # 3D Head Pose
                 'head_yaw': round(features.head_yaw, 2),
                 'head_pitch': round(features.head_pitch, 2),
@@ -404,14 +417,14 @@ def extract_video_features(video_path: str,
     }
 
     # ── Write CSV Time-Series File ──
-    csv_path = os.path.join(output_dir, "video_features.csv")
+    out_csv_path = csv_path if csv_path else os.path.join(output_dir, "video_features.csv")
     if frame_records:
         keys = list(frame_records[0].keys())
-        with open(csv_path, 'w', encoding='utf-8') as f:
+        with open(out_csv_path, 'w', encoding='utf-8') as f:
             f.write(','.join(keys) + '\n')
             for r in frame_records:
                 f.write(','.join(str(r[k]) for k in keys) + '\n')
-    print(f"  [Output] CSV Table Saved        : {csv_path}")
+    print(f"  [Output] CSV Table Saved        : {out_csv_path}")
 
     # ── Write JSON Summary File ──
     json_path = os.path.join(output_dir, "video_features_summary.json")
@@ -525,14 +538,22 @@ def main():
                         help="Maximum frames to process (optional)")
     parser.add_argument("--show", action="store_true", default=False,
                         help="Show OpenCV visualization window during extraction")
+    parser.add_argument("--headless", action="store_true", default=False,
+                        help="Run without GUI visualization (default: True unless --show is specified)")
+    parser.add_argument("--csv", type=str, default=None,
+                        help="Path/filename to write the output CSV (optional)")
 
     args = parser.parse_args()
+
+    # If --headless is passed or --show is not passed, run headless
+    is_headless = True if args.headless else (not args.show)
 
     extract_video_features(
         video_path=args.video,
         output_dir=args.output_dir,
         max_frames=args.max_frames,
-        headless=not args.show
+        headless=is_headless,
+        csv_path=args.csv,
     )
 
 

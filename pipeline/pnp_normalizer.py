@@ -256,6 +256,27 @@ class PnPNormalizer:
                 R_eval = R_x @ R_y @ cand_rot_matrix
         aligned_rvec, _ = cv2.Rodrigues(R_eval)
 
+        # ── 2D Geometric Facial Symmetry Yaw Regularization ──
+        # Regularize solvePnP aspect-ratio yaw flips (±45°) when 2D face width differs from canonical template
+        eye_r = lms[33, :2]
+        eye_l = lms[263, :2]
+        nose = lms[4, :2]
+        eye_vec = eye_l - eye_r
+        eye_dist = float(np.linalg.norm(eye_vec))
+        if eye_dist > 10.0:
+            eye_mid = 0.5 * (eye_r + eye_l)
+            horiz_asym = float((nose[0] - eye_mid[0]) / (0.5 * eye_dist))
+            geom_yaw = float(np.clip(horiz_asym * 50.0, -75.0, 75.0))
+            if abs(cand_yaw - geom_yaw) > 15.0:
+                old_yaw = cand_yaw
+                cand_yaw = 0.70 * geom_yaw + 0.30 * cand_yaw
+                # Apply yaw correction to R_eval and aligned_rvec so visualizer axes stay aligned
+                delta_y = np.radians(cand_yaw - old_yaw)
+                cy_c, sy_c = np.cos(delta_y), np.sin(delta_y)
+                R_corr_y = np.array([[cy_c, 0.0, sy_c], [0.0, 1.0, 0.0], [-sy_c, 0.0, cy_c]], dtype=np.float64)
+                R_eval = R_corr_y @ R_eval
+                aligned_rvec, _ = cv2.Rodrigues(R_eval)
+
         # Step C: Single-frame jump rejection defense with persistence escape
         if prev_euler is not None:
             p_prev, y_prev, r_prev = prev_euler

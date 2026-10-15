@@ -239,6 +239,8 @@ class FeatureExtractor:
         self._opening_velocities: List[float] = []   # EAR/s samples during opening
         self._last_blink_closing_vel: float = 0.0    # hold last completed blink's value
         self._last_blink_opening_vel: float = 0.0
+        self._open_ear_baseline: float = 0.28        # dynamic baseline for ptosis/drowsiness adaptation
+        self._phase_frames: int = 0                  # frame count in current blink phase (timeout guard)
 
         # ── Gaze yaw dispersion (σ_yaw) ──
         dispersion_buffer_size = int(gaze_dispersion_window_sec * fps)
@@ -317,6 +319,8 @@ class FeatureExtractor:
         self._opening_velocities.clear()
         self._last_blink_closing_vel = 0.0
         self._last_blink_opening_vel = 0.0
+        self._open_ear_baseline = 0.28
+        self._phase_frames = 0
         self._gaze_yaw_history.clear()
         self._prev_head_yaw = None
         self._prev_head_pitch = None
@@ -506,12 +510,12 @@ class FeatureExtractor:
             return (0.0, False, 0.0, 0.0)
 
         # ── Blink Occlusion Guard ──
-        # When eyelids are closing, closed, or opening, skip displacement calculation
-        # and hold previous values to prevent false saccade triggers and preserve latency.
+        # When eyelids are closing, closed, or opening, zero out displacement & velocity
+        # to prevent stale holdover, while preserving in-saccade state and latency.
         if blink_phase != "open":
             self._was_in_blink = True
             raw_dx = 0.0
-            velocity = self._last_features.saccade_velocity
+            velocity = 0.0
             saccade_detected = self._last_features.saccade_detected
             self._in_saccade = saccade_detected
 
@@ -642,14 +646,33 @@ class FeatureExtractor:
             self._prev_ear_timestamp = timestamp
             return (self._last_blink_closing_vel, self._last_blink_opening_vel)
 
+        # Adapt baseline open EAR during sustained open eyes (not during blinks or ptosis droop)
+        if ear_avg > self.blink_threshold * 1.15:
+            self._open_ear_baseline = 0.98 * self._open_ear_baseline + 0.02 * ear_avg
+
+        self._phase_frames += 1
+
+        # Phase timeout guard: if trapped in closing or opening for > 8 frames
+        if self._phase_frames > 8:
+            if self._closing_velocities:
+                self._last_blink_closing_vel = float(np.max(self._closing_velocities))
+            if self._opening_velocities:
+                self._last_blink_opening_vel = float(np.max(self._opening_velocities))
+            if self._blink_phase == "closing":
+                self._blink_phase = "closed" if ear_avg < self.blink_threshold else "open"
+            elif self._blink_phase == "opening":
+                self._blink_phase = "open" if ear_avg >= self.blink_threshold else "closed"
+            self._phase_frames = 0
+
         d_ear = ear_avg - self._prev_ear_avg
         ear_velocity = abs(d_ear / dt)   # EAR units / second
 
         # State machine: track blink phase transitions
         if self._blink_phase == "open":
-            if d_ear < -0.005 and ear_avg < 0.28:
+            if d_ear < -0.010 and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
                 # EAR dropping → entering closing phase
                 self._blink_phase = "closing"
+                self._phase_frames = 0
                 self._closing_velocities = [ear_velocity]
                 self._opening_velocities = []
 
@@ -657,6 +680,7 @@ class FeatureExtractor:
             if ear_avg < self.blink_threshold:
                 # Eyes fully closed → transition to closed
                 self._blink_phase = "closed"
+                self._phase_frames = 0
                 if ear_velocity > 0.02:
                     self._closing_velocities.append(ear_velocity)
             elif d_ear < 0:
@@ -666,15 +690,18 @@ class FeatureExtractor:
             else:
                 # Aborted blink (EAR went back up without closing fully)
                 self._blink_phase = "open"
+                self._phase_frames = 0
 
         elif self._blink_phase == "closed":
-            if d_ear > 0.005:
+            if d_ear > 0.005 and ear_avg > self.blink_threshold * 0.75:
                 # EAR rising → entering opening phase
                 self._blink_phase = "opening"
+                self._phase_frames = 0
                 self._opening_velocities = [ear_velocity]
 
         elif self._blink_phase == "opening":
-            if ear_avg > 0.22:
+            reopen_thresh = min(0.22, self._open_ear_baseline * 0.85)
+            if ear_avg >= reopen_thresh:
                 # Eyes reopened → blink complete, compute velocities
                 if ear_velocity > 0.02:
                     self._opening_velocities.append(ear_velocity)
@@ -688,6 +715,11 @@ class FeatureExtractor:
                         np.max(self._opening_velocities))
 
                 self._blink_phase = "open"
+                self._phase_frames = 0
+            elif d_ear < -0.010 and ear_avg < self.blink_threshold:
+                # Re-closed during microsleep
+                self._blink_phase = "closed"
+                self._phase_frames = 0
             elif d_ear > 0:
                 # Still opening (omit zero derivative from frozen/gated frames)
                 if ear_velocity > 0.02:
@@ -1048,6 +1080,13 @@ class FeatureExtractor:
         if r_sluggish > 1.30:
             invol_count += 1
 
+        any_voluntary_flag = bool(
+            features.voluntary_eye_widening or
+            features.deliberate_blink_suppression or
+            features.compensatory_stare_active or
+            features.rigid_head_stabilization
+        )
+
         bonus = 0.0
         if invol_count >= 1:
             if features.voluntary_eye_widening:
@@ -1059,8 +1098,13 @@ class FeatureExtractor:
             if features.rigid_head_stabilization:
                 bonus += 15.0
 
-        total_m_mask = min(100.0, kinetic_mismatch + bonus)
-        detected = bool(total_m_mask >= 50.0)
+        if not any_voluntary_flag:
+            total_m_mask = 0.0
+            detected = False
+        else:
+            total_m_mask = min(100.0, kinetic_mismatch + bonus)
+            detected = bool(total_m_mask >= 50.0)
+
         return (float(round(total_m_mask, 1)), detected)
 
     def compute(self, landmarks: np.ndarray,
@@ -1114,11 +1158,12 @@ class FeatureExtractor:
             features.left_iris_y = self._last_features.left_iris_y
             features.right_iris_x = self._last_features.right_iris_x
             features.right_iris_y = self._last_features.right_iris_y
-            features.saccade_velocity = self._last_features.saccade_velocity
+            features.saccade_velocity = 0.0
             features.saccade_detected = False
             features.saccade_latency_ms = self._last_features.saccade_latency_ms
             features.raw_iris_dx = 0.0
-            features.blink_phase = self._last_features.blink_phase
+            features.blink_phase = "open"
+            self._blink_phase = "open"
             features.blink_closing_velocity = self._last_features.blink_closing_velocity
             features.blink_opening_velocity = self._last_features.blink_opening_velocity
             features.gaze_yaw_dispersion = self._last_features.gaze_yaw_dispersion
@@ -1289,6 +1334,10 @@ class FeatureExtractor:
 
         features.head_postural_sway, features.rigid_head_stabilization = \
             self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
+
+        # Involuntary impairment override: drowsy drivers in microsleep or high PERCLOS cannot be masking with rigid head
+        if features.microsleep_detected or features.perclos > 0.15:
+            features.rigid_head_stabilization = False
 
         # ── Facial Flushing / Vasodilation (Section A) ──
         sample_lms = image_landmarks if image_landmarks is not None else landmarks

@@ -191,9 +191,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         while capture.is_open():
             if paused:
                 key = cv2.waitKey(50) & 0xFF
-                if key == ord('p'):
+                if key in (ord('p'), ord('P')):
                     paused = False
-                elif key == ord('q'):
+                elif key in (ord('q'), ord('Q')):
                     break
                 continue
 
@@ -233,11 +233,11 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     visualizer.draw(viz_frame, None, features, None, pnp_success=False)
                     cv2.imshow("Driver Monitor", viz_frame)
                     key = cv2.waitKey(1) & 0xFF
-                    if key == ord('q'):
+                    if key in (ord('q'), ord('Q')):
                         break
-                    elif key == ord('p'):
+                    elif key in (ord('p'), ord('P')):
                         paused = True
-                    elif key in (ord('v'), ord('m')):
+                    elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
                         visualizer.cycle_overlay_mode()
                 continue
 
@@ -306,11 +306,11 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 visualizer.draw(viz_frame, smooth_landmarks, features, normalizer, pnp_success=pnp_success)
                 cv2.imshow("Driver Monitor", viz_frame)
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
+                if key in (ord('q'), ord('Q')):
                     break
-                elif key == ord('p'):
+                elif key in (ord('p'), ord('P')):
                     paused = True
-                elif key in (ord('v'), ord('m')):
+                elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
                     visualizer.cycle_overlay_mode()
 
     except KeyboardInterrupt:

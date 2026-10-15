@@ -111,7 +111,7 @@ class TestAdaptiveROITrackerBBoxAndEMA:
         assert pytest.approx(tracker.scale, abs=1e-5) == 120.0
 
     def test_ema_smoothing_step_response(self):
-        """Subsequent updates should smooth center and scale with alpha=0.35."""
+        """Subsequent updates should smooth center and scale with alpha=0.35 at rest, and boost on jumps."""
         tracker = AdaptiveROITracker(alpha=0.35, margin=2.0)
         # Frame 0
         lms0 = create_synthetic_landmarks(cx=100.0, cy=100.0, width=60.0, height=80.0)
@@ -120,17 +120,28 @@ class TestAdaptiveROITrackerBBoxAndEMA:
         assert tracker.cy == 100.0
         assert tracker.scale == 80.0
 
-        # Frame 1: Step to (200, 200, scale=120)
-        lms1 = create_synthetic_landmarks(cx=200.0, cy=200.0, width=100.0, height=120.0)
-        tracker.update(lms1)
+        # Small movement (<= 8.0 px jump): uses base alpha=0.35
+        lms_small = create_synthetic_landmarks(cx=105.0, cy=105.0, width=65.0, height=85.0)
+        tracker.update(lms_small)
+        expected_cx_small = 0.35 * 105.0 + (1.0 - 0.35) * 100.0  # 101.75
+        expected_cy_small = 0.35 * 105.0 + (1.0 - 0.35) * 100.0  # 101.75
+        expected_scale_small = 0.35 * 85.0 + (1.0 - 0.35) * 80.0   # 81.75
+        assert pytest.approx(tracker.cx, abs=1e-5) == expected_cx_small
+        assert pytest.approx(tracker.cy, abs=1e-5) == expected_cy_small
+        assert pytest.approx(tracker.scale, abs=1e-5) == expected_scale_small
 
-        expected_cx = 0.35 * 200.0 + (1.0 - 0.35) * 100.0  # 135.0
-        expected_cy = 0.35 * 200.0 + (1.0 - 0.35) * 100.0  # 135.0
-        expected_scale = 0.35 * 120.0 + (1.0 - 0.35) * 80.0  # 94.0
-
-        assert pytest.approx(tracker.cx, abs=1e-5) == expected_cx
-        assert pytest.approx(tracker.cy, abs=1e-5) == expected_cy
-        assert pytest.approx(tracker.scale, abs=1e-5) == expected_scale
+        # Large jump (speed bump or fast head turn > 15 px): velocity-adaptive eff_alpha snaps at up to 0.85
+        lms_jump = create_synthetic_landmarks(cx=200.0, cy=200.0, width=100.0, height=120.0)
+        cx_prev, cy_prev = tracker.cx, tracker.cy
+        tracker.update(lms_jump)
+        jump_dist = float(np.hypot(200.0 - cx_prev, 200.0 - cy_prev))
+        eff_alpha = min(0.85, 0.35 + 0.70 * max(0.0, (jump_dist - 8.0) / 30.0))
+        expected_cx_jump = eff_alpha * 200.0 + (1.0 - eff_alpha) * cx_prev
+        expected_cy_jump = eff_alpha * 200.0 + (1.0 - eff_alpha) * cy_prev
+        expected_scale_jump = 0.35 * 120.0 + (1.0 - 0.35) * expected_scale_small
+        assert pytest.approx(tracker.cx, abs=1e-5) == expected_cx_jump
+        assert pytest.approx(tracker.cy, abs=1e-5) == expected_cy_jump
+        assert pytest.approx(tracker.scale, abs=1e-5) == expected_scale_jump
 
     def test_ema_convergence(self):
         """Repeated updates at the target value should converge exponentially."""

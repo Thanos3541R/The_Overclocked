@@ -33,7 +33,7 @@ class SoftwareIMUGate:
     def __init__(self, accel_threshold: float = 2.5,
                  freeze_duration_ms: float = 150.0,
                  max_rot_vel_for_shock: float = 20.0,
-                 alpha: float = 0.3,
+                 alpha: float = 0.65,
                  window_size: int = 5):
         """
         Args:

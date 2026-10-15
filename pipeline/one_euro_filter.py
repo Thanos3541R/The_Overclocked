@@ -38,6 +38,9 @@ _LEFT_EYE_OCULO_INDICES = [
     473, 474, 475, 476, 477,
 ]
 
+# Rigid skull anchor landmarks (skull-bound, minimal expression flex)
+_SKULL_ANCHOR_INDICES = [4, 152, 33, 263, 61, 291, 168, 9]
+
 
 class VectorizedOneEuroFilter:
     """1-Euro filter operating on (N, D) arrays (e.g., 478 landmarks × 3 coords).
@@ -165,8 +168,8 @@ class OneEuroFilterBank:
     """
 
     @staticmethod
-    def _compute_eye_anchors(lms: np.ndarray) -> np.ndarray:
-        anchors = np.zeros_like(lms, dtype=np.float64)
+    def _compute_local_anchors(lms: np.ndarray, skull_center: np.ndarray) -> np.ndarray:
+        anchors = np.broadcast_to(skull_center, lms.shape).copy()
         if lms.ndim != 2 or lms.shape[0] <= 362:
             return anchors
         n_pts = lms.shape[0]
@@ -179,6 +182,15 @@ class OneEuroFilterBank:
         if l_idx:
             anchors[l_idx] = c_l
         return anchors
+
+    @staticmethod
+    def _compute_eye_anchors(lms: np.ndarray) -> np.ndarray:
+        if lms.ndim != 2 or lms.shape[0] <= 362:
+            return np.zeros_like(lms, dtype=np.float64)
+        n_pts = lms.shape[0]
+        valid_skull = [i for i in _SKULL_ANCHOR_INDICES if i < n_pts]
+        c_skull = np.mean(lms[valid_skull], axis=0) if valid_skull else np.mean(lms, axis=0)
+        return OneEuroFilterBank._compute_local_anchors(lms, c_skull)
 
     def __init__(self, t0: float, x0: np.ndarray,
                  landmark_min_cutoff: float = 0.7,
@@ -229,6 +241,23 @@ class OneEuroFilterBank:
         x0_arr = np.asarray(x0, dtype=np.float64)
         n_pts = x0_arr.shape[0] if x0_arr.ndim >= 1 else 0
 
+        valid_skull_idx = [i for i in _SKULL_ANCHOR_INDICES if i < n_pts] if x0_arr.ndim == 2 else []
+        if valid_skull_idx:
+            init_skull = np.mean(x0_arr[valid_skull_idx], axis=0)
+        elif x0_arr.ndim == 2 and n_pts > 4:
+            init_skull = x0_arr[4].copy()
+        elif x0_arr.ndim >= 1 and x0_arr.shape[0] > 0:
+            init_skull = np.mean(x0_arr, axis=0)
+        else:
+            init_skull = np.zeros(x0_arr.shape[-1] if x0_arr.ndim >= 1 else 1, dtype=np.float64)
+
+        self.skull_filter = VectorizedOneEuroFilter(
+            t0, init_skull,
+            min_cutoff=1.8,
+            beta=0.65,
+            d_cutoff=8.0,
+        )
+
         eyelid_indices = [i for i in DYNAMIC_EYELID_INDICES if i < n_pts]
         iris_indices = [i for i in DYNAMIC_IRIS_INDICES if i < n_pts]
 
@@ -247,7 +276,7 @@ class OneEuroFilterBank:
                 beta_vec[iris_indices, 0] = float(iris_beta)
                 d_cutoff_vec[iris_indices, 0] = float(iris_d_cutoff)
 
-            x0_init = (x0_arr - self._compute_eye_anchors(x0_arr)) if x0_arr.shape[0] > 362 else x0_arr
+            x0_init = (x0_arr - self._compute_local_anchors(x0_arr, init_skull)) if x0_arr.shape[0] > 362 else x0_arr
             self.landmark_filter = VectorizedOneEuroFilter(
                 t0, x0_init,
                 min_cutoff=min_cutoff_vec,
@@ -288,9 +317,19 @@ class OneEuroFilterBank:
             self.reset(t, lms)
             return self._last_output.copy()
         if self._preserve_oculomotor and lms.ndim == 2 and lms.shape[0] > 362:
-            raw_anchors = self._compute_eye_anchors(lms)
-            rel_out = self.landmark_filter(t, lms - raw_anchors)
-            out = rel_out + self._compute_eye_anchors(rel_out)
+            n_pts = lms.shape[0]
+            valid_skull_idx = [i for i in _SKULL_ANCHOR_INDICES if i < n_pts]
+            if valid_skull_idx:
+                raw_skull = np.mean(lms[valid_skull_idx], axis=0)
+            elif n_pts > 4:
+                raw_skull = lms[4].copy()
+            else:
+                raw_skull = np.mean(lms, axis=0)
+
+            filt_skull = self.skull_filter(t, raw_skull)
+            rel_in = lms - self._compute_local_anchors(lms, raw_skull)
+            rel_out = self.landmark_filter(t, rel_in)
+            out = rel_out + self._compute_local_anchors(rel_out + filt_skull, filt_skull)
             self._last_output = out.copy()
             return out
         out = self.landmark_filter(t, lms)
@@ -334,8 +373,20 @@ class OneEuroFilterBank:
                 ear_beta=self._ear_beta,
             )
         else:
+            n_pts = lms.shape[0] if lms.ndim >= 1 else 0
+            valid_skull_idx = [i for i in _SKULL_ANCHOR_INDICES if i < n_pts] if lms.ndim == 2 else []
+            if valid_skull_idx:
+                raw_skull = np.mean(lms[valid_skull_idx], axis=0)
+            elif lms.ndim == 2 and n_pts > 4:
+                raw_skull = lms[4].copy()
+            elif lms.ndim >= 1 and lms.shape[0] > 0:
+                raw_skull = np.mean(lms, axis=0)
+            else:
+                raw_skull = np.zeros(lms.shape[-1] if lms.ndim >= 1 else 1, dtype=np.float64)
+
+            self.skull_filter.reset(t, raw_skull)
             if self._preserve_oculomotor and lms.ndim == 2 and lms.shape[0] > 362:
-                self.landmark_filter.reset(t, lms - self._compute_eye_anchors(lms))
+                self.landmark_filter.reset(t, lms - self._compute_local_anchors(lms, raw_skull))
             else:
                 self.landmark_filter.reset(t, lms)
             self._last_output = lms.copy()

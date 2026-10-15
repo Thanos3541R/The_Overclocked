@@ -15,6 +15,8 @@ import numpy as np
 import pytest
 from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
 from pipeline.one_euro_filter import OneEuroFilterBank
+from pipeline.pnp_normalizer import PnPNormalizer
+from pipeline.imu_gate import SoftwareIMUGate
 from tests.test_ear import make_eye_landmarks
 from utils.landmarks import RIGHT_EYE_EAR_FLAT, LEFT_EYE_EAR_FLAT
 
@@ -583,6 +585,106 @@ class TestGazeYawDispersion:
 
         ext.compute(lm_reopen, timestamp=36/30.0, frame_id=36, face_valid=True)
         assert len(ext._gaze_yaw_history) == history_len_open + 1
+
+
+def test_speed_bump_and_road_vibration_immunity():
+    """Simulate sharp +40px vertical speed-bump impulse and 8 Hz road vibration.
+
+    Verifies that through OneEuroFilterBank -> PnPNormalizer -> SoftwareIMUGate -> FeatureExtractor:
+      1. Global landmark tracking lag during the speed bump is < 5.0 px (down from 25.3 px).
+      2. SoftwareIMUGate triggers imu_gated == True during the speed bump impact.
+      3. saccade_detected remains False (0 false saccades).
+      4. blink_detected and microsleep_detected remain False (EAR stays within 0.30 ± 0.005).
+    """
+    def create_face(shift_x=0.0, shift_y=0.0):
+        # ear_val=0.15 produces exact EAR = 0.30 in Soukupova & Cech formula
+        lm = make_full_landmarks(ear_val=0.15, iris_x_offset=0.0)
+        # Rigid anchors for PnP
+        lm[4] = [300.0, 250.0, 0.0]    # Nose tip
+        lm[152] = [300.0, 420.0, 0.0]  # Chin
+        lm[168] = [300.0, 180.0, 0.0]  # Glabella
+        lm[9] = [300.0, 150.0, 0.0]    # Forehead
+        lm[:, 0] += shift_x
+        lm[:, 1] += shift_y
+        return lm
+
+    base_lm = create_face()
+    filter_bank = OneEuroFilterBank(0.0, base_lm)
+    pnp = PnPNormalizer(640, 480)
+    imu = SoftwareIMUGate(accel_threshold=2.5, freeze_duration_ms=150.0)
+    extractor = FeatureExtractor(fps=30.0)
+
+    # 1. Warm-up steady frames (3 frames at rest)
+    for i in range(3):
+        t = i * 0.033
+        raw = create_face()
+        filt = filter_bank.filter_landmarks(t, raw)
+        pnp.solve_pose(filt)
+        norm = pnp.normalize_landmarks(filt)
+        euler = pnp.get_euler_angles()
+        gated = imu.update(t, pnp.tvec, euler)
+        extractor.compute(norm, t, i, face_valid=True, imu_gated=gated)
+
+    # 2. Simulate 4 frames of speed-bump impulse (reaching +40px)
+    bump_shifts = [15.0, 35.0, 40.0, 40.0]
+    lags = []
+    imu_gated_events = []
+    saccades = []
+    blinks = []
+    microsleeps = []
+    ears = []
+
+    for k, bump_y in enumerate(bump_shifts):
+        fid = 3 + k
+        t = fid * 0.033
+        raw = create_face(0.0, bump_y)
+        filt = filter_bank.filter_landmarks(t, raw)
+        lag = float(np.mean(np.abs(raw[4] - filt[4])))
+        lags.append(lag)
+        pnp.solve_pose(filt)
+        norm = pnp.normalize_landmarks(filt)
+        euler = pnp.get_euler_angles()
+        gated = imu.update(t, pnp.tvec, euler)
+        imu_gated_events.append(gated)
+        feat = extractor.compute(norm, t, fid, face_valid=True, imu_gated=gated)
+        saccades.append(feat.saccade_detected)
+        blinks.append(feat.blink_detected)
+        microsleeps.append(feat.microsleep_detected)
+        ears.append(feat.ear_avg)
+
+    # 3. Vibration frames: 8 Hz road vibration (±8px vertical, ±4px horizontal)
+    for j in range(15):
+        fid = 7 + j
+        t = fid * 0.033
+        vib_y = 40.0 + 8.0 * np.sin(2 * np.pi * 8 * (j * 0.033))
+        vib_x = 4.0 * np.cos(2 * np.pi * 8 * (j * 0.033))
+        raw = create_face(vib_x, vib_y)
+        filt = filter_bank.filter_landmarks(t, raw)
+        pnp.solve_pose(filt)
+        norm = pnp.normalize_landmarks(filt)
+        euler = pnp.get_euler_angles()
+        gated = imu.update(t, pnp.tvec, euler)
+        feat = extractor.compute(norm, t, fid, face_valid=True, imu_gated=gated)
+        saccades.append(feat.saccade_detected)
+        blinks.append(feat.blink_detected)
+        microsleeps.append(feat.microsleep_detected)
+        ears.append(feat.ear_avg)
+
+    # Verifications:
+    # 1. Global landmark tracking lag during the speed bump is < 5.0 px (down from 25.3 px)
+    assert max(lags) < 5.0, f"Speed bump tracking lag {max(lags):.2f} px exceeds 5.0 px limit"
+
+    # 2. SoftwareIMUGate triggers imu_gated == True during the speed bump impact
+    assert any(imu_gated_events), "SoftwareIMUGate must trigger imu_gated == True during speed bump"
+
+    # 3. saccade_detected remains False (0 false saccades)
+    assert not any(saccades), "Road vibration/bump must not trigger false saccades"
+
+    # 4. blink_detected and microsleep_detected remain False (EAR stays within 0.30 ± 0.005)
+    assert not any(blinks), "Road vibration/bump must not trigger false blinks"
+    assert not any(microsleeps), "Road vibration/bump must not trigger false microsleep"
+    for ear in ears:
+        assert abs(ear - 0.30) <= 0.005, f"EAR {ear:.4f} deviated from 0.30 by more than 0.005"
 
 
 if __name__ == "__main__":

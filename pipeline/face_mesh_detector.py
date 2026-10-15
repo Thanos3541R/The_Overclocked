@@ -146,8 +146,11 @@ class AdaptiveROITracker:
             self.scale = raw_scale
             self.is_tracking = True
         else:
-            self.cx = self.alpha * raw_cx + (1.0 - self.alpha) * self.cx
-            self.cy = self.alpha * raw_cy + (1.0 - self.alpha) * self.cy
+            jump_dist = float(np.hypot(raw_cx - self.cx, raw_cy - self.cy))
+            # Velocity-adaptive alpha: smooth at alpha (0.15) at rest, snap at up to 0.85 on speed bumps
+            eff_alpha = min(0.85, self.alpha + 0.70 * max(0.0, (jump_dist - 8.0) / 30.0))
+            self.cx = eff_alpha * raw_cx + (1.0 - eff_alpha) * self.cx
+            self.cy = eff_alpha * raw_cy + (1.0 - eff_alpha) * self.cy
             self.scale = self.alpha * raw_scale + (1.0 - self.alpha) * self.scale
 
     def get_crop_bounds(self, frame_shape: Tuple[int, ...]) -> Tuple[int, int, int, int]:

@@ -73,3 +73,16 @@ class TestSoftwareIMUGate:
 
         # At t = 0.250s (> 0.216s), freeze window has expired
         assert gate.update(0.250, shock_tvec, (0.0, 0.0, 0.0)) is False
+
+    def test_speed_bump_with_default_alpha_triggers_freeze(self):
+        """Default alpha=0.65 preserves vertical speed bump acceleration impulse."""
+        gate = SoftwareIMUGate()  # default alpha=0.65
+        base_tvec = np.array([0.0, 0.0, 600.0])
+
+        gate.update(0.000, base_tvec, (0.0, 0.0, 0.0))
+        gate.update(0.033, base_tvec, (0.0, 0.0, 0.0))
+
+        # Speed bump: +60mm in 33ms without head rotation
+        bump_tvec = base_tvec + np.array([0.0, 60.0, 0.0])
+        frozen = gate.update(0.066, bump_tvec, (0.0, 0.0, 0.0))
+        assert frozen is True, "Speed bump impulse with default alpha=0.65 must trigger freeze"

@@ -309,8 +309,11 @@ class Visualizer:
         ])
 
         try:
+            rvec_to_use = getattr(normalizer, "aligned_rvec", None)
+            if rvec_to_use is None:
+                rvec_to_use = normalizer.rvec
             img_pts, _ = cv2.projectPoints(
-                axes_3d, normalizer.rvec, normalizer.tvec,
+                axes_3d, rvec_to_use, normalizer.tvec,
                 normalizer.camera_matrix, normalizer.dist_coeffs
             )
         except cv2.error:

@@ -292,6 +292,52 @@ class TestPnPNormalizer:
             assert mock_axes.call_args[1]["is_gated"] is True
         assert np.count_nonzero(f_gated) > 0
 
+    def test_view_ray_compensation_for_off_center_face(self):
+        """View-ray line-of-sight compensation prevents camera perspective distortion for off-center faces."""
+        normalizer = PnPNormalizer(frame_width=1280, frame_height=720)
+        lms_center = make_frontal_face_landmarks(1280, 720, offset_x=0.0, offset_y=0.0)
+        assert normalizer.solve_pose(lms_center) is True
+        euler_center = normalizer.get_euler_angles()
+        assert euler_center is not None
+        p_c, y_c, r_c = euler_center
+
+        # Translated off-center face (bottom-right quadrant, offset 200px x, 150px y)
+        lms_offset = make_frontal_face_landmarks(1280, 720, offset_x=200.0, offset_y=150.0)
+        assert normalizer.solve_pose(lms_offset) is True
+        euler_offset = normalizer.get_euler_angles()
+        assert euler_offset is not None
+        p_o, y_o, r_o = euler_offset
+
+        # Compensated angles should be very close to centered angles (< 3.0° deviation)
+        assert abs(p_o - p_c) < 3.0, f"Compensated pitch drift={abs(p_o - p_c):.2f}° exceeds 3.0°"
+        assert abs(y_o - y_c) < 3.0, f"Compensated yaw drift={abs(y_o - y_c):.2f}° exceeds 3.0°"
+        assert normalizer.aligned_rvec is not None
+        assert normalizer.aligned_rotation_matrix is not None
+
+    def test_aligned_pose_lifecycle_and_reset(self):
+        """aligned_rvec and aligned_rotation_matrix must be tracked and reset consistently with pose."""
+        normalizer = PnPNormalizer(frame_width=1280, frame_height=720)
+        assert normalizer.aligned_rvec is None
+        assert normalizer.aligned_rotation_matrix is None
+
+        lms = make_frontal_face_landmarks(1280, 720)
+        assert normalizer.solve_pose(lms) is True
+        assert normalizer.aligned_rvec is not None
+        assert normalizer.aligned_rotation_matrix is not None
+        assert normalizer.aligned_rotation_matrix.shape == (3, 3)
+
+        # Reset clears aligned pose
+        normalizer.reset()
+        assert normalizer.aligned_rvec is None
+        assert normalizer.aligned_rotation_matrix is None
+
+        # Failed solve clears aligned pose
+        assert normalizer.solve_pose(lms) is True
+        assert normalizer.aligned_rvec is not None
+        assert normalizer.solve_pose(None) is False
+        assert normalizer.aligned_rvec is None
+        assert normalizer.aligned_rotation_matrix is None
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

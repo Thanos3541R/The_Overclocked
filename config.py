@@ -47,9 +47,9 @@ class PipelineConfig:
     eyelid_min_cutoff: float = 2.0     # smoothing for fast eyelid landmarks
     eyelid_beta: float = 0.50          # speed coefficient for eyelids
     eyelid_d_cutoff: float = 8.0       # derivative cutoff for eyelids
-    iris_min_cutoff: float = 1.0       # smoothing for iris landmarks
-    iris_beta: float = 0.20            # speed coefficient for irises
-    iris_d_cutoff: float = 3.0         # derivative cutoff for irises
+    iris_min_cutoff: float = 1.5       # smoothing for iris landmarks at rest
+    iris_beta: float = 0.55            # fast response for relative iris saccades
+    iris_d_cutoff: float = 8.0         # fast derivative cutoff for 1-2 frame saccades
     ear_min_cutoff: float = 1.5        # less smoothing for EAR signal
     ear_beta: float = 0.003
 

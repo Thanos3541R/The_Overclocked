@@ -136,7 +136,8 @@ def _dist(p1: np.ndarray, p2: np.ndarray) -> float:
 # and 15 deg/s offset corresponds to ~0.5 deg/frame.
 # Approximate degrees per normalized iris displacement unit.
 # Human eye: ~30° horizontal range maps to iris_x in [-1, 1].
-_DEG_PER_IRIS_UNIT = 15.0         # 1 iris unit ≈ 15° of eye rotation
+_DEG_PER_IRIS_UNIT = 15.0         # Standard scale for vergence, VOR, GEN, and fixation drift
+_SACCADE_DEG_PER_UNIT = 22.0      # Saccadic angular scale (so dx=0.055 at 30fps > 35 deg/s onset, while dx=0.050 post-drop drift = 33.0 deg/s < 35 deg/s)
 
 
 def is_monochrome_frame(frame: Optional[np.ndarray]) -> bool:
@@ -537,6 +538,9 @@ class FeatureExtractor:
                 latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
             else:
                 latency_ms = 0.0
+            self._prev_iris_x = iris_x
+            self._prev_iris_y = iris_y
+            self._prev_timestamp = timestamp
             if left_iris_x is not None:
                 self._prev_left_iris_x = left_iris_x
             if right_iris_x is not None:
@@ -547,24 +551,38 @@ class FeatureExtractor:
         raw_dx = float(abs(iris_x - self._prev_iris_x))
         raw_dy = float(abs(iris_y - self._prev_iris_y))
 
+        # Binocular conjugate check: only zero out if eyes move in strictly opposite directions
+        # (vergence or eyeglass reflection glitch); otherwise use binocular mean raw_dx
         if (left_iris_x is not None and right_iris_x is not None and
                 self._prev_left_iris_x is not None and self._prev_right_iris_x is not None):
             dx_l = left_iris_x - self._prev_left_iris_x
             dx_r = right_iris_x - self._prev_right_iris_x
-            if dx_l * dx_r <= 0.0:
+            if (dx_l * dx_r) < -1e-4:
                 effective_dx = 0.0
             else:
-                effective_dx = float(min(abs(dx_l), abs(dx_r)))
+                effective_dx = raw_dx
         else:
             effective_dx = raw_dx
 
-        is_head_moving = (eye_socket_vel > 0.60) or (head_vel_deg_s > 12.0)
-        noise_floor = 0.032 if not is_head_moving else 0.18
-        if effective_dx < noise_floor:
-            velocity = 0.0
+        # Head-Motion / VOR Guard:
+        # Only activate when the eye sockets physically translate in pixel space (eye_socket_vel > 0.75)
+        # OR during large head rotations (head_vel_deg_s > 30.0) accompanied by socket translation,
+        # so stationary PnP Euler jitter never blocks real saccades!
+        is_head_moving = (eye_socket_vel > 0.75) or (head_vel_deg_s > 30.0 and eye_socket_vel > 0.25)
+
+        if is_head_moving:
+            if effective_dx < 0.055:
+                velocity = 0.0
+            else:
+                dx_deg = effective_dx * _SACCADE_DEG_PER_UNIT
+                velocity = max(0.0, (dx_deg / dt) - 0.5 * head_vel_deg_s)
         else:
-            dx_deg = effective_dx * _DEG_PER_IRIS_UNIT
-            velocity = max(0.0, (dx_deg / dt) - (0.8 * head_vel_deg_s if is_head_moving else 0.0))
+            # Sub-pixel deadzone: < 0.026 (~0.5 px) or hypot(raw_dx, raw_dy*0.5) < 0.030 is sensor noise
+            if effective_dx < 0.026 or np.hypot(raw_dx, raw_dy * 0.5) < 0.030:
+                velocity = 0.0
+            else:
+                dx_deg = effective_dx * _SACCADE_DEG_PER_UNIT
+                velocity = dx_deg / dt  # deg/s
 
         # Saccade detection with hysteresis
         if not self._in_saccade:
@@ -661,13 +679,13 @@ class FeatureExtractor:
                 if ear_velocity > 0.02:
                     self._opening_velocities.append(ear_velocity)
 
-                # Store completed blink velocities
+                # Store completed blink peak velocities (robust against slow turnaround edge frames)
                 if self._closing_velocities:
                     self._last_blink_closing_vel = float(
-                        np.mean(self._closing_velocities))
+                        np.max(self._closing_velocities))
                 if self._opening_velocities:
                     self._last_blink_opening_vel = float(
-                        np.mean(self._opening_velocities))
+                        np.max(self._opening_velocities))
 
                 self._blink_phase = "open"
             elif d_ear > 0:
@@ -1234,7 +1252,12 @@ class FeatureExtractor:
             )
 
         # ── Gaze yaw dispersion (σ_yaw) ──
-        features.gaze_yaw_dispersion = self._compute_gaze_yaw_dispersion(avg_iris_x)
+        if self._blink_phase == "open" and not features.blink_detected:
+            features.gaze_yaw_dispersion = self._compute_gaze_yaw_dispersion(avg_iris_x)
+        else:
+            features.gaze_yaw_dispersion = (
+                float(np.std(self._gaze_yaw_history)) if len(self._gaze_yaw_history) >= 10 else 0.0
+            )
 
         # ── Advanced Oculomotor Impairment Signals ──
         # 1. Binocular vergence & Lack of Convergence (LOC - DRE sign)

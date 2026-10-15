@@ -196,6 +196,49 @@ class TestSaccadeDynamics:
         assert v_t_inf == 0.0
         assert sac_t_inf is False
 
+    def test_binocular_conjugate_check_and_blink_reopen_reanchor(self):
+        """Opposite eye motions are zeroed by conjugate check, and blink reopening re-anchors coordinates."""
+        ext = FeatureExtractor(fps=30.0)
+
+        # Baseline
+        lm0 = make_full_landmarks(ear_val=0.30, iris_x_offset=0.0)
+        ext.compute(lm0, timestamp=0.0, frame_id=0, face_valid=True)
+
+        # Test A: Disconjugate eye movement (left moves right +10px, right moves left -10px)
+        lm_dis = lm0.copy()
+        # Left eye iris (viewer's right, landmark 473): +10px
+        lm_dis[473, 0] += 10.0
+        # Right eye iris (viewer's left, landmark 468): -10px
+        lm_dis[468, 0] -= 10.0
+        feat_dis = ext.compute(lm_dis, timestamp=1/30.0, frame_id=1, face_valid=True)
+        # Disconjugate motion must be suppressed
+        assert feat_dis.saccade_velocity == 0.0
+        assert feat_dis.saccade_detected is False
+
+        # Test B: Conjugate eye movement (both eyes move right +12px)
+        lm_conj = lm0.copy()
+        lm_conj[468, 0] += 12.0
+        lm_conj[473, 0] += 12.0
+        feat_conj = ext.compute(lm_conj, timestamp=2/30.0, frame_id=2, face_valid=True)
+        assert feat_conj.saccade_velocity > 35.0
+        assert feat_conj.saccade_detected is True
+
+        # Test C: Blink reopen frame re-anchors _prev_iris_x/y
+        # Frame 3: Blink closed
+        lm_closed = make_full_landmarks(ear_val=0.08, iris_x_offset=12.0)
+        ext.compute(lm_closed, timestamp=3/30.0, frame_id=3, face_valid=True)
+        # Frame 4: Blink reopening with new pupil position
+        lm_reopen = make_full_landmarks(ear_val=0.28, iris_x_offset=5.0)
+        feat_reopen = ext.compute(lm_reopen, timestamp=4/30.0, frame_id=4, face_valid=True)
+        # Reopening frame must not spike
+        assert feat_reopen.saccade_velocity == 0.0
+        assert feat_reopen.saccade_detected is False
+        # Frame 5: Steady fixation at new pupil position must have 0 velocity
+        lm_reopen_steady = make_full_landmarks(ear_val=0.28, iris_x_offset=5.0)
+        feat_steady = ext.compute(lm_reopen_steady, timestamp=5/30.0, frame_id=5, face_valid=True)
+        assert feat_steady.saccade_velocity == 0.0
+        assert feat_steady.saccade_detected is False
+
     def test_latency_accumulates_during_fixation(self):
         """Saccade latency should increase during fixation after a saccade."""
         ext = FeatureExtractor(fps=30.0)
@@ -425,6 +468,42 @@ class TestBlinkVelocity:
         assert feat.blink_closing_velocity == 0.0
         assert feat.blink_opening_velocity == 0.0
 
+    def test_blink_velocity_measures_peak_velocity(self):
+        """Blink closing and opening velocities record peak stroke velocity (np.max) instead of mean."""
+        ext = FeatureExtractor(fps=30.0, blink_threshold=0.20)
+
+        # Baseline open (ear_val=0.15 -> ear_avg=0.30)
+        for i in range(5):
+            lm = make_full_landmarks(ear_val=0.15)
+            ext.compute(lm, timestamp=i/30.0, frame_id=i, face_valid=True)
+
+        # Phase 1: Closing downstroke
+        # Frame 5: ear_val=0.13 (ear_avg=0.26)
+        ext.compute(make_full_landmarks(ear_val=0.13), timestamp=5/30.0, frame_id=5, face_valid=True)
+        # Frame 6: ear_val=0.09 (ear_avg=0.18, drop 0.08 in 1/30s -> 2.4 EAR/s) - PEAK
+        ext.compute(make_full_landmarks(ear_val=0.09), timestamp=6/30.0, frame_id=6, face_valid=True)
+
+        # Closed
+        # Frame 7 & 8: ear_val=0.04 (ear_avg=0.08)
+        ext.compute(make_full_landmarks(ear_val=0.04), timestamp=7/30.0, frame_id=7, face_valid=True)
+        ext.compute(make_full_landmarks(ear_val=0.04), timestamp=8/30.0, frame_id=8, face_valid=True)
+
+        # Phase 2: Opening upstroke
+        # Frame 9: ear_val=0.09 (ear_avg=0.18, jump 0.10 in 1/30s -> 3.0 EAR/s) - PEAK
+        ext.compute(make_full_landmarks(ear_val=0.09), timestamp=9/30.0, frame_id=9, face_valid=True)
+        # Frame 10: ear_val=0.13 (ear_avg=0.26, jump 0.08 in 1/30s -> 2.4 EAR/s)
+        ext.compute(make_full_landmarks(ear_val=0.13), timestamp=10/30.0, frame_id=10, face_valid=True)
+
+        # Settle back to fully open
+        feat_done = ext.compute(make_full_landmarks(ear_val=0.15), timestamp=11/30.0, frame_id=11, face_valid=True)
+
+        # Peak closing should be >= 2.0 EAR/s (not diluted down)
+        assert feat_done.blink_closing_velocity >= 2.0, \
+            f"Expected peak closing vel >= 2.0 EAR/s, got {feat_done.blink_closing_velocity:.3f}"
+        # Peak opening should be >= 2.0 EAR/s
+        assert feat_done.blink_opening_velocity >= 2.0, \
+            f"Expected peak opening vel >= 2.0 EAR/s, got {feat_done.blink_opening_velocity:.3f}"
+
 
 class TestGazeYawDispersion:
     """Test rolling σ_yaw computation."""
@@ -472,6 +551,38 @@ class TestGazeYawDispersion:
         assert feat_t.gaze_yaw_dispersion < feat_s.gaze_yaw_dispersion, \
             f"Tunneling σ={feat_t.gaze_yaw_dispersion:.4f} should be < " \
             f"scanning σ={feat_s.gaze_yaw_dispersion:.4f}"
+
+    def test_gaze_yaw_dispersion_frozen_during_blinks(self):
+        """Eyelid closure during blinks must not append occluded coordinates into _gaze_yaw_history."""
+        ext = FeatureExtractor(fps=30.0, gaze_dispersion_window_sec=15.0)
+
+        # 1. Populate 30 open frames
+        for i in range(30):
+            lm = make_full_landmarks(ear_val=0.30, iris_x_offset=5.0 * np.sin(i * 0.2))
+            ext.compute(lm, timestamp=i/30.0, frame_id=i, face_valid=True)
+
+        history_len_open = len(ext._gaze_yaw_history)
+        dispersion_open = ext._last_features.gaze_yaw_dispersion
+        assert history_len_open == 30
+
+        # 2. Simulate 5 blink frames with large occluded iris jump (e.g. +30px offset)
+        for j in range(5):
+            fid = 30 + j
+            lm_blink = make_full_landmarks(ear_val=0.08, iris_x_offset=30.0)
+            feat_blink = ext.compute(lm_blink, timestamp=fid/30.0, frame_id=fid, face_valid=True)
+            # Dispersion history should NOT grow during blinks
+            assert len(ext._gaze_yaw_history) == history_len_open
+            # Gaze yaw dispersion should remain stable rather than exploding
+            assert abs(feat_blink.gaze_yaw_dispersion - dispersion_open) < 1e-4
+
+        # 3. Reopened frames: first frame 35 has blink_detected=True (protected from occluded jump),
+        # second frame 36 has blink_phase='open' and appends to history again
+        lm_reopen = make_full_landmarks(ear_val=0.30, iris_x_offset=0.0)
+        ext.compute(lm_reopen, timestamp=35/30.0, frame_id=35, face_valid=True)
+        assert len(ext._gaze_yaw_history) == history_len_open
+
+        ext.compute(lm_reopen, timestamp=36/30.0, frame_id=36, face_valid=True)
+        assert len(ext._gaze_yaw_history) == history_len_open + 1
 
 
 if __name__ == "__main__":

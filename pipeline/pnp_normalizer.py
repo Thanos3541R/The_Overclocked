@@ -66,6 +66,8 @@ class PnPNormalizer:
         self.rvec: Optional[np.ndarray] = None
         self.tvec: Optional[np.ndarray] = None
         self.rotation_matrix: Optional[np.ndarray] = None
+        self.aligned_rvec: Optional[np.ndarray] = None
+        self.aligned_rotation_matrix: Optional[np.ndarray] = None
         self._last_valid_euler: Optional[Tuple[float, float, float]] = None
         self._jump_reject_count = 0
 
@@ -74,13 +76,29 @@ class PnPNormalizer:
         self.rvec = None
         self.tvec = None
         self.rotation_matrix = None
+        self.aligned_rvec = None
+        self.aligned_rotation_matrix = None
         self._last_valid_euler = None
         self._jump_reject_count = 0
 
     @staticmethod
-    def _extract_euler(rotation_matrix: np.ndarray) -> Tuple[float, float, float]:
-        """Extract pitch, yaw, roll from a 3x3 rotation matrix via RQ decomposition."""
-        angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_matrix)
+    def _extract_euler(rotation_matrix: np.ndarray,
+                       tvec: Optional[np.ndarray] = None) -> Tuple[float, float, float]:
+        """Extract view-ray-compensated pitch, yaw, roll from a 3x3 rotation matrix."""
+        R_eval = rotation_matrix
+        if tvec is not None:
+            t_flat = np.asarray(tvec, dtype=np.float64).ravel()
+            if len(t_flat) >= 3 and t_flat[2] > 10.0:
+                # Construct camera line-of-sight rotation R_ray so off-center translations
+                # do not inject false perspective yaw/pitch offsets
+                ray_yaw = np.arctan2(t_flat[0], t_flat[2])
+                ray_pitch = np.arctan2(t_flat[1], np.hypot(t_flat[0], t_flat[2]))
+                cy, sy = np.cos(-ray_yaw), np.sin(-ray_yaw)
+                cp, sp = np.cos(ray_pitch), np.sin(ray_pitch)
+                R_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+                R_x = np.array([[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]], dtype=np.float64)
+                R_eval = R_x @ R_y @ rotation_matrix
+        angles, _, _, _, _, _ = cv2.RQDecomp3x3(R_eval)
         return float(angles[0]), float(angles[1]), float(angles[2])
 
     def solve_pose(self, landmarks: np.ndarray) -> bool:
@@ -108,6 +126,8 @@ class PnPNormalizer:
         self.rvec = None
         self.tvec = None
         self.rotation_matrix = None
+        self.aligned_rvec = None
+        self.aligned_rotation_matrix = None
 
         if landmarks is None:
             return False
@@ -215,11 +235,26 @@ class PnPNormalizer:
             self.rvec = None
             self.tvec = None
             self.rotation_matrix = None
+            self.aligned_rvec = None
+            self.aligned_rotation_matrix = None
             return False
 
-        # Extract candidate rotation matrix and Euler angles
+        # Extract candidate rotation matrix and view-ray-compensated Euler angles
         cand_rot_matrix, _ = cv2.Rodrigues(rvec)
-        cand_pitch, cand_yaw, cand_roll = self._extract_euler(cand_rot_matrix)
+        cand_pitch, cand_yaw, cand_roll = self._extract_euler(cand_rot_matrix, tvec)
+
+        R_eval = cand_rot_matrix
+        if tvec is not None:
+            t_flat = np.asarray(tvec, dtype=np.float64).ravel()
+            if len(t_flat) >= 3 and t_flat[2] > 10.0:
+                ray_yaw = np.arctan2(t_flat[0], t_flat[2])
+                ray_pitch = np.arctan2(t_flat[1], np.hypot(t_flat[0], t_flat[2]))
+                cy, sy = np.cos(-ray_yaw), np.sin(-ray_yaw)
+                cp, sp = np.cos(ray_pitch), np.sin(ray_pitch)
+                R_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+                R_x = np.array([[1.0, 0.0, 0.0], [0.0, cp, -sp], [0.0, sp, cp]], dtype=np.float64)
+                R_eval = R_x @ R_y @ cand_rot_matrix
+        aligned_rvec, _ = cv2.Rodrigues(R_eval)
 
         # Step C: Single-frame jump rejection defense with persistence escape
         if prev_euler is not None:
@@ -247,6 +282,8 @@ class PnPNormalizer:
         self.rvec = rvec
         self.tvec = tvec
         self.rotation_matrix = cand_rot_matrix
+        self.aligned_rotation_matrix = R_eval
+        self.aligned_rvec = aligned_rvec
         self._last_valid_euler = (cand_pitch, cand_yaw, cand_roll)
         return True
 

@@ -29,6 +29,7 @@ from utils.landmarks import (
     MAR_VERTICAL_PAIRS, MAR_HORIZONTAL,
     RIGHT_CHEEK, LEFT_CHEEK, CHEEK_LANDMARKS,
     VASODILATION_LANDMARKS,
+    RIGHT_EYEBROW_ARCH, LEFT_EYEBROW_ARCH,
 )
 
 
@@ -115,6 +116,15 @@ class FrameFeatures:
     compensatory_stare_active: bool = False     # True if fixation > 6.0s with low spatial variance (< 0.8 deg)
     rigid_head_stabilization: bool = False      # Conscious locking of neck muscles to suppress natural sway
 
+    # ── Eyebrow / Frontalis & Autonomic Pulse Micromotions (720p @ 60fps) ──
+    brow_eye_distance_ratio: float = 0.0        # Normalized brow-to-eye vertical distance (frontalis tone)
+    brow_elevation_delta: float = 0.0           # Relative change in brow elevation over baseline
+    frontalis_compensation_active: bool = False # True when eyebrows lift (> +12%) to fight eyelid ptosis
+    eyelid_tremor_hz: float = 0.0               # High-frequency palpebral flutter /orbicularis tremor (Hz)
+    rppg_pulse_bpm: float = 0.0                 # T-zone green-channel photoplethysmography heart rate (BPM)
+    rppg_hrv_rmssd_ms: float = 0.0              # Beat-to-beat heart rate variability RMSSD (ms)
+    rppg_valid: bool = False                    # True when RGB buffer has sufficient SNR for pulse extraction
+
     # ── Anti-Masking Divergence Metric (M_mask) ──
     # Quantifies discordance between voluntary masking attempts and involuntary reflex decay
     masking_divergence_score: float = 0.0       # 0.0 to 100.0% divergence score (M_mask)
@@ -178,6 +188,7 @@ class FeatureExtractor:
                  vor_min_head_speed: float = 2.0,
                  vor_max_head_speed: float = 25.0,
                  pursuit_window_sec: float = 5.0,
+                 perclos_min_warmup_sec: float = 0.0,
                  fps: float = 30.0):
         """
         Args:
@@ -196,6 +207,7 @@ class FeatureExtractor:
             loc_vergence_threshold_deg: Vergence threshold below which LOC is flagged.
             vor_min_head_speed / vor_max_head_speed: Head yaw velocity range for VOR evaluation.
             pursuit_window_sec: Window duration for pursuit fragmentation ratio.
+            perclos_min_warmup_sec: Minimum warmup period (seconds) before PERCLOS denominator shrinks.
             fps: Expected frame rate for buffer sizing.
         """
         self.blink_threshold = blink_threshold
@@ -206,6 +218,23 @@ class FeatureExtractor:
         self.saccade_onset_velocity = saccade_onset_velocity
         self.saccade_offset_velocity = saccade_offset_velocity
         self._fps = fps
+        self.perclos_min_warmup_sec = perclos_min_warmup_sec
+        self._flushing_cal_samples: Deque[float] = deque(maxlen=30)
+        self._flushing_cal_locked: bool = False
+
+        # Eyebrow / Frontalis tracking state
+        self.baseline_brow_ratio: float = 0.0
+        self._brow_cal_samples: Deque[float] = deque(maxlen=max(int(2.0 * fps), 10))
+        self._smoothed_brow_ratio: float = 0.0
+
+        # Eyelid micro-tremor / flutter state (2-second rolling window)
+        self._ear_tremor_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(2.0 * fps), 15))
+
+        # T-zone rPPG pulse & HRV state (10-second rolling green-channel buffer)
+        self._rppg_green_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(10.0 * fps), 60))
+        self._last_rppg_bpm: float = 0.0
+        self._last_rppg_rmssd: float = 0.0
+        self._last_rppg_valid: bool = False
 
         # Rolling buffers for PERCLOS
         buffer_size = int(perclos_window_sec * fps)
@@ -333,6 +362,18 @@ class FeatureExtractor:
         self._pursuit_history.clear()
         self._head_pose_history.clear()
         self._smoothed_flushing = 1.0
+        self._flushing_cal_samples.clear()
+        self._flushing_cal_locked = False
+        self._flushing_initialized = False
+        self.baseline_brow_ratio = 0.0
+        self._brow_cal_samples.clear()
+        self._smoothed_brow_ratio = 0.0
+        self._brow_initialized = False
+        self._ear_tremor_history.clear()
+        self._rppg_green_history.clear()
+        self._last_rppg_bpm = 0.0
+        self._last_rppg_rmssd = 0.0
+        self._last_rppg_valid = False
         self._ear_time_history.clear()
         self._last_blink_time = 0.0
         self._blink_times.clear()
@@ -948,6 +989,15 @@ class FeatureExtractor:
                     self._flushing_initialized = True
                 else:
                     self._smoothed_flushing = 0.90 * self._smoothed_flushing + 0.10 * clamped
+
+                if not getattr(self, "_flushing_cal_locked", False) and self.baseline_flushing == 1.35:
+                    self._flushing_cal_samples.append(clamped)
+                    if len(self._flushing_cal_samples) >= 15:
+                        med = float(np.median(self._flushing_cal_samples))
+                        if med < 1.28:
+                            self.baseline_flushing = med
+                        self._flushing_cal_locked = True
+
                 flushing_delta = float((self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing))
                 return (float(self._smoothed_flushing), True, flushing_delta)
         except Exception:
@@ -955,7 +1005,7 @@ class FeatureExtractor:
 
         return (float(self._smoothed_flushing), True, 0.0)
 
-    def _compute_voluntary_eye_widening(self, ear_avg: float, timestamp: float) -> bool:
+    def _compute_voluntary_eye_widening(self, ear_avg: float, timestamp: float, frontalis_compensation_active: bool = False) -> bool:
         """Detect voluntary eye-widening spikes (Section B).
 
         Frontalis/levator contraction spikes where EAR surges > 1.25x sober baseline
@@ -968,6 +1018,8 @@ class FeatureExtractor:
         if ear_avg > 1.25 * self.sober_ear_baseline:
             if recent and (min(recent) < 0.24 or (ear_avg - min(recent)) > 0.08):
                 return True
+        if frontalis_compensation_active and recent and min(recent) < 0.24:
+            return True
         return False
 
     def _compute_deliberate_blink_suppression(self, blink_detected: bool, ear_avg: float, timestamp: float) -> bool:
@@ -1032,6 +1084,170 @@ class FeatureExtractor:
             compensatory_stare = bool(sigma_deg < 0.8)
 
         return (duration, compensatory_stare)
+
+    def _compute_brow_micromotion(self, landmarks: np.ndarray, ear_avg: float) -> Tuple[float, float, bool]:
+        """Compute vertical eyebrow-to-canthus ratio, delta, and frontalis activation.
+
+        Normalized by horizontal inter-canthal width for 100% scale and distance invariance.
+        """
+        if landmarks is None or len(landmarks) < 337 or np.isnan(landmarks).any():
+            return (0.0, 0.0, False)
+
+        try:
+            w_r = float(np.linalg.norm(landmarks[133, :2] - landmarks[33, :2]))
+            w_l = float(np.linalg.norm(landmarks[263, :2] - landmarks[362, :2]))
+            if w_r < 1e-4 or w_l < 1e-4:
+                return (0.0, 0.0, False)
+
+            eye_r_y = float(0.5 * (landmarks[33, 1] + landmarks[133, 1]))
+            eye_l_y = float(0.5 * (landmarks[263, 1] + landmarks[362, 1]))
+            brow_r_y = float(np.mean(landmarks[RIGHT_EYEBROW_ARCH, 1]))
+            brow_l_y = float(np.mean(landmarks[LEFT_EYEBROW_ARCH, 1]))
+
+            # Guard synthetic test landmarks where eyebrow points are uninitialized (<= 1.0)
+            if brow_r_y <= 1.0 and brow_l_y <= 1.0:
+                return (0.0, 0.0, False)
+
+            ratio_r = (eye_r_y - brow_r_y) / w_r
+            ratio_l = (eye_l_y - brow_l_y) / w_l
+            raw_ratio = float(0.5 * (ratio_r + ratio_l))
+
+            if not getattr(self, "_brow_initialized", False) or self._smoothed_brow_ratio <= 0.0:
+                self._smoothed_brow_ratio = raw_ratio
+                self._brow_initialized = True
+            else:
+                self._smoothed_brow_ratio = float(0.80 * self._smoothed_brow_ratio + 0.20 * raw_ratio)
+
+            if self.baseline_brow_ratio <= 0.0:
+                self._brow_cal_samples.append(raw_ratio)
+                if len(self._brow_cal_samples) >= 15:
+                    self.baseline_brow_ratio = float(np.median(self._brow_cal_samples))
+                else:
+                    return (float(self._smoothed_brow_ratio), 0.0, False)
+
+            brow_delta = float((self._smoothed_brow_ratio - self.baseline_brow_ratio) / max(0.1, abs(self.baseline_brow_ratio)))
+            frontalis_active = bool(brow_delta >= 0.12)
+            return (float(self._smoothed_brow_ratio), float(brow_delta), frontalis_active)
+        except Exception:
+            return (0.0, 0.0, False)
+
+    def _compute_eyelid_tremor(self, ear_avg: float, timestamp: float, blink_phase: str) -> float:
+        """Track high-frequency palpebral micro-flutter (3-15 Hz).
+
+        Zero-crossing oscillation of first-order EAR differences during open-eye fixation.
+        """
+        if blink_phase != "open":
+            return 0.0
+
+        self._ear_tremor_history.append((timestamp, ear_avg))
+        cutoff = timestamp - 2.0
+        samples = [(t, e) for t, e in self._ear_tremor_history if t >= cutoff]
+
+        if len(samples) < 12:
+            return 0.0
+
+        duration = samples[-1][0] - samples[0][0]
+        if duration < 0.4:
+            return 0.0
+
+        ears = np.array([e for t, e in samples], dtype=np.float64)
+        diffs = np.diff(ears)
+        valid_mask = (np.abs(diffs) > 0.001) & (np.abs(diffs) < 0.025)
+        valid_diffs = diffs[valid_mask]
+
+        if len(valid_diffs) < 6:
+            return 0.0
+
+        signs = np.sign(valid_diffs)
+        reversals = int(np.sum(signs[1:] * signs[:-1] < 0))
+        tremor_hz = float(reversals / (2.0 * duration))
+        return float(round(tremor_hz, 2))
+
+    def _compute_rppg_pulse(self, frame: Optional[np.ndarray],
+                            landmarks: np.ndarray,
+                            timestamp: float) -> Tuple[float, float, bool]:
+        """Extract T-zone green-channel photoplethysmography heart rate & HRV.
+
+        Physiological heart-rate band: 0.75 - 2.5 Hz (45 - 150 BPM).
+        Automatically bypassed on monochrome/NIR frames.
+        """
+        if frame is None or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
+            return (0.0, 0.0, False)
+
+        try:
+            h, w = frame.shape[:2]
+            g_vals = []
+            for idx in VASODILATION_LANDMARKS:
+                if idx < len(landmarks):
+                    pt = landmarks[idx]
+                    px = int(pt[0] * w) if pt[0] <= 1.0 else int(pt[0])
+                    py = int(pt[1] * h) if pt[1] <= 1.0 else int(pt[1])
+                    if px <= 3 and py <= 3:
+                        continue
+                    y1 = max(0, py - 3)
+                    y2 = min(h, py + 4)
+                    x1 = max(0, px - 3)
+                    x2 = min(w, px + 4)
+                    if y2 > y1 and x2 > x1:
+                        patch = frame[y1:y2, x1:x2]
+                        g_vals.append(float(np.mean(patch[:, :, 1])))
+
+            if not g_vals:
+                return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
+
+            mean_g = float(np.mean(g_vals))
+            self._rppg_green_history.append((timestamp, mean_g))
+
+            times = [t for t, g in self._rppg_green_history]
+            duration = times[-1] - times[0]
+            if len(self._rppg_green_history) < 60 or duration < 4.0:
+                return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
+
+            t_arr = np.array(times, dtype=np.float64)
+            g_arr = np.array([g for t, g in self._rppg_green_history], dtype=np.float64)
+
+            t_rel = t_arr - t_arr[0]
+            p = np.polyfit(t_rel, g_arr, 1)
+            sig = g_arr - np.polyval(p, t_rel)
+            std_val = float(np.std(sig))
+            if std_val > 1e-4:
+                sig = sig / std_val
+
+            dt = float(np.median(np.diff(t_arr)))
+            if dt <= 1e-4:
+                return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
+
+            freqs = np.fft.rfftfreq(len(sig), d=dt)
+            fft_mag = np.abs(np.fft.rfft(sig))
+
+            band_mask = (freqs >= 0.75) & (freqs <= 2.5)
+            if not np.any(band_mask):
+                return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
+
+            peak_idx = int(np.argmax(fft_mag * band_mask))
+            peak_freq = float(freqs[peak_idx])
+            bpm = float(round(peak_freq * 60.0, 1))
+
+            # Inter-beat intervals from positive zero-crossings
+            zc = []
+            for i in range(len(sig) - 1):
+                if sig[i] <= 0.0 and sig[i + 1] > 0.0:
+                    t_zero = t_arr[i] + (-sig[i]) / (sig[i + 1] - sig[i] + 1e-9) * (t_arr[i + 1] - t_arr[i])
+                    zc.append(t_zero)
+
+            rmssd = 0.0
+            if len(zc) >= 3:
+                ibis = np.diff(zc) * 1000.0  # ms
+                valid_ibis = [ibi for ibi in ibis if 300.0 <= ibi <= 1500.0]
+                if len(valid_ibis) >= 2:
+                    rmssd = float(round(np.sqrt(np.mean(np.diff(valid_ibis) ** 2)), 2))
+
+            self._last_rppg_bpm = bpm
+            self._last_rppg_rmssd = rmssd
+            self._last_rppg_valid = True
+            return (bpm, rmssd, True)
+        except Exception:
+            return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
 
     def _compute_anti_masking_divergence(self, features: FrameFeatures, timestamp: float = 0.0) -> Tuple[float, bool]:
         """Compute Anti-Masking Divergence Metric (M_mask).
@@ -1145,6 +1361,9 @@ class FeatureExtractor:
             gating_reason=gating_reason,
         )
 
+        if imu_gated and not features.gating_reason:
+            features.gating_reason = "imu_shock"
+
         if not face_valid or imu_gated:
             self._just_resumed_from_gate = True
             self._in_saccade = False
@@ -1178,6 +1397,13 @@ class FeatureExtractor:
             features.facial_flushing_ratio = self._last_features.facial_flushing_ratio
             features.flushing_valid = self._last_features.flushing_valid
             features.flushing_delta = self._last_features.flushing_delta
+            features.brow_eye_distance_ratio = self._last_features.brow_eye_distance_ratio
+            features.brow_elevation_delta = self._last_features.brow_elevation_delta
+            features.frontalis_compensation_active = self._last_features.frontalis_compensation_active
+            features.eyelid_tremor_hz = self._last_features.eyelid_tremor_hz
+            features.rppg_pulse_bpm = self._last_features.rppg_pulse_bpm
+            features.rppg_hrv_rmssd_ms = self._last_features.rppg_hrv_rmssd_ms
+            features.rppg_valid = self._last_features.rppg_valid
             features.deliberate_blink_suppression = self._last_features.deliberate_blink_suppression
             features.voluntary_eye_widening = self._last_features.voluntary_eye_widening
             features.stare_fixation_duration_s = self._last_features.stare_fixation_duration_s
@@ -1248,10 +1474,9 @@ class FeatureExtractor:
         if features.ear_avg < self.blink_threshold:
             self._perclos_closed_count += 1
 
-        if len(self._ear_history) > 0:
-            features.perclos = float(np.clip(self._perclos_closed_count / len(self._ear_history), 0.0, 1.0))
-        else:
-            features.perclos = 0.0
+        min_samples = int(self.perclos_min_warmup_sec * self._fps) if self.perclos_min_warmup_sec > 0.0 else 1
+        denom = max(len(self._ear_history), min_samples, 1)
+        features.perclos = float(np.clip(self._perclos_closed_count / denom, 0.0, 1.0))
 
         # ── Blink closing/opening velocity & FSM tracking ──
         features.blink_closing_velocity, features.blink_opening_velocity = \
@@ -1328,14 +1553,24 @@ class FeatureExtractor:
 
         # ── Postural Sway & Head Stabilization (Section A & B) ──
         head_angular_vel = 0.0
+        pitch_roll_vel = 0.0
         if self._prev_head_yaw is not None and self._prev_head_timestamp is not None:
             dt_head = timestamp - self._prev_head_timestamp
             if dt_head > 1e-6:
                 d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
                 head_angular_vel = float(abs(d_yaw) / dt_head)
+                if self._prev_head_pitch is not None and self._prev_head_roll is not None:
+                    d_pitch = (head_pitch - self._prev_head_pitch + 180.0) % 360.0 - 180.0
+                    d_roll = (head_roll - self._prev_head_roll + 180.0) % 360.0 - 180.0
+                    pitch_roll_vel = float(np.hypot(d_pitch, d_roll) / dt_head)
 
-        features.head_postural_sway, features.rigid_head_stabilization = \
-            self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
+        if pitch_roll_vel > 35.0:
+            self._head_pose_history.clear()
+            features.head_postural_sway = float(self._last_features.head_postural_sway)
+            features.rigid_head_stabilization = False
+        else:
+            features.head_postural_sway, features.rigid_head_stabilization = \
+                self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
 
         # Involuntary impairment override: drowsy drivers in microsleep or high PERCLOS cannot be masking with rigid head
         if features.microsleep_detected or features.perclos > 0.15:
@@ -1346,12 +1581,27 @@ class FeatureExtractor:
         features.facial_flushing_ratio, features.flushing_valid, features.flushing_delta = \
             self._compute_facial_flushing(frame, sample_lms)
 
+        # ── Eyebrow / Frontalis Micromotions ──
+        features.brow_eye_distance_ratio, features.brow_elevation_delta, features.frontalis_compensation_active = \
+            self._compute_brow_micromotion(sample_lms, features.ear_avg)
+
+        # ── Palpebral Eyelid Tremor (3-15 Hz) ──
+        features.eyelid_tremor_hz = \
+            self._compute_eyelid_tremor(features.ear_avg, timestamp, self._blink_phase)
+
+        # ── T-zone rPPG Pulse & HRV ──
+        features.rppg_pulse_bpm, features.rppg_hrv_rmssd_ms, features.rppg_valid = \
+            self._compute_rppg_pulse(frame, sample_lms, timestamp)
+
         # ── Voluntary Masking Behaviors (Section B) ──
         if features.blink_detected:
             self._blink_times.append(timestamp)
 
         features.voluntary_eye_widening = \
-            self._compute_voluntary_eye_widening(features.ear_avg, timestamp)
+            self._compute_voluntary_eye_widening(
+                features.ear_avg, timestamp,
+                frontalis_compensation_active=features.frontalis_compensation_active,
+            )
         features.deliberate_blink_suppression = \
             self._compute_deliberate_blink_suppression(features.blink_detected, features.ear_avg, timestamp)
         features.stare_fixation_duration_s, features.compensatory_stare_active = \

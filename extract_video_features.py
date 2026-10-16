@@ -132,6 +132,7 @@ def extract_video_features(video_path: str,
         vor_min_head_speed=config.vor_min_head_speed,
         vor_max_head_speed=config.vor_max_head_speed,
         pursuit_window_sec=config.pursuit_window_sec,
+        perclos_min_warmup_sec=5.0,
         fps=fps,
     )
     classifier = ImpairmentClassifier()
@@ -292,6 +293,17 @@ def extract_video_features(video_path: str,
                 'stare_fixation_duration_s': round(features.stare_fixation_duration_s, 2),
                 'compensatory_stare_active': bool(features.compensatory_stare_active),
                 'rigid_head_stabilization': bool(features.rigid_head_stabilization),
+                # Eyebrow / Frontalis & Autonomic Pulse Micromotions
+                'brow_eye_distance_ratio': round(features.brow_eye_distance_ratio, 4),
+                'brow_elevation_delta': round(features.brow_elevation_delta, 4),
+                'frontalis_compensation_active': bool(features.frontalis_compensation_active),
+                'eyelid_tremor_hz': round(features.eyelid_tremor_hz, 2),
+                'rppg_pulse_bpm': round(features.rppg_pulse_bpm, 1),
+                'rppg_hrv_rmssd_ms': round(features.rppg_hrv_rmssd_ms, 2),
+                'rppg_valid': bool(features.rppg_valid),
+                # IMU Gating
+                'imu_gated': bool(features.imu_gated),
+                'gating_reason': str(features.gating_reason),
                 # Anti-Masking Divergence (M_mask)
                 'masking_divergence_score': round(features.masking_divergence_score, 1),
                 'masking_detected': bool(features.masking_detected),

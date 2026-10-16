@@ -32,6 +32,7 @@ from pipeline.pnp_normalizer import PnPNormalizer
 from pipeline.one_euro_filter import OneEuroFilterBank
 from pipeline.head_pose_estimator import HeadPoseGate
 from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
+from pipeline.calibration import PersonalBaselineCalibrator
 from pipeline.imu_gate import SoftwareIMUGate
 from utils.visualization import Visualizer
 
@@ -133,13 +134,17 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         pitch_down_limit=config.pitch_down_limit,
         pitch_up_limit=config.pitch_up_limit,
     )
+    # Scale temporal frame counts dynamically to actual FPS (e.g. 500ms microsleep, 1.0s yawn)
+    scaled_microsleep_frames = max(5, int(round(0.50 * capture.fps)))
+    scaled_yawn_frames = max(10, int(round(1.0 * capture.fps)))
+
     extractor = FeatureExtractor(
         blink_threshold=config.ear_blink_threshold,
         mar_yawn_threshold=config.mar_yawn_threshold,
         perclos_window_sec=config.perclos_window_sec,
         perclos_alert_threshold=config.perclos_alert_threshold,
-        microsleep_frames=config.microsleep_frames,
-        yawn_frames=config.yawn_frames,
+        microsleep_frames=scaled_microsleep_frames,
+        yawn_frames=scaled_yawn_frames,
         gaze_dispersion_window_sec=config.gaze_dispersion_window_sec,
         saccade_onset_velocity=config.saccade_onset_velocity,
         saccade_offset_velocity=config.saccade_offset_velocity,
@@ -151,8 +156,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         vor_min_head_speed=config.vor_min_head_speed,
         vor_max_head_speed=config.vor_max_head_speed,
         pursuit_window_sec=config.pursuit_window_sec,
+        perclos_min_warmup_sec=5.0,
         fps=capture.fps,
     )
+    calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=capture.fps)
     imu_gate = SoftwareIMUGate(
         accel_threshold=config.head_accel_threshold,
         freeze_duration_ms=config.imu_freeze_ms,
@@ -295,6 +302,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 frame=frame,
                 image_landmarks=smooth_landmarks,
             )
+
+            # ── Online Personal Baseline Auto-Calibration ──
+            if features.face_valid and not features.imu_gated:
+                calibrator.update(features)
+                if calibrator.is_calibrated:
+                    calibrator.apply_to(extractor)
 
             # ── Output ──
             if csv_logger is not None:

@@ -282,6 +282,83 @@ class TestVoluntaryInvoluntaryFeatures:
         assert feat_resumed.imu_gated is False
         assert ext._just_resumed_from_gate is False
 
+    def test_brow_micromotion_and_frontalis_compensation(self):
+        """Lifting eyebrow arch landmarks by 8 pixels increases brow ratio and triggers frontalis compensation."""
+        ext = FeatureExtractor(fps=30.0)
+        from utils.landmarks import RIGHT_EYEBROW_ARCH, LEFT_EYEBROW_ARCH
+
+        # 1. 20 frames of resting baseline brows at Y = 175.0 (eye center at 200.0)
+        for i in range(20):
+            t = i / 30.0
+            lm = make_full_landmarks(ear_val=0.28)
+            for idx in RIGHT_EYEBROW_ARCH:
+                lm[idx] = [200.0, 175.0, 0.0]
+            for idx in LEFT_EYEBROW_ARCH:
+                lm[idx] = [400.0, 175.0, 0.0]
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat.brow_eye_distance_ratio > 0.0
+        assert feat.frontalis_compensation_active is False
+        baseline_ratio = feat.brow_eye_distance_ratio
+
+        # 2. Lift eyebrows upward by 8 pixels (Y = 167.0) for 10 frames
+        for i in range(20, 30):
+            t = i / 30.0
+            lm = make_full_landmarks(ear_val=0.28)
+            for idx in RIGHT_EYEBROW_ARCH:
+                lm[idx] = [200.0, 167.0, 0.0]
+            for idx in LEFT_EYEBROW_ARCH:
+                lm[idx] = [400.0, 167.0, 0.0]
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat.brow_eye_distance_ratio > baseline_ratio
+        assert feat.brow_elevation_delta >= 0.12
+        assert feat.frontalis_compensation_active is True
+
+    def test_eyelid_tremor_frequency(self):
+        """Simulated 8 Hz palpebral micro-flutter produces eyelid_tremor_hz > 4.0."""
+        fps = 60.0
+        ext = FeatureExtractor(fps=fps)
+        for i in range(60):
+            t = i / fps
+            ear = 0.28 + 0.010 * np.sin(2 * np.pi * 8.0 * t)
+            lm = make_full_landmarks(ear_val=ear)
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat.eyelid_tremor_hz > 4.0, f"Expected tremor > 4.0 Hz, got {feat.eyelid_tremor_hz}"
+
+    def test_rppg_pulse_extraction_and_nir_bypass(self):
+        """60 FPS RGB stream with 1.2 Hz (72 BPM) green oscillation yields rppg_valid=True and 60 <= BPM <= 85.
+
+        Monochrome/NIR frames immediately bypass rPPG (rppg_valid=False).
+        """
+        fps = 60.0
+        ext = FeatureExtractor(fps=fps)
+        from utils.landmarks import VASODILATION_LANDMARKS
+
+        # 1. Monochrome / NIR bypass
+        gray_frame = np.full((480, 640), 128, dtype=np.uint8)
+        lm = make_full_landmarks(ear_val=0.30)
+        for idx in VASODILATION_LANDMARKS:
+            lm[idx] = [320.0, 200.0, 0.0]
+        feat_nir = ext.compute(lm, timestamp=0.0, frame_id=0, face_valid=True, frame=gray_frame)
+        assert feat_nir.rppg_valid is False
+
+        # 2. 60 FPS RGB stream: 270 frames (4.5s) with 1.2 Hz pulse on Green channel
+        pulse_hz = 1.2  # 72 BPM
+        for i in range(270):
+            t = i / fps
+            frame = np.full((480, 640, 3), 120, dtype=np.uint8)
+            g_val = int(np.clip(120.0 + 15.0 * np.sin(2 * np.pi * pulse_hz * t), 0, 255))
+            frame[:, :, 1] = g_val
+            frame[:, :, 0] = 100
+            frame[:, :, 2] = 140
+
+            feat = ext.compute(lm, timestamp=t, frame_id=i+1, face_valid=True, frame=frame)
+
+        assert feat.rppg_valid is True
+        assert 60.0 <= feat.rppg_pulse_bpm <= 85.0, f"Expected BPM in [60, 85], got {feat.rppg_pulse_bpm}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

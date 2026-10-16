@@ -184,3 +184,11 @@ FOREHEAD_PATCH = [
 # Comprehensive vasodilation tracking landmarks (full cheeks + forehead T-zone: 64 points)
 VASODILATION_LANDMARKS = FULL_CHEEK_LANDMARKS + FOREHEAD_PATCH
 
+# ═══════════════════════════════════════════════════════════════════
+# Eyebrow Arch Landmarks for Frontalis Muscle / Brow Elevation Tracking
+# ═══════════════════════════════════════════════════════════════════
+# Supraorbital brow arch landmarks (used to measure vertical brow-to-canthus distance)
+RIGHT_EYEBROW_ARCH = [70, 63, 105, 66, 107]   # Subject's right brow (viewer's left)
+LEFT_EYEBROW_ARCH = [300, 293, 334, 296, 336] # Subject's left brow (viewer's right)
+EYEBROW_ARCH_LANDMARKS = RIGHT_EYEBROW_ARCH + LEFT_EYEBROW_ARCH
+

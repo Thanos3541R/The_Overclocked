@@ -1,7 +1,7 @@
 # The Overclocked: Driver Monitoring System (DMS)
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Tests Passing](https://img.shields.io/badge/tests-170%2F170%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-184%2F184%20passed-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A research prototype that measures eyelid, eye, gaze, and head movements from a driver-facing camera (RGB webcam or monochrome NIR) and investigates whether those measurements can support passive impairment detection for a vehicle interlock.
@@ -15,9 +15,11 @@ A research prototype that measures eyelid, eye, gaze, and head movements from a 
 
 | Component | State |
 | :--- | :--- |
-| **Perception pipeline** (preprocessing, landmarks, smoothing, pose normalization, gating, feature extraction) | **Implemented.** 170 automated unit and integration tests passing (`pytest tests/ -v`). |
-| **Gaze features** (iris tracking, saccades, GEN, binocular vergence, VOR) | **Implemented.** Conjugate horizontal frame axis mapping (`[-1, 1]`) and bilateral symmetry verified. Degree-per-unit scaling in `config.py` is a placeholder. |
+| **Perception pipeline** (preprocessing, landmarks, smoothing, pose normalization, gating, feature extraction) | **Implemented.** 184 automated unit and integration tests passing (`pytest tests/ -v`). |
+| **Zero-Blur Kinematic Video Stabilizer** | **Implemented.** Sub-0.5ms phase correlation translation tracker & high-frequency chassis vibration scorer in coordinate space without pixel blurring (`pipeline/stabilizer.py`). |
+| **Gaze features** (iris tracking, saccades, GEN, binocular vergence, VOR) | **Implemented.** Conjugate horizontal frame axis mapping (`[-1, 1]`) and bilateral symmetry verified. Calibrated saccade angular scaling ($22^\circ/\text{unit}$) and steep pitch/eccentric gaze LOC gating. |
 | **Forehead & Full Cheeks Coverage** | **Implemented.** Full 27-landmark forehead contour loop + 20-point frontal patch and 44-point cheek matrices (22 per side) with 9-vertex closed perimeter outlines for T-zone tracking and HUD visualization. |
+| **Facial Micromotions & Vital Metrics (60fps)** | **Implemented.** Brow-to-canthus elevation ratio & frontalis ptosis compensation ($\ge +12\%$), palpebral tremor / eyelid flutter (3–15 Hz), and T-zone green-channel rPPG pulse (BPM) & HRV RMSSD. |
 | **Rule-based classifier, personal baseline calibration, Bayesian filter** | **Implemented.** Thresholds are design targets marked `[PLACEHOLDER]`. Not clinically validated. |
 | **Trained models** | Synthetic baseline model (`models/baseline_impairment_model.joblib`) provided as a pipeline proof of concept only (see Data). |
 | **Vehicle interlock** (starter lockout, throttle attenuation) | **Design & logic only.** Software outputs interlock and latching signals; physical relays/actuators not built. |
@@ -26,7 +28,7 @@ A research prototype that measures eyelid, eye, gaze, and head movements from a 
 
 ## What this project can and cannot claim
 
-- **Can claim:** A modular, reproducible edge measurement pipeline with comprehensive regression tests (169 passing), real-time CPU performance, and a disciplined engineering framework for evaluating physiological impairment signals.
+- **Can claim:** A modular, reproducible edge measurement pipeline with comprehensive regression tests (184 passing), real-time CPU performance, and a disciplined engineering framework for evaluating physiological impairment signals.
 - **Cannot claim:** That it detects intoxication in production, that any listed biomarker is "unfakeable," or that it meets automotive functional safety certification. ISO 26262 compliance requires rigorous process audits, formal Hazard Analysis and Risk Assessment (HARA), and safety-qualified tooling, not just unit tests.
 - **Regulatory context:** Published camera-based studies detect impairment from roughly 0.05% BAC upward. India's legal limit is 0.03%, so a passive vision system alone cannot be expected to reliably catch a driver right at the threshold without secondary sensor confirmation.
 
@@ -39,27 +41,29 @@ The system executes a modular, synchronized pipeline where raw camera frames pas
 ```mermaid
 flowchart TD
     A["Camera / video (RGB or Monochrome NIR)"] --> B["1. Preprocessing: CLAHE + adaptive gamma LUT"]
-    B --> C["2. Landmarks: MediaPipe 478-pt FaceMesh + Adaptive ROI"]
-    C --> D["3. Split-bandwidth 1-Euro smoothing (3 decoupled profiles)"]
-    D --> E["4. PnP 3D head pose (iterative solvePnP on 8 rigid anchors)"]
-    E --> F["5. Pose-normalized landmarks"]
-    F --> G["6. Gates: head pose gate, 5-pt Savitzky-Golay software IMU"]
-    G --> H["7. Feature extraction (29-channel biometric engine)"]
-    H --> I["8. Personal baseline calibration (Drunk Ingress bounding)"]
-    I --> J["9. Classifier + sequential Bayesian evidence filter (Wald SPRT)"]
+    B --> B2["2. Kinematic Stabilizer: sub-0.5ms phase correlation (dx, dy) & road vibration"]
+    B2 --> C["3. Landmarks: MediaPipe 478-pt FaceMesh + Adaptive ROI"]
+    C --> D["4. Split-bandwidth 1-Euro smoothing (3 decoupled profiles)"]
+    D --> E["5. PnP 3D head pose (iterative solvePnP, 8 anchors, yaw bifurcation fix)"]
+    E --> F["6. Pose-normalized landmarks & view-ray compensation"]
+    F --> G["7. Gates: head pose gate, 5-pt Savitzky-Golay IMU, 3-axis nod gate"]
+    G --> H["8. Feature extraction (29-channel engine + 60fps micromotions & rPPG)"]
+    H --> I["9. Personal baseline calibration (Drunk Ingress bounding + dim-light anchor)"]
+    I --> J["10. Classifier + sequential Bayesian evidence filter (Wald SPRT)"]
     J --> K["HUD telemetry / CSV logger / interlock signal (software logic)"]
 ```
 
 ### Vibration and lighting handling
 
 1. **Lighting normalization:** Contrast Limited Adaptive Histogram Equalization (CLAHE, $8 \times 8$ grid, clip limit 2.0) combined with precomputed 256-entry lookup tables (LUT) for adaptive gamma correction on dark and dim frames (`pipeline/preprocessing.py`).
-2. **Decoupled landmark smoothing:** Vectorized 3-profile split-bandwidth 1-Euro adaptive low-pass filter operating across all 478 landmarks simultaneously in $<0.4\text{ ms}$ (`pipeline/one_euro_filter.py`). Decouples resting jitter cutoff ($f_{\text{c,min}} = 0.7\text{ Hz}$) on 460 rigid/PnP skull landmarks from fast dynamic eyelid motion ($3.0\text{ Hz}$, $\beta=0.80$) and ocular fixation ($1.5\text{ Hz}$, $\beta=0.40$).
-3. **Rigid head normalization:** Robust Perspective-n-Point (`cv2.solvePnP` with `SOLVEPNP_ITERATIVE` and temporal extrinsic guess reuse) against an expanded 8-point canonical face model (`CANONICAL_FACE_3D_8` adding nose bridge 168 and glabella 9). Eliminates vehicle bounce by computing internal facial metrics relative to the head frame (`pipeline/pnp_normalizer.py`).
-4. **Head pose gate:** Features freeze with holdover (`HOLD_LAST`) when $|\text{yaw}| > 35^\circ$, $\text{pitch} < -30^\circ$, or $\text{pitch} > 25^\circ$ (`pipeline/head_pose_estimator.py`). `[PLACEHOLDER]`
-5. **Software shock gate:** 5-point non-uniform Savitzky-Golay quadratic fit computing 3D nose-tip acceleration, decoupled from rotational motion ($\dot{\theta} < 20^\circ/\text{s}$). Freezes features for 150 ms if linear acceleration exceeds $2.5\text{ m/s}^2$ (`pipeline/imu_gate.py`). `[PLACEHOLDER]`
-6. **Motor event detection:** Saccades enforce a sub-pixel noise floor ($< 0.030$ normalized units) and dual-velocity hysteresis ($35^\circ/\text{s}$ onset, $20^\circ/\text{s}$ offset). Blinks use a 4-state Finite State Machine (`open` $\to$ `closing` $\to$ `closed` $\to$ `opening`).
-7. **Distant drivers:** An `AdaptiveROITracker` (`pipeline/face_mesh_detector.py`) with EMA temporal smoothing ($\alpha=0.15$) and a 2-pixel deadband crops an expanded $2.0\times$ square bounding box directly from the raw frame, boosting effective face resolution $\sim 8\times$ inside the detector without crop rounding oscillation. When lost, it evaluates a Central Driver Quadrant crop ($[0.2W, 0.1H]$ to $[0.8W, 0.85H]$).
-8. **Monochrome NIR invariance:** Auto-detects single-channel or monochrome 940nm NIR video. Automatically bypasses visible-spectrum chromaticity calculations (sclera redness, facial flushing) and reallocates diagnostic weights across structural markers in `pipeline/classifier.py`.
+2. **Zero-blur kinematic stabilization:** Operates in coordinate and ROI-window space rather than warping image pixels, preserving 100% sub-pixel edge sharpness for iris and eyelid contour extraction (`pipeline/stabilizer.py`). Computes instantaneous frame-to-frame rigid translation $(dx, dy)$ via downscaled phase correlation in $< 0.3\text{ ms}$, flags speed bumps ($> 12\text{ px}$ vertical impulse), and calculates a high-frequency chassis vibration score ($3\text{--}15\text{ Hz}$ oscillatory sign-reversals) to decouple road shocks from driver motion.
+3. **Decoupled landmark smoothing:** Vectorized 3-profile split-bandwidth 1-Euro adaptive low-pass filter operating across all 478 landmarks simultaneously in $<0.4\text{ ms}$ (`pipeline/one_euro_filter.py`). Decouples resting jitter cutoff ($f_{\text{c,min}} = 0.7\text{ Hz}$) on 460 rigid/PnP skull landmarks from fast dynamic eyelid motion ($3.0\text{ Hz}$, $\beta=0.80$) and ocular fixation ($1.5\text{ Hz}$, $\beta=0.40$).
+4. **Rigid head normalization & yaw bifurcation suppression:** Robust Perspective-n-Point (`cv2.solvePnP` with `SOLVEPNP_ITERATIVE` and temporal extrinsic guess reuse) against an expanded 8-point canonical face model (`CANONICAL_FACE_3D_8` adding nose bridge 168 and glabella 9). Compensates for off-center camera view-ray angles and suppresses mirror $\pm 42^\circ$ yaw flips on narrow facial anthropometries. Eliminates vehicle bounce by computing internal facial metrics relative to the head frame (`pipeline/pnp_normalizer.py`).
+5. **Head pose gate:** Features freeze with holdover (`HOLD_LAST`) when $|\text{yaw}| > 35^\circ$, $\text{pitch} < -30^\circ$, or $\text{pitch} > 25^\circ$ (`pipeline/head_pose_estimator.py`). `[PLACEHOLDER]`
+6. **Software shock gate & voluntary nod decoupling:** 5-point non-uniform Savitzky-Golay quadratic fit computing 3D nose-tip acceleration, decoupled from rotational motion ($\dot{\theta} < 20^\circ/\text{s}$). Freezes features for 150 ms if linear acceleration exceeds $2.5\text{ m/s}^2$ (`pipeline/imu_gate.py`). Postural sway calculations strictly gate when voluntary angular head pitch/roll velocity exceeds $35.0^\circ/\text{s}$, preventing intentional nodding or mirror checks from falsely elevating cerebellar ataxia metrics. `[PLACEHOLDER]`
+7. **Motor event detection:** Saccades enforce a sub-pixel noise floor ($< 0.030$ normalized units), bilateral maximum selection $\max(|dx_l|, |dx_r|)$ for unilateral glare/squint immunity, and dual-velocity hysteresis ($35^\circ/\text{s}$ onset, $20^\circ/\text{s}$ offset). Blinks use a 4-state Finite State Machine (`open` $\to$ `closing` $\to$ `closed` $\to$ `opening`) with dynamic heavy-eyelid baseline adaptation.
+8. **Distant drivers:** An `AdaptiveROITracker` (`pipeline/face_mesh_detector.py`) with EMA temporal smoothing ($\alpha=0.15$) and a 2-pixel deadband crops an expanded $2.0\times$ square bounding box directly from the raw frame, boosting effective face resolution $\sim 8\times$ inside the detector without crop rounding oscillation. When lost, it evaluates a Central Driver Quadrant crop ($[0.2W, 0.1H]$ to $[0.8W, 0.85H]$).
+9. **Monochrome NIR invariance:** Auto-detects single-channel or monochrome 940nm NIR video. Automatically bypasses visible-spectrum chromaticity calculations (sclera redness, facial flushing, rPPG pulse) and reallocates diagnostic weights across structural markers in `pipeline/classifier.py`.
 
 ### Timing
 
@@ -87,22 +91,23 @@ Velocities and derivatives use real frame timestamps (`timestamp` in seconds), i
 
 ## Features
 
-The training buffer (`pipeline/training_buffer.py`) records **29 channels** (22 continuous signals and 7 discrete flags). Gating flags (`imu_gated`, `gating_reason`) act strictly as **validity masks** and are excluded from model inputs.
+The training buffer (`pipeline/training_buffer.py`) records **29 channels** (22 continuous signals and 7 discrete flags) assembled into time-series tensors. In addition, the per-frame feature extractor (`pipeline/feature_extractor.py`) computes 60fps facial micromotion metrics and autonomous vitals. Gating flags (`imu_gated`, `gating_reason`) act strictly as **validity masks** and are excluded from model inputs.
 
 | Group | Signals |
 | :--- | :--- |
-| **Eyelid kinetics** | EAR (left, right, mean), blink closing velocity, blink opening velocity, PERCLOS (O(1) ring counter), microsleep detected flag, blink detected flag |
-| **Gaze dynamics** | Iris x/y per eye, saccade angular velocity, saccade latency (reaction time proxy), gaze yaw dispersion ($\sigma_{\text{yaw}}$), saccade detected flag |
-| **Advanced oculomotor** | Gaze-Evoked Nystagmus (slow-phase drift velocity, beat count, GEN flag), smooth pursuit fragmentation ratio, binocular vergence angle, Lack of Convergence (LOC flag), Vestibulo-Ocular Reflex (VOR gain) |
-| **Mouth & head pose** | MAR (dense 3-pair formula), yawn detected flag, head yaw, head pitch, head roll |
-| **Corroborating physiological** | Seated head postural sway ($\sqrt{\sigma_{\text{pitch}}^2 + \sigma_{\text{roll}}^2}$, 0% lockout authority), facial flushing chromaticity ratio ($R / \frac{G+B}{2}$) and delta across full cheeks and forehead T-zone (RGB only, bypassed under NIR), conjunctival sclera redness (RGB only) |
+| **Eyelid kinetics & tremor** | EAR (left, right, mean), blink closing velocity, blink opening velocity, 4-state blink FSM (`open` $\to$ `closing` $\to$ `closed` $\to$ `opening`), palpebral tremor / eyelid flutter frequency (3–15 Hz zero-crossings on sub-millimeter $\Delta\text{EAR}$), PERCLOS (O(1) ring counter), microsleep detected flag, blink detected flag |
+| **Gaze dynamics** | Iris x/y per eye (conjugate camera space), saccade angular velocity ($22^\circ/\text{unit}$ scale, bilateral maximum $\max(|dx_l|, |dx_r|)$ for squint/glare immunity), saccade latency (reaction time proxy), gaze yaw dispersion ($\sigma_{\text{yaw}}$), saccade detected flag |
+| **Advanced oculomotor** | Gaze-Evoked Nystagmus (slow-phase drift velocity, beat count, GEN flag), smooth pursuit fragmentation ratio, binocular vergence angle, Lack of Convergence (LOC flag with steep pitch & lateral gaze gating), Vestibulo-Ocular Reflex (VOR gain) |
+| **Mouth & head pose** | MAR (dense 3-pair formula), yawn detected flag, head yaw, head pitch, head roll (with view-ray angle correction) |
+| **Forehead & Brow Micromotion** | Brow-to-canthus elevation ratio (normalized by inter-canthal outer-corner width), brow elevation delta from baseline, frontalis compensation active flag ($\ge +12\%$ elevation indicating conscious effort fighting ptosis) |
+| **Autonomic Vitals & Physiological** | T-Zone green-channel rPPG pulse rate (BPM, $0.75\text{--}2.5\text{ Hz}$ band), beat-to-beat heart rate variability (HRV RMSSD in ms), seated head postural sway ($\sqrt{\sigma_{\text{pitch}}^2 + \sigma_{\text{roll}}^2}$ gated above $35^\circ/\text{s}$ voluntary nod speed), facial flushing chromaticity ratio ($R / \frac{G+B}{2}$) and delta across full cheeks and forehead T-zone (RGB only, bypassed under NIR), conjunctival sclera redness (RGB only) |
 
 ### Section A vs. Section B biomarker split
 
 * **Section A — Involuntary Reflexes (Primary diagnostic authority):**
-  Includes Gaze-Evoked Nystagmus (GEN), smooth pursuit breakdown, VOR micro-gain depression, binocular strabismus/LOC, involuntary blink reopening speed ($v_{\text{up}}$), cerebellar postural sway, and T-zone micro-vascular flushing. These signals reflect subcortical, brainstem, or autonomic motor control that is difficult to consciously sustain or suppress.
+  Includes Gaze-Evoked Nystagmus (GEN), smooth pursuit breakdown, VOR micro-gain depression, binocular strabismus/LOC, involuntary blink reopening speed ($v_{\text{up}}$), high-frequency palpebral flutter (3–15 Hz), cerebellar postural sway, T-zone micro-vascular flushing, and autonomic pulse/HRV fluctuations. These signals reflect subcortical, brainstem, or autonomic motor control that is difficult to consciously sustain or suppress.
 * **Section B — Voluntary & Semi-Voluntary Behaviors (Masking & Gaming indicators):**
-  Includes deliberate blink suppression (prolonged inter-blink intervals $> 6.0\text{s}$), voluntary eye-widening spikes (frontalis/levator surges $> 1.25\times \text{baseline}$ following droop episodes), compensatory central staring fixation ($> 6.0\text{s}$, $\sigma_{\text{gaze}} < 0.8^\circ$), and rigid cervical neck stabilization.
+  Includes deliberate blink suppression (prolonged inter-blink intervals $> 6.0\text{s}$), voluntary eye-widening spikes (frontalis/levator surges $> 1.25\times \text{baseline}$ following droop episodes), frontalis brow lifting compensation ($\ge +12\%$), compensatory central staring fixation ($> 6.0\text{s}$, $\sigma_{\text{gaze}} < 0.8^\circ$), and rigid cervical neck stabilization.
 * **Anti-Masking Divergence Metric ($M_{\text{mask}}$):**
   Quantifies discordance when a driver consciously forces eyelid or postural control while involuntary neurological reflexes deteriorate. When kinetic discordance exceeds $50.0\%$ (`masking_detected = True`), an anti-masking alert is logged. `[PLACEHOLDER]`
 
@@ -204,7 +209,7 @@ python train_baseline.py --data-dir ./idd_output/ --output-model models/trained_
 ```bash
 pytest tests/ -v
 ```
-All **170 unit, geometric, invariance, and integration tests** execute in $\approx 45\text{ seconds}$ with a 100% pass rate.
+All **184 unit, geometric, invariance, and integration tests** execute in $\approx 40\text{ seconds}$ with a 100% pass rate.
 
 ---
 
@@ -224,12 +229,13 @@ driver-monitor/
 ├── pipeline/
 │   ├── frame_capture.py       # Polymorphic camera/video reader (DirectShow, MJPG, RGB & NIR)
 │   ├── preprocessing.py       # CLAHE & adaptive Gamma LUT low-light enhancer
+│   ├── stabilizer.py          # Zero-blur kinematic video & chassis vibration stabilizer (<0.5ms)
 │   ├── face_mesh_detector.py  # MediaPipe Face Mesh detector with AdaptiveROITracker & Multi-Scale Zoom
 │   ├── one_euro_filter.py     # Vectorized temporal low-pass filter (<0.4ms)
 │   ├── pnp_normalizer.py      # Robust solvePnP pose estimation & rigid metric normalization
 │   ├── head_pose_estimator.py # Head pose gating & tracking
 │   ├── imu_gate.py            # 5-point Savitzky-Golay quadratic IMU shock gate
-│   ├── feature_extractor.py   # 29-signal physiological feature extraction engine
+│   ├── feature_extractor.py   # 29-signal physiological feature extraction engine + 60fps vitals
 │   ├── calibration.py         # Personal baseline calibrator with Drunk Ingress bounding
 │   ├── classifier.py          # Impairment diagnostic classifier (with NIR weight redistribution)
 │   ├── bayesian_filter.py     # Sequential Bayesian evidence accumulator with Wald SPRT
@@ -240,7 +246,7 @@ driver-monitor/
 │   └── visualization.py       # OpenCV HUD telemetry display & region legend
 └── tests/
     ├── sample_driver_video.mp4 # Video fixture for regression & invariance benchmarking
-    └── test_*.py              # 16 test modules (170 automated unit & integration tests)
+    └── test_*.py              # 16 test modules (184 automated unit & integration tests)
 ```
 
 ---

@@ -51,8 +51,11 @@ class HeadPoseGate:
         """
         if euler_angles is None:
             return PoseState(
+                yaw=self._last_valid_state.yaw,
+                pitch=self._last_valid_state.pitch,
+                roll=self._last_valid_state.roll,
                 face_valid=False,
-                gating_reason="no_pose"
+                gating_reason="no_pose",
             )
 
         pitch, yaw, roll = euler_angles
@@ -74,6 +77,10 @@ class HeadPoseGate:
             self._last_valid_state = state
 
         return state
+
+    def reset(self) -> None:
+        """Reset head pose gating state to default."""
+        self._last_valid_state = PoseState()
 
     @property
     def last_valid_state(self) -> PoseState:

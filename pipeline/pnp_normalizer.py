@@ -106,6 +106,13 @@ class PnPNormalizer:
         self.aligned_rotation_matrix: Optional[np.ndarray] = None
         self._last_valid_euler: Optional[Tuple[float, float, float]] = None
         self._jump_reject_count = 0
+        self._prev_extrinsic_rvec: Optional[np.ndarray] = None
+        self._prev_extrinsic_tvec: Optional[np.ndarray] = None
+
+    @property
+    def pose_valid(self) -> bool:
+        """True if current frame has a valid rotation and translation pose."""
+        return bool(self.rotation_matrix is not None and self.rvec is not None and self.tvec is not None)
 
     def reset(self) -> None:
         """Explicitly clear stored pose state."""
@@ -116,6 +123,8 @@ class PnPNormalizer:
         self.aligned_rotation_matrix = None
         self._last_valid_euler = None
         self._jump_reject_count = 0
+        self._prev_extrinsic_rvec = None
+        self._prev_extrinsic_tvec = None
 
     @staticmethod
     def _extract_euler(rotation_matrix: np.ndarray,
@@ -154,9 +163,12 @@ class PnPNormalizer:
             True if PnP solution found for this frame, False otherwise.
         """
         # Save previous valid pose for extrinsic guess and jump rejection
-        prev_rvec = self.rvec.copy() if self.rvec is not None else None
-        prev_tvec = self.tvec.copy() if self.tvec is not None else None
+        prev_rvec = self._prev_extrinsic_rvec.copy() if self._prev_extrinsic_rvec is not None else (self.rvec.copy() if self.rvec is not None else None)
+        prev_tvec = self._prev_extrinsic_tvec.copy() if self._prev_extrinsic_tvec is not None else (self.tvec.copy() if self.tvec is not None else None)
         prev_euler = self._last_valid_euler
+
+        self._prev_extrinsic_rvec = None
+        self._prev_extrinsic_tvec = None
 
         # Invalidate stale pose immediately on every frame
         self.rvec = None
@@ -329,6 +341,13 @@ class PnPNormalizer:
                 self._jump_reject_count += 1
                 if self._jump_reject_count < self.max_jump_rejections:
                     # Single-frame transient glitch -> reject
+                    self._prev_extrinsic_rvec = prev_rvec
+                    self._prev_extrinsic_tvec = prev_tvec
+                    self.rvec = None
+                    self.tvec = None
+                    self.rotation_matrix = None
+                    self.aligned_rvec = None
+                    self.aligned_rotation_matrix = None
                     return False
                 # Jump persisted for >= max_jump_rejections frames -> accept real fast head turn
                 self._jump_reject_count = 0
@@ -343,6 +362,8 @@ class PnPNormalizer:
         self.aligned_rotation_matrix = R_eval
         self.aligned_rvec = aligned_rvec
         self._last_valid_euler = (cand_pitch, cand_yaw, cand_roll)
+        self._prev_extrinsic_rvec = rvec.copy()
+        self._prev_extrinsic_tvec = tvec.copy()
         return True
 
     def normalize_landmarks(self, landmarks: np.ndarray) -> np.ndarray:

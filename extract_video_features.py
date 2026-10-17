@@ -250,13 +250,15 @@ def extract_video_features(video_path: str,
                     calibrator.apply_to(extractor, classifier)
             else:
                 pnp.reset()
+                imu_gate.reset()
+                filter_bank = None
                 features = extractor.compute(
-                    landmarks=np.zeros((478, 3), dtype=np.float64),
+                    landmarks=None,
                     timestamp=timestamp,
                     frame_id=processed_count,
                     face_valid=False,
                     imu_gated=False,
-                    gating_reason='No face detected',
+                    gating_reason='no_face',
                     frame=frame,
                 )
 
@@ -365,7 +367,11 @@ def extract_video_features(video_path: str,
                 detector.close()
             except Exception:
                 pass
-        cv2.destroyAllWindows()
+        if not headless:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
 
     elapsed = time.time() - start_time
     proc_fps = processed_count / elapsed if elapsed > 0 else 0.0

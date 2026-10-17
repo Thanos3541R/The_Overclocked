@@ -1354,10 +1354,23 @@ class FeatureExtractor:
 
         return (float(round(total_m_mask, 1)), detected)
 
-    def compute(self, landmarks: np.ndarray,
-                timestamp: float,
-                frame_id: int,
-                face_valid: bool,
+    @staticmethod
+    def _is_valid_landmarks(landmarks: Optional[np.ndarray]) -> bool:
+        if landmarks is None or not isinstance(landmarks, np.ndarray):
+            return False
+        if landmarks.ndim != 2 or landmarks.shape[0] < 468 or landmarks.shape[1] < 2:
+            return False
+        if not np.all(np.isfinite(landmarks[:, :2])):
+            return False
+        # Reject all-zero or collapsed synthetic arrays
+        if float(np.ptp(landmarks[:, 0])) < 1e-3 or float(np.ptp(landmarks[:, 1])) < 1e-3:
+            return False
+        return True
+
+    def compute(self, landmarks: Optional[np.ndarray] = None,
+                timestamp: float = 0.0,
+                frame_id: int = 0,
+                face_valid: bool = True,
                 head_yaw: float = 0.0,
                 head_pitch: float = 0.0,
                 head_roll: float = 0.0,
@@ -1382,6 +1395,11 @@ class FeatureExtractor:
             FrameFeatures dataclass with all computed values.
         """
         with self._lock:
+            if face_valid and not self._is_valid_landmarks(landmarks):
+                face_valid = False
+                if not gating_reason:
+                    gating_reason = "invalid_landmarks"
+
             features = FrameFeatures(
                 timestamp=timestamp,
                 frame_id=frame_id,
@@ -1399,6 +1417,10 @@ class FeatureExtractor:
             if not face_valid or imu_gated:
                 self._just_resumed_from_gate = True
                 self._in_saccade = False
+                if not face_valid and head_yaw == 0.0 and head_pitch == 0.0 and head_roll == 0.0:
+                    features.head_yaw = self._last_features.head_yaw
+                    features.head_pitch = self._last_features.head_pitch
+                    features.head_roll = self._last_features.head_roll
                 # Hold last valid features, but update metadata
                 features.ear_left = self._last_features.ear_left
                 features.ear_right = self._last_features.ear_right

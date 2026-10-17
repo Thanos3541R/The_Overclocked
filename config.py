@@ -6,7 +6,8 @@ detection sensitivity requirements.
 
 WARNING: All feature extraction and oculomotor thresholds are uncalibrated placeholders.
 """
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, fields
 from typing import Optional, Tuple
 
 
@@ -108,6 +109,19 @@ class PipelineConfig:
     show_mesh: bool = True
     show_iris: bool = True
     show_pose_axes: bool = True
+
+    @classmethod
+    def from_json(cls, json_path: str) -> "PipelineConfig":
+        """Load pipeline configuration from a JSON file, overriding defaults.
+
+        Unknown keys in the JSON are safely ignored.
+        """
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        valid_fields = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**kwargs)
 
 
 # Default configuration instance

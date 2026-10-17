@@ -27,6 +27,10 @@ from pipeline.preprocessing import LightingNormalizer
 from pipeline.frame_capture import FrameCapture
 from pipeline.classifier import ImpairmentClassifier
 from pipeline.training_buffer import TrainingBuffer
+from pipeline.head_pose_estimator import HeadPoseGate
+from pipeline.imu_gate import SoftwareIMUGate
+from pipeline.face_mesh_detector import FaceMeshDetector
+from config import PipelineConfig
 from train_baseline import (
     compute_subject_invariant_delta_features,
     compute_window_summary_features,
@@ -305,10 +309,11 @@ class TestRobustnessAndEdgeCases:
 
         assert f.head_postural_sway < 0.20
 
-        # NaN landmarks must not trigger UnboundLocalError or exception
+        # NaN landmarks must not trigger UnboundLocalError or exception and must be safely invalidated
         lms_nan = np.full((478, 3), np.nan)
         f_nan = ext.compute(lms_nan, timestamp=t + 0.1, frame_id=91, face_valid=True)
-        assert f_nan.face_valid is True
+        assert f_nan.face_valid is False
+        assert f_nan.gating_reason == "invalid_landmarks"
         assert np.isfinite(f_nan.left_iris_x)
         assert np.isfinite(f_nan.perclos)
 
@@ -500,4 +505,152 @@ class TestAuditRemediation:
         assert X_3d.shape[2] == 48  # Aligned union schema
         assert len(fnames) == 48
         assert len(subs) == len(wins_core) + len(wins_ext)
+
+
+class TestExternalReviewFixes:
+    """Verification tests for the 7 external review fixes and reliability upgrades."""
+
+    def test_atomic_model_download_failure_handling(self, tmp_path):
+        """Model downloader must clean up .tmp on failure and raise clear RuntimeError."""
+        fake_model = tmp_path / "subdir" / "face_landmarker.task"
+        tmp_target = str(fake_model) + ".tmp"
+
+        # 1. Network failure raises RuntimeError and leaves no .tmp
+        with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+            with pytest.raises(RuntimeError) as exc_info:
+                FaceMeshDetector._ensure_model_bundle(str(fake_model), timeout_sec=0.1)
+            assert "offline/network download failed" in str(exc_info.value)
+            assert not os.path.exists(tmp_target)
+            assert not fake_model.exists()
+
+        # 2. Truncated download (< min_bytes) raises RuntimeError and removes .tmp
+        import io
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = io.BytesIO(b"short payload")
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            with pytest.raises(RuntimeError) as exc_info:
+                FaceMeshDetector._ensure_model_bundle(str(fake_model), min_bytes=1000)
+            assert "incomplete or corrupted" in str(exc_info.value) or "offline/network download failed" in str(exc_info.value)
+            assert not os.path.exists(tmp_target)
+            assert not fake_model.exists()
+
+        # 3. Existing valid file bypasses network completely
+        valid_model = tmp_path / "valid_face_landmarker.task"
+        valid_model.write_bytes(b"X" * 1500)
+        with patch("urllib.request.urlopen") as mock_url:
+            FaceMeshDetector._ensure_model_bundle(str(valid_model), min_bytes=1000)
+            mock_url.assert_not_called()
+
+    def test_feature_extractor_none_and_all_zero_landmarks_safety(self):
+        """FeatureExtractor must safely handle landmarks=None and all-zero landmarks without crashing,
+        invalidating face_valid, setting gating_reason='invalid_landmarks', and holding last valid state."""
+        ext = FeatureExtractor()
+
+        # First pass a valid frame to establish baseline values
+        lm_valid = make_full_landmarks(ear_val=0.28)
+        f_valid = ext.compute(
+            lm_valid, timestamp=1.0, frame_id=1, face_valid=True,
+            head_yaw=12.0, head_pitch=5.0, head_roll=-3.0
+        )
+        assert f_valid.face_valid is True
+        saved_ear = f_valid.ear_avg
+        assert saved_ear > 0.0
+        assert f_valid.head_yaw == 12.0
+        assert f_valid.head_pitch == 5.0
+        assert f_valid.head_roll == -3.0
+
+        # Now test with landmarks=None
+        f_none = ext.compute(
+            landmarks=None, timestamp=1.033, frame_id=2, face_valid=True,
+            head_yaw=0.0, head_pitch=0.0, head_roll=0.0
+        )
+        assert f_none.face_valid is False
+        assert f_none.gating_reason == "invalid_landmarks"
+        # Must hold last valid values
+        assert f_none.ear_avg == pytest.approx(saved_ear)
+        assert f_none.head_yaw == 12.0
+        assert f_none.head_pitch == 5.0
+        assert f_none.head_roll == -3.0
+
+        # Now test with all-zeros landmarks
+        lms_zero = np.zeros((478, 3), dtype=np.float64)
+        f_zero = ext.compute(
+            landmarks=lms_zero, timestamp=1.066, frame_id=3, face_valid=True,
+            head_yaw=0.0, head_pitch=0.0, head_roll=0.0
+        )
+        assert f_zero.face_valid is False
+        assert f_zero.gating_reason == "invalid_landmarks"
+        assert f_zero.ear_avg == pytest.approx(saved_ear)
+        assert f_zero.head_yaw == 12.0
+        assert f_zero.head_pitch == 5.0
+        assert f_zero.head_roll == -3.0
+
+    def test_imu_gate_missing_tvec_does_not_corrupt_dt_or_false_freeze(self):
+        """IMU gate must not corrupt dt or trigger false shock freezes after gaps in tracking."""
+        gate = SoftwareIMUGate()
+        t = 0.0
+        dt = 0.033
+
+        # 5 stationary frames
+        for _ in range(5):
+            res = gate.update(t, np.array([0.0, 0.0, 500.0]))
+            assert res is False
+            t += dt
+
+        # 4 missing frames (tvec=None)
+        for _ in range(4):
+            res = gate.update(t, None)
+            assert res is False
+            t += dt
+
+        # Gentle motion frame: should not false freeze
+        res = gate.update(t, np.array([1.0, 0.0, 500.0]))
+        assert res is False
+
+    def test_head_pose_gate_holds_last_valid_euler_on_no_pose(self):
+        """HeadPoseGate must hold last valid Euler angles when PnP loses tracking (euler=None)."""
+        gate = HeadPoseGate()
+
+        # Valid pose
+        state1 = gate.check((5.0, 10.0, -2.0))
+        assert state1.face_valid is True
+        assert state1.pitch == 5.0
+        assert state1.yaw == 10.0
+        assert state1.roll == -2.0
+
+        # Lost tracking (None)
+        state2 = gate.check(None)
+        assert state2.face_valid is False
+        assert state2.gating_reason == "no_pose"
+        assert state2.pitch == 5.0
+        assert state2.yaw == 10.0
+        assert state2.roll == -2.0
+
+        # Reset clears held values
+        gate.reset()
+        state3 = gate.check(None)
+        assert state3.face_valid is False
+        assert state3.gating_reason == "no_pose"
+        assert state3.pitch == 0.0
+        assert state3.yaw == 0.0
+        assert state3.roll == 0.0
+
+    def test_pipeline_config_from_json(self, tmp_path):
+        """PipelineConfig.from_json must load known fields, ignore unknown fields, and preserve defaults."""
+        cfg_file = tmp_path / "test_config.json"
+        data = {
+            "camera_source": 2,
+            "ear_blink_threshold": 0.22,
+            "unexpected_future_key": True,
+        }
+        cfg_file.write_text(json.dumps(data))
+
+        cfg = PipelineConfig.from_json(str(cfg_file))
+        assert cfg.camera_source == 2
+        assert cfg.ear_blink_threshold == 0.22
+        # Check defaults are preserved
+        assert cfg.frame_width == 1280
+        assert cfg.frame_height == 720
+        assert cfg.max_faces == 1
+
 

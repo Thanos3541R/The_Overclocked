@@ -79,6 +79,9 @@ class FrameCapture:
 
         self._frame_count = 0
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._raw_frame_seq: int = 1
+        self._consumed_frame_seq: int = 0
         self._running = False
         self._latest_frame: Optional[np.ndarray] = test_frame.copy()
         self._thread: Optional[threading.Thread] = None
@@ -102,8 +105,10 @@ class FrameCapture:
             if not ret or frame is None:
                 time.sleep(0.005)
                 continue
-            with self._lock:
+            with self._condition:
                 self._latest_frame = frame
+                self._raw_frame_seq += 1
+                self._condition.notify_all()
             time.sleep(0.001)
 
     def read(self) -> Optional[np.ndarray]:
@@ -122,8 +127,13 @@ class FrameCapture:
             self._frame_count += 1
             return frame
 
-        with self._lock:
+        with self._condition:
+            if self._raw_frame_seq == self._consumed_frame_seq and self._running:
+                # Wait up to one frame interval (max 50ms) for a fresh hardware frame
+                wait_timeout = min(0.05, 1.5 / max(self.fps, 15.0))
+                self._condition.wait(timeout=wait_timeout)
             frame = self._latest_frame.copy() if self._latest_frame is not None else None
+            self._consumed_frame_seq = self._raw_frame_seq
 
         if frame is None:
             return None
@@ -145,7 +155,9 @@ class FrameCapture:
 
     def release(self):
         """Release the video capture resource and background thread."""
-        self._running = False
+        with self._condition:
+            self._running = False
+            self._condition.notify_all()
         if hasattr(self, "_thread") and self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=0.5)
         if hasattr(self, "cap") and self.cap.isOpened():

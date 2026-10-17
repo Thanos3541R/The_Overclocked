@@ -57,6 +57,7 @@ class SoftwareIMUGate:
         self.last_euler: Optional[np.ndarray] = None
         self.last_timestamp: Optional[float] = None
         self._freeze_until: float = 0.0
+        self._missing_frames: int = 0
         self._history: Deque[Tuple[float, np.ndarray]] = deque(maxlen=self.window_size)
 
     @staticmethod
@@ -132,10 +133,17 @@ class SoftwareIMUGate:
             False if operating normally.
         """
         if tvec is None:
-            self.last_timestamp = timestamp
+            self._missing_frames += 1
+            if self._missing_frames > 2 or (self.last_timestamp is not None and (timestamp - self.last_timestamp) > 0.5):
+                # Pose lost for multiple frames: clear derivative history so re-acquisition re-anchors cleanly
+                self.t_smooth_prev = None
+                self.t_vel_prev = None
+                self.last_euler = None
+                self._history.clear()
             return timestamp < self._freeze_until
 
         pos = np.asarray(tvec, dtype=np.float64).flatten()[:3]
+        self._missing_frames = 0
 
         if self.last_timestamp is None or self.t_smooth_prev is None:
             self.t_smooth_prev = pos.copy()
@@ -145,6 +153,13 @@ class SoftwareIMUGate:
                 self.last_euler = np.asarray(euler_angles, dtype=np.float64).copy()
             self.last_timestamp = timestamp
             return False
+
+        if (timestamp - self.last_timestamp) > 0.5:
+            self.t_smooth_prev = pos.copy()
+            self._history.clear()
+            self._history.append((timestamp, self.t_smooth_prev.copy()))
+            self.last_timestamp = timestamp
+            return timestamp < self._freeze_until
 
         dt = max(timestamp - self.last_timestamp, 1e-4)
 
@@ -194,4 +209,5 @@ class SoftwareIMUGate:
         self.last_euler = None
         self.last_timestamp = None
         self._freeze_until = 0.0
+        self._missing_frames = 0
         self._history.clear()

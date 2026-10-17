@@ -13,12 +13,14 @@ import os
 import sys
 import cv2
 import numpy as np
+from typing import Optional
 
 from pipeline.preprocessing import LightingNormalizer
 from pipeline.face_mesh_detector import FaceMeshDetector
 from pipeline.pnp_normalizer import PnPNormalizer
 from pipeline.feature_extractor import FeatureExtractor
 from pipeline.classifier import ImpairmentClassifier, ImpairmentAssessment
+from config import PipelineConfig, DEFAULT_CONFIG
 from utils.landmarks import (
     RIGHT_EYE_EAR_FLAT, LEFT_EYE_EAR_FLAT,
     RIGHT_IRIS_CENTER, LEFT_IRIS_CENTER,
@@ -40,6 +42,8 @@ def parse_args():
                         help="Path to save annotated inspection output")
     parser.add_argument("--headless", action="store_true",
                         help="Do not display OpenCV popup window")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Optional JSON configuration file path")
     return parser.parse_args()
 
 
@@ -160,7 +164,7 @@ def draw_static_annotation(frame: np.ndarray, landmarks: np.ndarray,
     return vis
 
 
-def inspect_image(image_path: str, output_path: str, headless: bool):
+def inspect_image(image_path: str, output_path: str, headless: bool, config: Optional[PipelineConfig] = None):
     """Run full inspection on a single static image."""
     if not os.path.exists(image_path):
         print(f"[Error] File not found: {image_path}")
@@ -171,13 +175,26 @@ def inspect_image(image_path: str, output_path: str, headless: bool):
         print(f"[Error] Could not read image: {image_path}")
         return
 
+    cfg = config if config is not None else DEFAULT_CONFIG
     h, w = frame.shape[:2]
     print(f"\n[DMS Inspector] Processing '{image_path}' ({w}x{h})...")
 
     # Initialize pipeline
-    prep = LightingNormalizer()
-    detector = FaceMeshDetector()
-    pnp = PnPNormalizer(w, h)
+    prep = LightingNormalizer(
+        clip_limit=cfg.clahe_clip_limit,
+        tile_grid_size=cfg.clahe_tile_grid,
+        low_light_threshold=cfg.low_light_threshold,
+        gamma_dark=cfg.gamma_dark,
+        gamma_dim=cfg.gamma_dim,
+    )
+    detector = FaceMeshDetector(
+        min_detection_confidence=cfg.min_detection_confidence,
+        min_tracking_confidence=cfg.min_tracking_confidence,
+        enable_adaptive_roi=cfg.enable_adaptive_roi,
+        roi_margin=cfg.roi_margin,
+        roi_alpha=cfg.roi_alpha,
+    )
+    pnp = PnPNormalizer(w, h, focal_length=cfg.focal_length_px, calibration_path=cfg.camera_calibration_path)
     classifier = ImpairmentClassifier()
 
     # Stage 1: Lighting normalization
@@ -222,13 +239,16 @@ def inspect_image(image_path: str, output_path: str, headless: bool):
     detector.close()
 
     if not headless:
-        cv2.imshow("DMS Driver Inspection", annotated)
-        print("[DMS Inspector] Press any key on the image window to close.")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        try:
+            cv2.imshow("DMS Driver Inspection", annotated)
+            print("[DMS Inspector] Press any key on the image window to close.")
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        except cv2.error as exc:
+            print(f"[DMS Inspector] OpenCV GUI error: {exc}. Continuing in headless mode.")
 
 
-def capture_from_webcam(output_path: str, headless: bool):
+def capture_from_webcam(output_path: str, headless: bool, config: Optional[PipelineConfig] = None):
     """Capture a live frame from webcam and run diagnostic inspection."""
     print("[DMS Inspector] Initializing camera for snapshot capture...")
     cap = cv2.VideoCapture(0)
@@ -248,18 +268,24 @@ def capture_from_webcam(output_path: str, headless: bool):
     raw_snapshot_path = "captured_snapshot.jpg"
     cv2.imwrite(raw_snapshot_path, frame)
     print(f"[DMS Inspector] Snapshot captured and saved to '{raw_snapshot_path}'")
-    inspect_image(raw_snapshot_path, output_path, headless)
+    inspect_image(raw_snapshot_path, output_path, headless, config=config)
 
 
 def main():
     args = parse_args()
+    if args.config:
+        config = PipelineConfig.from_json(args.config)
+    else:
+        config = DEFAULT_CONFIG
+
     if args.image:
-        inspect_image(args.image, args.output, args.headless)
+        inspect_image(args.image, args.output, args.headless, config=config)
     elif args.capture:
-        capture_from_webcam(args.output, args.headless)
+        capture_from_webcam(args.output, args.headless, config=config)
     elif args.video:
         print("[DMS Inspector] Video inspection mode. For full continuous stream, use:")
-        print(f"  python main.py --source \"{args.video}\" --save-csv")
+        config_arg = f" --config \"{args.config}\"" if args.config else ""
+        print(f"  python main.py --source \"{args.video}\"{config_arg} --save-csv")
 
 
 if __name__ == "__main__":

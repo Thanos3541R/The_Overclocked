@@ -83,6 +83,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-axes", action="store_true",
         help="Hide head pose axes in visualization")
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Optional JSON configuration file path")
     return parser.parse_args()
 
 
@@ -218,11 +221,19 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     try:
         while capture.is_open():
             if paused:
-                key = cv2.waitKey(50) & 0xFF
-                if key in (ord('p'), ord('P')):
-                    paused = False
-                elif key in (ord('q'), ord('Q')):
-                    break
+                if not args.headless:
+                    try:
+                        key = cv2.waitKey(50) & 0xFF
+                        if key in (ord('p'), ord('P')):
+                            paused = False
+                        elif key in (ord('q'), ord('Q')):
+                            break
+                    except cv2.error as exc:
+                        print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
+                        args.headless = True
+                        paused = False
+                else:
+                    time.sleep(0.05)
                 continue
 
             frame = capture.read()
@@ -244,8 +255,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             if landmarks is None:
                 # Invalidate pose and log held-last gated frame so frame_ids never drop
                 normalizer.reset()
+                imu_gate.reset()
+                filter_bank = None
                 features = extractor.compute(
-                    landmarks=np.zeros((478, 3), dtype=np.float64),
+                    landmarks=None,
                     timestamp=timestamp,
                     frame_id=frame_id,
                     face_valid=False,
@@ -257,16 +270,20 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     csv_logger.log(features)
 
                 if not args.headless:
-                    viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                    visualizer.draw(viz_frame, None, features, None, pnp_success=False)
-                    cv2.imshow("Driver Monitor", viz_frame)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key in (ord('q'), ord('Q')):
-                        break
-                    elif key in (ord('p'), ord('P')):
-                        paused = True
-                    elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
-                        visualizer.cycle_overlay_mode()
+                    try:
+                        viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                        visualizer.draw(viz_frame, None, features, None, pnp_success=False)
+                        cv2.imshow("Driver Monitor", viz_frame)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key in (ord('q'), ord('Q')):
+                            break
+                        elif key in (ord('p'), ord('P')):
+                            paused = True
+                        elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
+                            visualizer.cycle_overlay_mode()
+                    except cv2.error as exc:
+                        print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
+                        args.headless = True
                 continue
 
             # ── Stage 3: Split-Bandwidth 1-Euro Temporal Filtering ──
@@ -336,16 +353,20 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
             # ── Visualization ──
             if not args.headless:
-                viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                visualizer.draw(viz_frame, smooth_landmarks, features, normalizer, pnp_success=pnp_success)
-                cv2.imshow("Driver Monitor", viz_frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord('q'), ord('Q')):
-                    break
-                elif key in (ord('p'), ord('P')):
-                    paused = True
-                elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
-                    visualizer.cycle_overlay_mode()
+                try:
+                    viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    visualizer.draw(viz_frame, smooth_landmarks, features, normalizer, pnp_success=pnp_success)
+                    cv2.imshow("Driver Monitor", viz_frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (ord('q'), ord('Q')):
+                        break
+                    elif key in (ord('p'), ord('P')):
+                        paused = True
+                    elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
+                        visualizer.cycle_overlay_mode()
+                except cv2.error as exc:
+                    print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
+                    args.headless = True
 
     except KeyboardInterrupt:
         print("\n[DMS] Interrupted by user")
@@ -357,15 +378,21 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             csv_logger.close()
             print(f"[DMS] CSV saved to: {csv_logger.filepath}")
         if not args.headless:
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
 
 
 def main():
     """Entry point."""
     args = parse_args()
 
-    # Build config from defaults (could be extended to load from YAML/JSON)
-    config = DEFAULT_CONFIG
+    # Load configuration from file or use defaults
+    if args.config:
+        config = PipelineConfig.from_json(args.config)
+    else:
+        config = DEFAULT_CONFIG
 
     run_pipeline(config, args)
 

@@ -14,6 +14,7 @@ Critical implementation details:
 """
 import logging
 import os
+import shutil
 import urllib.request
 import cv2
 import numpy as np
@@ -339,6 +340,46 @@ class FaceMeshDetector:
 
     get_driver_quadrant_bounds = staticmethod(AdaptiveROITracker.get_driver_quadrant_bounds)
 
+    @staticmethod
+    def _ensure_model_bundle(model_path: str, url: str = MODEL_URL, min_bytes: int = 1_000_000, timeout_sec: float = 15.0) -> None:
+        """Ensure the MediaPipe model bundle exists and is valid.
+
+        Performs atomic download via temporary file and validates payload integrity.
+        """
+        if os.path.exists(model_path) and os.path.getsize(model_path) >= min_bytes:
+            return
+
+        os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
+        tmp_path = model_path + ".tmp"
+        try:
+            print("[DMS] Downloading face_landmarker.task model bundle...")
+            with urllib.request.urlopen(url, timeout=timeout_sec) as response:
+                with open(tmp_path, "wb") as f_out:
+                    shutil.copyfileobj(response, f_out)
+
+            if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < min_bytes:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                raise RuntimeError("Downloaded model file is incomplete or corrupted.")
+
+            os.replace(tmp_path, model_path)
+            print(f"[DMS] Model ready at {model_path}")
+        except Exception as exc:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise RuntimeError(
+                f"[DMS] MediaPipe model bundle missing or corrupted at '{model_path}' "
+                f"and offline/network download failed ({exc}). "
+                f"Place a valid 'face_landmarker.task' file in '{os.path.dirname(model_path)}' "
+                f"for offline execution."
+            ) from exc
+
     def __init__(self, max_faces: int = 1,
                  refine_landmarks: bool = True,
                  min_detection_confidence: float = 0.35,
@@ -385,10 +426,7 @@ class FaceMeshDetector:
             os.makedirs(model_dir, exist_ok=True)
             model_path = os.path.join(model_dir, "face_landmarker.task")
 
-            if not os.path.exists(model_path) or os.path.getsize(model_path) == 0:
-                print("[DMS] Downloading face_landmarker.task model bundle...")
-                urllib.request.urlretrieve(MODEL_URL, model_path)
-                print(f"[DMS] Model ready at {model_path}")
+            self._ensure_model_bundle(model_path, MODEL_URL)
 
             base_options = python.BaseOptions(model_asset_path=model_path)
             options = vision.FaceLandmarkerOptions(
@@ -539,3 +577,7 @@ class FaceMeshDetector:
 
     def __exit__(self, *args):
         self.close()
+
+
+_ensure_model_bundle = FaceMeshDetector._ensure_model_bundle
+

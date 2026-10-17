@@ -82,6 +82,8 @@ class FrameCapture:
         self._condition = threading.Condition(self._lock)
         self._raw_frame_seq: int = 1
         self._consumed_frame_seq: int = 0
+        self._latest_frame_timestamp: float = time.perf_counter()
+        self.last_frame_timestamp: float = self._latest_frame_timestamp
         self._running = False
         self._latest_frame: Optional[np.ndarray] = test_frame.copy()
         self._thread: Optional[threading.Thread] = None
@@ -107,6 +109,7 @@ class FrameCapture:
                 continue
             with self._condition:
                 self._latest_frame = frame
+                self._latest_frame_timestamp = time.perf_counter()
                 self._raw_frame_seq += 1
                 self._condition.notify_all()
             time.sleep(0.001)
@@ -124,6 +127,7 @@ class FrameCapture:
                 return None
             if self.is_grayscale and len(frame.shape) == 3:
                 frame = frame[:, :, 0]
+            self.last_frame_timestamp = time.perf_counter()
             self._frame_count += 1
             return frame
 
@@ -133,6 +137,7 @@ class FrameCapture:
                 wait_timeout = min(0.05, 1.5 / max(self.fps, 15.0))
                 self._condition.wait(timeout=wait_timeout)
             frame = self._latest_frame.copy() if self._latest_frame is not None else None
+            self.last_frame_timestamp = self._latest_frame_timestamp
             self._consumed_frame_seq = self._raw_frame_seq
 
         if frame is None:

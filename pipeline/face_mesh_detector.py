@@ -18,7 +18,13 @@ import shutil
 import urllib.request
 import cv2
 import numpy as np
-import mediapipe as mp
+try:
+    import mediapipe as mp
+except ImportError as exc:
+    mp = None  # type: ignore
+    _MP_IMPORT_ERROR = exc
+else:
+    _MP_IMPORT_ERROR = None
 from typing import Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -352,6 +358,7 @@ class FaceMeshDetector:
         os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
         tmp_path = model_path + ".tmp"
         try:
+            logger.info("[DMS] Downloading face_landmarker.task model bundle...")
             print("[DMS] Downloading face_landmarker.task model bundle...")
             with urllib.request.urlopen(url, timeout=timeout_sec) as response:
                 with open(tmp_path, "wb") as f_out:
@@ -366,6 +373,7 @@ class FaceMeshDetector:
                 raise RuntimeError("Downloaded model file is incomplete or corrupted.")
 
             os.replace(tmp_path, model_path)
+            logger.info("[DMS] Model ready at %s", model_path)
             print(f"[DMS] Model ready at {model_path}")
         except Exception as exc:
             if os.path.exists(tmp_path):
@@ -397,6 +405,12 @@ class FaceMeshDetector:
             roi_margin: Margin multiplier for adaptive ROI crop.
             roi_alpha: EMA smoothing coefficient for adaptive ROI tracker (default: 0.15).
         """
+        if mp is None:
+            raise RuntimeError(
+                "[DMS] MediaPipe is not installed or failed to import. "
+                "Install it via: pip install 'mediapipe>=0.10.14'"
+            ) from _MP_IMPORT_ERROR
+
         self._n_landmarks = 478 if refine_landmarks else 468
         self._mode = "unknown"
         self.enable_adaptive_roi = enable_adaptive_roi

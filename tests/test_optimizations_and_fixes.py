@@ -653,4 +653,97 @@ class TestExternalReviewFixes:
         assert cfg.frame_height == 720
         assert cfg.max_faces == 1
 
+    def test_all_landmark_indices_within_mediapipe_bounds(self):
+        """All defined landmark groups must contain valid integer indices within 0 <= idx < 478
+        (and < 468 for non-iris facial landmarks)."""
+        from utils.landmarks import (
+            PNP_LANDMARK_INDICES,
+            PNP_LANDMARK_INDICES_8,
+            RIGHT_EYE_EAR_FLAT,
+            LEFT_EYE_EAR_FLAT,
+            RIGHT_EYE_CONTOUR,
+            LEFT_EYE_CONTOUR,
+            DYNAMIC_EYELID_INDICES,
+            DYNAMIC_IRIS_INDICES,
+            FOREHEAD_CONTOUR,
+            FOREHEAD_PATCH,
+            FULL_CHEEK_LANDMARKS,
+            VASODILATION_LANDMARKS,
+            EYEBROW_ARCH_LANDMARKS,
+        )
+
+        non_iris_groups = [
+            PNP_LANDMARK_INDICES,
+            PNP_LANDMARK_INDICES_8,
+            RIGHT_EYE_EAR_FLAT,
+            LEFT_EYE_EAR_FLAT,
+            RIGHT_EYE_CONTOUR,
+            LEFT_EYE_CONTOUR,
+            DYNAMIC_EYELID_INDICES,
+            FOREHEAD_CONTOUR,
+            FOREHEAD_PATCH,
+            FULL_CHEEK_LANDMARKS,
+            VASODILATION_LANDMARKS,
+            EYEBROW_ARCH_LANDMARKS,
+        ]
+
+        for group in non_iris_groups:
+            for idx in group:
+                assert isinstance(idx, (int, np.integer))
+                assert 0 <= idx < 468, f"Index {idx} out of non-iris bounds [0, 468)"
+
+        for idx in DYNAMIC_IRIS_INDICES:
+            assert isinstance(idx, (int, np.integer))
+            assert 0 <= idx < 478, f"Index {idx} out of bounds [0, 478)"
+            assert 468 <= idx < 478, f"Iris index {idx} not in range [468, 478)"
+
+    def test_main_cli_overlay_mode_and_mesh_style_resolution(self):
+        """CLI arguments for overlay mode and mesh style must resolve cleanly without SystemExit."""
+        import main
+
+        test_cases = [
+            ([], "regions"),
+            (["--mesh-style", "off"], "off"),
+            (["--mesh-style", "contours"], "regions"),
+            (["--overlay-mode", "full"], "full"),
+            (["--no-mesh"], "off"),
+        ]
+
+        for cli_args, expected_mode in test_cases:
+            with patch.object(sys, "argv", ["main.py"] + cli_args):
+                args = main.parse_args()
+                if args.no_mesh:
+                    resolved = "off"
+                elif getattr(args, "mesh_style", None) is not None:
+                    resolved = "regions" if args.mesh_style in ("contours", "dots") else args.mesh_style
+                else:
+                    resolved = getattr(args, "overlay_mode", "regions")
+                assert resolved == expected_mode
+
+    def test_mediapipe_missing_import_guard(self):
+        """FaceMeshDetector must raise actionable RuntimeError when mediapipe is None."""
+        with patch("pipeline.face_mesh_detector.mp", None):
+            with pytest.raises(RuntimeError) as exc_info:
+                FaceMeshDetector()
+            assert "MediaPipe is not installed or failed to import" in str(exc_info.value)
+
+    def test_frame_capture_timestamp_property(self):
+        """FrameCapture must maintain valid positive last_frame_timestamp on read."""
+        with patch("cv2.VideoCapture") as mock_cap_cls:
+            mock_inst = MagicMock()
+            mock_inst.isOpened.return_value = True
+            dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            mock_inst.read.return_value = (True, dummy_frame)
+            mock_inst.get.return_value = 30.0
+            mock_cap_cls.return_value = mock_inst
+
+            cap = FrameCapture(source="dummy_video.mp4")
+            t0 = cap.last_frame_timestamp
+            assert t0 > 0.0
+            frame = cap.read()
+            assert frame is not None
+            assert cap.last_frame_timestamp >= t0
+            cap.release()
+
+
 

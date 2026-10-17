@@ -15,8 +15,11 @@ Usage:
 """
 import argparse
 import csv
+import logging
 import sys
 import time
+
+logger = logging.getLogger(__name__)
 
 # Fast pre-flight Python version sanity check
 if sys.version_info < (3, 9):
@@ -72,7 +75,7 @@ def parse_args() -> argparse.Namespace:
         "--overlay-mode", type=str, choices=["off", "regions", "full"], default="regions",
         help="HUD landmark overlay mode: 'regions' (default key regions), 'full' (full mesh), 'off'")
     parser.add_argument(
-        "--mesh-style", type=str, choices=["full", "contours", "dots", "off"], default="regions",
+        "--mesh-style", type=str, choices=["regions", "full", "contours", "dots", "off"], default=None,
         help="Legacy alias for --overlay-mode")
     parser.add_argument(
         "--no-mesh", action="store_true",
@@ -194,7 +197,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     filter_bank: Optional[OneEuroFilterBank] = None
 
     # Visualization
-    overlay_mode = "off" if args.no_mesh else getattr(args, "overlay_mode", args.mesh_style)
+    if args.no_mesh:
+        overlay_mode = "off"
+    elif getattr(args, "mesh_style", None) is not None:
+        overlay_mode = "regions" if args.mesh_style in ("contours", "dots") else args.mesh_style
+    else:
+        overlay_mode = getattr(args, "overlay_mode", "regions")
     visualizer = Visualizer(
         overlay_mode=overlay_mode,
         show_iris=not args.no_iris,
@@ -370,6 +378,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
     except KeyboardInterrupt:
         print("\n[DMS] Interrupted by user")
+    except Exception as exc:
+        logger.exception("[DMS] Unexpected error in pipeline loop: %s", exc)
+        raise
     finally:
         print(f"[DMS] Processed {frame_id} frames")
         capture.release()

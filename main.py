@@ -72,10 +72,10 @@ def parse_args() -> argparse.Namespace:
         "--csv-path", type=str, default="output_features.csv",
         help="CSV output file path (default: output_features.csv)")
     parser.add_argument(
-        "--overlay-mode", type=str, choices=["off", "regions", "full"], default="regions",
-        help="HUD landmark overlay mode: 'regions' (default key regions), 'full' (full mesh), 'off'")
+        "--overlay-mode", type=str, choices=["off", "regions", "full", "solid"], default="regions",
+        help="HUD landmark overlay mode: 'regions' (default key regions), 'full' (full mesh), 'solid' (color-filled facial parts), 'off'")
     parser.add_argument(
-        "--mesh-style", type=str, choices=["regions", "full", "contours", "dots", "off"], default=None,
+        "--mesh-style", type=str, choices=["regions", "full", "solid", "contours", "dots", "off"], default=None,
         help="Legacy alias for --overlay-mode")
     parser.add_argument(
         "--no-mesh", action="store_true",
@@ -219,7 +219,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
           f"@ {capture.fps:.1f} fps (est.)")
     print(f"[DMS] Input type: {'Grayscale (NIR)' if capture.is_grayscale else 'BGR (RGB camera)'}")
     if not args.headless:
-        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'v' to cycle overlay (Key Regions -> Full Mesh -> Off)")
+        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'v' to cycle overlay (Regions -> Full -> Solid -> Off)")
+        print("[DMS] Solid mode: [1] Forehead [2] Cheeks [3] Chin [4] Lips [5] Eyes [6] Nose [7] Brows [8] Face | [0] Toggle all")
 
     # ── Main loop ──
     paused = False
@@ -372,6 +373,24 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         paused = True
                     elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
                         visualizer.cycle_overlay_mode()
+                    elif key == ord('0'):
+                        visualizer.toggle_all_solid_parts()
+                    elif key == ord('1') or key in (ord('f'), ord('F')):
+                        visualizer.toggle_solid_part('forehead')
+                    elif key == ord('2') or key in (ord('c'), ord('C')):
+                        visualizer.toggle_solid_part('cheeks')
+                    elif key == ord('3'):
+                        visualizer.toggle_solid_part('chin')
+                    elif key == ord('4') or key in (ord('l'), ord('L')):
+                        visualizer.toggle_solid_part('lips')
+                    elif key == ord('5') or key in (ord('e'), ord('E')):
+                        visualizer.toggle_solid_part('eyes')
+                    elif key == ord('6') or key in (ord('n'), ord('N')):
+                        visualizer.toggle_solid_part('nose')
+                    elif key == ord('7') or key in (ord('b'), ord('B')):
+                        visualizer.toggle_solid_part('eyebrows')
+                    elif key == ord('8'):
+                        visualizer.toggle_solid_part('face')
                 except cv2.error as exc:
                     print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                     args.headless = True

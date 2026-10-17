@@ -705,7 +705,9 @@ class TestExternalReviewFixes:
             ([], "regions"),
             (["--mesh-style", "off"], "off"),
             (["--mesh-style", "contours"], "regions"),
+            (["--mesh-style", "solid"], "solid"),
             (["--overlay-mode", "full"], "full"),
+            (["--overlay-mode", "solid"], "solid"),
             (["--no-mesh"], "off"),
         ]
 

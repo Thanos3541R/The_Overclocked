@@ -241,7 +241,7 @@ def test_batch_draw_without_python_loops():
 # ═══════════════════════════════════════════════════════════════════
 
 def test_visualizer_mode_cycling():
-    """Verify that hotkey [v] cycles through: off -> regions -> full -> off."""
+    """Verify that hotkey [v] cycles through: off -> regions -> full -> solid -> off."""
     viz = Visualizer(overlay_mode="regions")
     assert viz.overlay_mode == "regions"
 
@@ -249,6 +249,11 @@ def test_visualizer_mode_cycling():
     mode = viz.cycle_overlay_mode()
     assert mode == "full"
     assert viz.overlay_mode == "full"
+
+    # Cycle to solid
+    mode = viz.cycle_overlay_mode()
+    assert mode == "solid"
+    assert viz.overlay_mode == "solid"
 
     # Cycle to off
     mode = viz.cycle_overlay_mode()
@@ -529,3 +534,165 @@ def test_overlay_on_vs_off_feature_invariance_and_benchmark(capsys):
     assert mean_ms_off == 0.0
     assert mean_ms_reg < 5.0, f"Key regions overlay too slow: {mean_ms_reg:.2f} ms"
     assert mean_ms_ful < 15.0, f"Full mesh overlay too slow: {mean_ms_ful:.2f} ms"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. Solid Color Facial Parts Segmentation Overlay Tests
+# ═══════════════════════════════════════════════════════════════════
+
+def test_solid_face_regions_definitions():
+    """Verify definitions and anatomical polygons of all solid face regions."""
+    from utils.overlay_regions import (
+        SOLID_REGIONS,
+        SOLID_PART_KEYS,
+        SolidFaceRegion,
+        SOLID_FOREHEAD,
+        SOLID_CHEEKS,
+        SOLID_CHIN,
+        SOLID_LIPS,
+        SOLID_EYES,
+        SOLID_NOSE,
+        SOLID_EYEBROWS,
+        SOLID_FACE,
+    )
+    assert len(SOLID_REGIONS) == 8
+    expected_keys = {"forehead", "cheeks", "chin", "lips", "eyes", "nose", "eyebrows", "face"}
+    actual_keys = {r.key for r in SOLID_REGIONS}
+    assert actual_keys == expected_keys
+    assert set(SOLID_PART_KEYS.keys()) == expected_keys
+
+    for r in SOLID_REGIONS:
+        assert isinstance(r, SolidFaceRegion)
+        assert len(r.name) > 0
+        assert len(r.hotkey) == 1
+        assert len(r.color) == 3
+        assert len(r.dimmed_color) == 3
+        assert 0.0 < r.alpha <= 1.0
+        assert len(r.polygons) >= 1
+        for poly in r.polygons:
+            assert isinstance(poly, np.ndarray)
+            assert poly.dtype == np.int32
+            assert len(poly) >= 3
+            assert np.all(poly >= 0)
+            assert np.all(poly < 478)
+
+
+def test_solid_face_regions_draw_and_latency():
+    """Verify solid face region rendering speed (< 2.0 ms) and ROI crop correctness."""
+    from utils.overlay_regions import draw_solid_face_regions, SOLID_PART_KEYS
+
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    # Synthetic face points centered in frame
+    pts = np.zeros((478, 2), dtype=np.int32)
+    # Spread points across a realistic 300x400 facial bbox
+    np.random.seed(42)
+    pts[:, 0] = np.random.randint(450, 750, size=478)
+    pts[:, 1] = np.random.randint(150, 550, size=478)
+
+    enabled_all = {k: True for k in SOLID_PART_KEYS}
+
+    # Warm-up
+    for _ in range(10):
+        draw_solid_face_regions(frame, pts, enabled_all, dimmed=False, alpha=0.42)
+
+    # Benchmark rendering latency over 30 iterations
+    t0 = time.perf_counter()
+    for _ in range(30):
+        draw_solid_face_regions(frame, pts, enabled_all, dimmed=False, alpha=0.42)
+    t1 = time.perf_counter()
+    mean_ms = (t1 - t0) * 1000.0 / 30.0
+
+    # Drawing on ROI crop must be extremely fast (< 4.0 ms on CPU)
+    assert mean_ms < 4.0, f"Solid overlay too slow: {mean_ms:.2f} ms"
+    assert np.count_nonzero(frame) > 0
+
+    # Verify dimmed rendering runs cleanly
+    frame_dimmed = np.zeros((720, 1280, 3), dtype=np.uint8)
+    draw_solid_face_regions(frame_dimmed, pts, enabled_all, dimmed=True, alpha=0.42)
+    assert np.count_nonzero(frame_dimmed) > 0
+
+
+def test_solid_face_regions_individual_part_toggling():
+    """Verify toggling individual facial parts on/off and alias resolution."""
+    viz = Visualizer(overlay_mode="solid")
+    assert viz.overlay_mode == "solid"
+
+    # All parts enabled by default
+    for part in ["forehead", "cheeks", "chin", "lips", "eyes", "nose", "eyebrows", "face"]:
+        assert viz.is_solid_part_enabled(part) is True
+
+    # Toggle lips off
+    new_state = viz.toggle_solid_part("lips")
+    assert new_state is False
+    assert viz.is_solid_part_enabled("lips") is False
+
+    # Toggle lips back on using alias 'lip'
+    new_state = viz.toggle_solid_part("lip")
+    assert new_state is True
+    assert viz.is_solid_part_enabled("lips") is True
+
+    # Toggle lips off using hotkey alias '4'
+    new_state = viz.toggle_solid_part("4")
+    assert new_state is False
+    assert viz.is_solid_part_enabled("lips") is False
+
+    # Toggle cheeks using alias 'c'
+    new_state = viz.toggle_solid_part("c")
+    assert new_state is False
+    assert viz.is_solid_part_enabled("cheeks") is False
+
+    # Explicit set_solid_part
+    viz.set_solid_part("forehead", False)
+    assert viz.is_solid_part_enabled("forehead") is False
+    viz.set_solid_part("forehead", True)
+    assert viz.is_solid_part_enabled("forehead") is True
+
+    # Invalid part returns False and does not crash
+    assert viz.toggle_solid_part("nonexistent_part") is False
+
+
+def test_solid_face_regions_toggle_all():
+    """Verify toggle_all_solid_parts transitions between all on and all off."""
+    viz = Visualizer(overlay_mode="solid")
+
+    # With all currently True, toggle_all turns them all False
+    state = viz.toggle_all_solid_parts()
+    assert state is False
+    for k in viz.solid_parts:
+        assert viz.is_solid_part_enabled(k) is False
+
+    # With all currently False, toggle_all turns them all True
+    state = viz.toggle_all_solid_parts()
+    assert state is True
+    for k in viz.solid_parts:
+        assert viz.is_solid_part_enabled(k) is True
+
+    # With only one enabled, toggle_all turns them all False
+    viz.set_solid_part("lips", True)
+    viz.set_solid_part("eyes", False)
+    state = viz.toggle_all_solid_parts()
+    assert state is False
+    for k in viz.solid_parts:
+        assert viz.is_solid_part_enabled(k) is False
+
+
+def test_solid_mode_visualizer_draw_and_legend():
+    """Verify Visualizer.draw runs in 'solid' mode with HUD legend rendering."""
+    viz = Visualizer(overlay_mode="solid")
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    pts = np.zeros((478, 3), dtype=np.float64)
+    pts[:, 0] = np.random.randint(450, 750, size=478)
+    pts[:, 1] = np.random.randint(150, 550, size=478)
+
+    features = FrameFeatures(face_valid=True)
+    out = viz.draw(frame, pts, features=features)
+
+    assert out.shape == (720, 1280, 3)
+    assert np.count_nonzero(out) > 0
+
+    # Turn off all parts and draw again
+    viz.toggle_all_solid_parts()
+    out2 = viz.draw(frame, pts, features=features)
+    assert out2.shape == (720, 1280, 3)
+

@@ -9,7 +9,7 @@ Draws real-time annotations on the camera feed:
   - Gating status border (green = valid, red = gated/frozen)
 """
 import time
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
@@ -23,13 +23,16 @@ from utils.overlay_regions import (
     KEY_REGIONS,
     LEFT_IRIS_CORNERS_REGION,
     RIGHT_IRIS_CORNERS_REGION,
+    SOLID_PART_KEYS,
+    SOLID_REGIONS,
+    draw_solid_face_regions,
 )
 
 
 class Visualizer:
     """Debug overlay renderer for the DMS pipeline with vectorized batch drawing."""
 
-    OVERLAY_MODES = ("off", "regions", "full")
+    OVERLAY_MODES = ("off", "regions", "full", "solid")
 
     def __init__(
         self,
@@ -38,21 +41,25 @@ class Visualizer:
         show_pose_axes: bool = True,
         show_mesh: bool = True,
         mesh_style: Optional[str] = None,
+        solid_alpha: float = 0.42,
     ):
         """Initialize HUD visualizer.
 
         Args:
-            overlay_mode: Initial overlay mode: 'off', 'regions' (default), or 'full'.
+            overlay_mode: Initial overlay mode: 'off', 'regions' (default), 'full', or 'solid'.
             show_iris: If True, draws iris center crosshairs.
             show_pose_axes: If True, draws 3D head pose coordinate axes.
             show_mesh: Legacy parameter; if False, forces overlay_mode='off'.
             mesh_style: Legacy parameter; mapped to overlay_mode if provided.
+            solid_alpha: Transparency alpha for solid color facial regions (default: 0.42).
         """
         if mesh_style is not None:
             if mesh_style in ("off", "none"):
                 overlay_mode = "off"
             elif mesh_style in ("full", "tesselation"):
                 overlay_mode = "full"
+            elif mesh_style in ("solid", "color", "mask", "facemask"):
+                overlay_mode = "solid"
             else:
                 overlay_mode = "regions"
         elif not show_mesh:
@@ -64,6 +71,19 @@ class Visualizer:
         self.overlay_mode = overlay_mode
         self.show_iris = show_iris
         self.show_pose_axes = show_pose_axes
+        self.solid_alpha = float(solid_alpha)
+
+        # Dictionary of individual solid facial part toggles (all enabled by default)
+        self.solid_parts: Dict[str, bool] = {
+            "forehead": True,
+            "cheeks": True,
+            "chin": True,
+            "lips": True,
+            "eyes": True,
+            "nose": True,
+            "eyebrows": True,
+            "face": True,
+        }
 
         self._prev_time = time.time()
         self._fps = 0.0
@@ -96,6 +116,8 @@ class Visualizer:
             self.overlay_mode = style
         elif style in ("contours", "dots"):
             self.overlay_mode = "regions"
+        elif style in ("solid", "color", "mask", "facemask"):
+            self.overlay_mode = "solid"
         else:
             self.overlay_mode = "off"
 
@@ -109,8 +131,91 @@ class Visualizer:
         """Smoothed landmark overlay rendering duration in milliseconds."""
         return self._overlay_ms_ema
 
+    @staticmethod
+    def _normalize_part_name(name: str) -> str:
+        """Map user / key input aliases to canonical solid part keys."""
+        k = str(name).strip().lower().replace(" ", "_").replace("-", "_")
+        aliases = {
+            "1": "forehead",
+            "f": "forehead",
+            "head": "forehead",
+            "forehead": "forehead",
+            "2": "cheeks",
+            "c": "cheeks",
+            "cheek": "cheeks",
+            "cheeks": "cheeks",
+            "3": "chin",
+            "chin": "chin",
+            "jaw": "chin",
+            "4": "lips",
+            "l": "lips",
+            "lip": "lips",
+            "mouth": "lips",
+            "lips": "lips",
+            "5": "eyes",
+            "e": "eyes",
+            "eye": "eyes",
+            "eyes": "eyes",
+            "6": "nose",
+            "n": "nose",
+            "nose": "nose",
+            "7": "eyebrows",
+            "b": "eyebrows",
+            "brow": "eyebrows",
+            "brows": "eyebrows",
+            "eyebrow": "eyebrows",
+            "eyebrows": "eyebrows",
+            "8": "face",
+            "oval": "face",
+            "face_oval": "face",
+            "facemask": "face",
+            "face": "face",
+        }
+        return aliases.get(k, k)
+
+    def toggle_solid_part(self, part_name: str) -> bool:
+        """Toggle an individual facial part solid color overlay on/off.
+
+        Args:
+            part_name: Part key, name, number, or alias (e.g. 'forehead', '1', 'lips', 'l').
+
+        Returns:
+            New boolean status of the part.
+        """
+        canonical = self._normalize_part_name(part_name)
+        if canonical not in self.solid_parts:
+            return False
+        self.solid_parts[canonical] = not self.solid_parts[canonical]
+        return self.solid_parts[canonical]
+
+    def set_solid_part(self, part_name: str, enabled: bool) -> None:
+        """Explicitly set an individual facial part solid color state."""
+        canonical = self._normalize_part_name(part_name)
+        if canonical in self.solid_parts:
+            self.solid_parts[canonical] = bool(enabled)
+
+    def is_solid_part_enabled(self, part_name: str) -> bool:
+        """Check if an individual facial part solid color is enabled."""
+        canonical = self._normalize_part_name(part_name)
+        return self.solid_parts.get(canonical, False)
+
+    def toggle_all_solid_parts(self) -> bool:
+        """Toggle all solid facial parts simultaneously.
+
+        If any part is currently ON, turns all OFF.
+        If all parts are currently OFF, turns all ON.
+
+        Returns:
+            True if any part is now enabled, False if all disabled.
+        """
+        any_enabled = any(self.solid_parts.values())
+        new_state = not any_enabled
+        for k in self.solid_parts:
+            self.solid_parts[k] = new_state
+        return new_state
+
     def cycle_overlay_mode(self) -> str:
-        """Cycle overlay mode: off -> regions -> full -> off.
+        """Cycle overlay mode: off -> regions -> full -> solid -> off.
 
         Returns:
             New overlay mode string.
@@ -168,13 +273,17 @@ class Visualizer:
             pts = np.rint(landmarks[:, :2]).astype(np.int32)
             dimmed = is_gated
 
-            # Full mesh wireframe if active
-            if self.overlay_mode == "full":
-                FULL_MESH_REGION.draw(frame, pts, dimmed=dimmed)
+            # Overlay rendering by mode
+            if self.overlay_mode == "solid":
+                draw_solid_face_regions(frame, pts, self.solid_parts, dimmed=dimmed, alpha=self.solid_alpha)
+            else:
+                # Full mesh wireframe if active
+                if self.overlay_mode == "full":
+                    FULL_MESH_REGION.draw(frame, pts, dimmed=dimmed)
 
-            # Key regions (batch cv2.polylines per region)
-            for region in KEY_REGIONS:
-                region.draw(frame, pts, dimmed=dimmed)
+                # Key regions (batch cv2.polylines per region)
+                for region in KEY_REGIONS:
+                    region.draw(frame, pts, dimmed=dimmed)
 
             # Iris gaze crosshair markers
             if self.show_iris and len(pts) > max(LEFT_IRIS_CENTER, RIGHT_IRIS_CENTER):
@@ -221,8 +330,59 @@ class Visualizer:
         return frame
 
     def _draw_legend(self, frame: np.ndarray, is_gated: bool) -> None:
-        """Render small color-coded region legend in top-right corner."""
+        """Render color-coded region or solid parts legend in top-right corner."""
         h, w = frame.shape[:2]
+
+        if self.overlay_mode == "solid":
+            box_w = 205
+            box_x = max(10, w - box_w - 12)
+            box_y = 12
+            n_items = len(SOLID_REGIONS)
+            box_h = 28 + n_items * 18 + 22
+
+            # Background box
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (box_x, box_y), (box_x + box_w, box_y + box_h), (18, 18, 18), -1)
+            cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+            cv2.rectangle(frame, (box_x, box_y), (box_x + box_w, box_y + box_h), (80, 80, 80), 1)
+
+            # Header title
+            cv2.putText(frame, "LEGEND [SOLID PARTS]", (box_x + 8, box_y + 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
+
+            # Solid parts with hotkey badge, swatch, name, and ON/OFF indicator
+            for idx, reg in enumerate(SOLID_REGIONS):
+                item_y = box_y + 36 + idx * 18
+                is_on = self.solid_parts.get(reg.key, True)
+                swatch_color = (reg.dimmed_color if is_gated else reg.color) if is_on else (40, 40, 40)
+                border_color = (180, 180, 180) if is_on else (70, 70, 70)
+
+                # Hotkey badge [1]..[8]
+                badge = f"[{reg.hotkey}]"
+                cv2.putText(frame, badge, (box_x + 6, item_y - 1),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.34, (200, 200, 200), 1, cv2.LINE_AA)
+
+                # Swatch
+                cv2.rectangle(frame, (box_x + 28, item_y - 10), (box_x + 40, item_y + 1), swatch_color, -1)
+                cv2.rectangle(frame, (box_x + 28, item_y - 10), (box_x + 40, item_y + 1), border_color, 1)
+
+                # Label
+                text_color = (220, 220, 220) if is_on else (110, 110, 110)
+                cv2.putText(frame, reg.name, (box_x + 46, item_y - 1),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.36, text_color, 1, cv2.LINE_AA)
+
+                # Status pill (ON / OFF)
+                status_text = "ON" if is_on else "OFF"
+                status_color = (0, 240, 100) if is_on else (120, 120, 120)
+                cv2.putText(frame, status_text, (box_x + box_w - 32, item_y - 1),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.34, status_color, 1, cv2.LINE_AA)
+
+            # Footer hint
+            footer_y = box_y + 36 + n_items * 18 + 4
+            cv2.putText(frame, "[0] Toggle All | [1-8] Part", (box_x + 8, footer_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (160, 160, 160), 1, cv2.LINE_AA)
+            return
+
         box_w = 175
         box_x = max(10, w - box_w - 12)
         box_y = 12

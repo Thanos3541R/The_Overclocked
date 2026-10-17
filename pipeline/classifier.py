@@ -1,7 +1,7 @@
 """Driver Impairment Classification & Scoring Engine.
 
 WARNING: This is a rule-based demonstration tool with placeholder thresholds, NOT a validated clinical model.
-No training data has been ingested and all numeric thresholds are educated guesses pending calibration against real impairment data (e.g., Toyota IDD).
+No training data has been ingested and all numeric thresholds are educated guesses pending calibration against real empirical driving data.
 
 Evaluates biological markers of alcohol intoxication and drowsiness:
   1. Static Image Analysis:

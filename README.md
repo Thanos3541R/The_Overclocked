@@ -7,7 +7,7 @@
 An advanced, edge-optimized Driver Monitoring System (DMS) that measures micro-movements of the eyelids, irises, forehead, cheeks, and head from a single driver-facing camera (RGB webcam or monochrome Near-Infrared / 940nm NIR). The system investigates whether involuntary neurological reflexes and autonomic vitals can be distinguished from conscious, voluntary masking maneuvers to detect driver impairment and fatigue in real time.
 
 > **Status: Research Prototype & Proof of Concept. Not Clinically Validated.**  
-> No model in this repository has been clinically validated against certified blood alcohol concentration (BAC) or medical-grade polysomnography (PSG). Every threshold marked `[PLACEHOLDER]` represents an uncalibrated design target pending empirical calibration against real impairment datasets (such as Toyota IDD). This software has not undergone functional safety audits. Safety architecture is ASIL-inspired but **not certified** under ISO 26262.
+> No model in this repository has been clinically validated against certified blood alcohol concentration (BAC) or medical-grade polysomnography (PSG). Every threshold marked `[PLACEHOLDER]` represents an uncalibrated design target pending empirical calibration against real empirical driver datasets. This software has not undergone functional safety audits. Safety architecture is ASIL-inspired but **not certified** under ISO 26262.
 
 ---
 
@@ -21,7 +21,7 @@ An advanced, edge-optimized Driver Monitoring System (DMS) that measures micro-m
 7. [Involuntary Reflexes vs. Voluntary Gaming (Anti-Masking)](#involuntary-reflexes-vs-voluntary-gaming-anti-masking)
 8. [Personal Baseline Calibration & Drunk Ingress Bounding](#personal-baseline-calibration--drunk-ingress-bounding)
 9. [Sequential Bayesian Evidence Filter (Wald SPRT)](#sequential-bayesian-evidence-filter-wald-sprt)
-10. [Data Ingestion & Training Pipeline (Toyota IDD)](#data-ingestion--training-pipeline-toyota-idd)
+10. [Data Ingestion & Training Pipeline](#data-ingestion--training-pipeline)
 11. [Installation & Quick Start Guide](#installation--quick-start-guide)
 12. [Repository Directory Structure](#repository-directory-structure)
 13. [Ethics, Privacy & Regulatory Compliance](#ethics-privacy--regulatory-compliance)
@@ -152,7 +152,7 @@ All landmark indices adhere to the MediaPipe 478-point mesh specification (anato
 
 The system provides dual-mode feature generation via [`TrainingBuffer`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/training_buffer.py):
 1. **Core Mode (29 Channels):** Default mode preserving exact 29-element feature vector compatibility for standard models.
-2. **Extended Mode (48 Channels):** Enabled via `include_extended_features=True` in `idd_ingest.py` and `train_baseline.py`, capturing all 33 continuous physiological signals and 15 discrete behavioral/masking flags.
+2. **Extended Mode (48 Channels):** Enabled via `include_extended_features=True` in `TrainingBuffer` and `train_baseline.py`, capturing all 33 continuous physiological signals and 15 discrete behavioral/masking flags.
 
 | Category | Channel Count | Signals & Descriptions |
 | :--- | :--- | :--- |
@@ -223,14 +223,14 @@ Rather than evaluating each frame in isolation, [`pipeline/bayesian_filter.py`](
 
 ---
 
-## Data Ingestion & Training Pipeline (Toyota IDD)
+## Data Ingestion & Training Pipeline
 
-The repository provides a complete ingestion and training workflow for research datasets:
+The repository provides an end-to-end training and cross-validation workflow for multi-subject impairment research:
 
-### 1. Ingestion (`idd_ingest.py`)
-- Discovers driving clips and annotations from the **Toyota Impaired Driving Dataset (IDD)**.
-- Runs each clip through the full perception pipeline: CLAHE $\to$ Stabilizer $\to$ Face Mesh $\to$ 1-Euro Filter $\to$ PnP Normalizer $\to$ Feature Extractor.
-- Packages features into rolling temporal window tensors (default $5.0\text{s}$ window, $2.5\text{s}$ stride) saved as `.npz` archives.
+### 1. Windowed Tensor Buffering (`pipeline/training_buffer.py`)
+- Assembles per-frame features into rolling temporal window tensors (default $5.0\text{s}$ window, $2.5\text{s}$ stride) with configurable strategies for handling gated/frozen frames (`HOLD_LAST`, `DROP`, `INTERPOLATE`).
+- Supports exporting multi-window sessions directly to `.npz` archives via `TrainingBuffer.save_to_disk()`.
+- Captures subject identifiers, timestamps, session UUIDs, and ground-truth condition labels.
 
 ### 2. Multi-Subject Cross-Validation (`train_baseline.py`)
 - **Strict GroupKFold:** Splits data strictly across `subject_id` boundaries, guaranteeing that no participant appears in both training and test folds (zero subject data leakage).
@@ -294,16 +294,13 @@ python inspect_driver.py --capture
 python inspect_driver.py --video /path/to/video.mp4
 ```
 
-### 5. Toyota IDD Ingestion & Model Benchmark
+### 5. Multi-Subject Model Training & Benchmark
 ```bash
-# Ingest raw Toyota IDD video dataset into windowed 48-channel .npz tensors
-python idd_ingest.py --idd-root /path/to/idd_data/ --output-dir ./idd_output/
-
 # Run synthetic multi-subject benchmark (self-contained verification without external data)
 python train_baseline.py --test-synthetic
 
-# Train model on ingested dataset archives
-python train_baseline.py --data-dir ./idd_output/ --output-model models/trained_model.joblib
+# Train model on recorded dataset archives (.npz)
+python train_baseline.py --data-dir ./training_data/ --output-model models/trained_model.joblib
 ```
 
 ### 6. Run Complete Test Suite
@@ -322,7 +319,6 @@ The_Overclocked/
 ├── main.py                   # Real-time DMS application with HUD visualization & CSV logging
 ├── inspect_driver.py         # Diagnostic tool for single-image, live capture, or video inspection
 ├── extract_video_features.py # Batch video analyzer with Section A/B report generation
-├── idd_ingest.py             # Batch ingestion engine for Toyota IDD driving dataset (48-channel)
 ├── train_baseline.py         # Multi-subject ML training with GroupKFold & union archive schema
 ├── requirements.txt          # Python package dependencies
 ├── models/

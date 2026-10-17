@@ -78,6 +78,9 @@ def parse_args() -> argparse.Namespace:
         "--mesh-style", type=str, choices=["regions", "full", "solid", "contours", "dots", "off"], default=None,
         help="Legacy alias for --overlay-mode")
     parser.add_argument(
+        "--solid-parts", type=str, default=None,
+        help="Comma-separated list of solid facial parts to enable initially (e.g. 'eyes,nose,lips,cheeks'). Default: all")
+    parser.add_argument(
         "--no-mesh", action="store_true",
         help="Hide face mesh wireframe in visualization (alias for --overlay-mode off)")
     parser.add_argument(
@@ -203,11 +206,24 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         overlay_mode = "regions" if args.mesh_style in ("contours", "dots") else args.mesh_style
     else:
         overlay_mode = getattr(args, "overlay_mode", "regions")
+    enabled_parts = (
+        [p.strip() for p in args.solid_parts.split(",") if p.strip()]
+        if getattr(args, "solid_parts", None)
+        else None
+    )
     visualizer = Visualizer(
         overlay_mode=overlay_mode,
         show_iris=not args.no_iris,
         show_pose_axes=not args.no_axes,
+        enabled_solid_parts=enabled_parts,
     )
+
+    if not args.headless:
+        try:
+            cv2.namedWindow("Driver Monitor")
+            cv2.setMouseCallback("Driver Monitor", visualizer.handle_mouse_click)
+        except cv2.error:
+            pass
 
     # CSV logger
     csv_logger: Optional[CSVLogger] = None
@@ -227,6 +243,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     frame_id = 0
     t0 = time.perf_counter()
 
+    last_raw_frame = None
+    last_smooth_landmarks = None
+    last_features = None
+    last_normalizer = None
+    last_pnp_success = None
+
     try:
         while capture.is_open():
             if paused:
@@ -237,6 +259,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                             paused = False
                         elif key in (ord('q'), ord('Q')):
                             break
+                        elif visualizer.handle_key(key) or getattr(visualizer, "_mouse_clicked", False):
+                            visualizer._mouse_clicked = False
+                            if last_raw_frame is not None:
+                                viz_frame = last_raw_frame.copy() if len(last_raw_frame.shape) == 3 else cv2.cvtColor(last_raw_frame, cv2.COLOR_GRAY2BGR)
+                                visualizer.draw(viz_frame, last_smooth_landmarks, last_features, last_normalizer, pnp_success=last_pnp_success)
+                                cv2.imshow("Driver Monitor", viz_frame)
                     except cv2.error as exc:
                         print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                         args.headless = True
@@ -278,6 +306,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 if csv_logger is not None:
                     csv_logger.log(features)
 
+                last_raw_frame = frame
+                last_smooth_landmarks = None
+                last_features = features
+                last_normalizer = None
+                last_pnp_success = False
+
                 if not args.headless:
                     try:
                         viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
@@ -288,8 +322,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                             break
                         elif key in (ord('p'), ord('P')):
                             paused = True
-                        elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
-                            visualizer.cycle_overlay_mode()
+                        else:
+                            visualizer.handle_key(key)
                     except cv2.error as exc:
                         print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                         args.headless = True
@@ -361,6 +395,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 csv_logger.log(features)
 
             # ── Visualization ──
+            last_raw_frame = frame
+            last_smooth_landmarks = smooth_landmarks
+            last_features = features
+            last_normalizer = normalizer
+            last_pnp_success = pnp_success
+
             if not args.headless:
                 try:
                     viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
@@ -371,26 +411,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         break
                     elif key in (ord('p'), ord('P')):
                         paused = True
-                    elif key in (ord('v'), ord('V'), ord('m'), ord('M')):
-                        visualizer.cycle_overlay_mode()
-                    elif key == ord('0'):
-                        visualizer.toggle_all_solid_parts()
-                    elif key == ord('1') or key in (ord('f'), ord('F')):
-                        visualizer.toggle_solid_part('forehead')
-                    elif key == ord('2') or key in (ord('c'), ord('C')):
-                        visualizer.toggle_solid_part('cheeks')
-                    elif key == ord('3'):
-                        visualizer.toggle_solid_part('chin')
-                    elif key == ord('4') or key in (ord('l'), ord('L')):
-                        visualizer.toggle_solid_part('lips')
-                    elif key == ord('5') or key in (ord('e'), ord('E')):
-                        visualizer.toggle_solid_part('eyes')
-                    elif key == ord('6') or key in (ord('n'), ord('N')):
-                        visualizer.toggle_solid_part('nose')
-                    elif key == ord('7') or key in (ord('b'), ord('B')):
-                        visualizer.toggle_solid_part('eyebrows')
-                    elif key == ord('8'):
-                        visualizer.toggle_solid_part('face')
+                    else:
+                        visualizer.handle_key(key)
                 except cv2.error as exc:
                     print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                     args.headless = True

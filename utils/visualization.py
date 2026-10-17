@@ -42,6 +42,7 @@ class Visualizer:
         show_mesh: bool = True,
         mesh_style: Optional[str] = None,
         solid_alpha: float = 0.42,
+        enabled_solid_parts: Optional[List[str]] = None,
     ):
         """Initialize HUD visualizer.
 
@@ -52,6 +53,7 @@ class Visualizer:
             show_mesh: Legacy parameter; if False, forces overlay_mode='off'.
             mesh_style: Legacy parameter; mapped to overlay_mode if provided.
             solid_alpha: Transparency alpha for solid color facial regions (default: 0.42).
+            enabled_solid_parts: Optional list of part names to enable initially. If None, all parts enabled.
         """
         if mesh_style is not None:
             if mesh_style in ("off", "none"):
@@ -73,17 +75,18 @@ class Visualizer:
         self.show_pose_axes = show_pose_axes
         self.solid_alpha = float(solid_alpha)
 
-        # Dictionary of individual solid facial part toggles (all enabled by default)
-        self.solid_parts: Dict[str, bool] = {
-            "forehead": True,
-            "cheeks": True,
-            "chin": True,
-            "lips": True,
-            "eyes": True,
-            "nose": True,
-            "eyebrows": True,
-            "face": True,
-        }
+        # Dictionary of individual solid facial part toggles
+        if enabled_solid_parts is not None:
+            self.solid_parts: Dict[str, bool] = {r.key: False for r in SOLID_REGIONS}
+            for part in enabled_solid_parts:
+                canonical = self._normalize_part_name(part)
+                if canonical in self.solid_parts:
+                    self.solid_parts[canonical] = True
+        else:
+            self.solid_parts: Dict[str, bool] = {r.key: True for r in SOLID_REGIONS}
+
+        self._legend_item_boxes: List[Tuple[int, int, int, int, str]] = []
+        self._mouse_clicked: bool = False
 
         self._prev_time = time.time()
         self._fps = 0.0
@@ -229,6 +232,74 @@ class Visualizer:
         """Alias for cycle_overlay_mode for backwards compatibility."""
         return self.cycle_overlay_mode()
 
+    def handle_mouse_click(self, event: int, x: int, y: int, flags: int = 0, param=None) -> bool:
+        """Handle mouse click events on the HUD (e.g. clicking legend items).
+
+        Args:
+            event: OpenCV mouse event code (e.g. cv2.EVENT_LBUTTONDOWN).
+            x: X pixel coordinate of mouse event.
+            y: Y pixel coordinate of mouse event.
+            flags: OpenCV event flags.
+            param: Optional user data.
+
+        Returns:
+            True if event was handled and changed HUD state, False otherwise.
+        """
+        if event != cv2.EVENT_LBUTTONDOWN or self.overlay_mode != "solid":
+            return False
+
+        for x1, y1, x2, y2, key in getattr(self, "_legend_item_boxes", []):
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                self._mouse_clicked = True
+                if key == "__all__":
+                    self.toggle_all_solid_parts()
+                    return True
+                else:
+                    self.toggle_solid_part(key)
+                    return True
+        return False
+
+    def handle_key(self, key: int) -> bool:
+        """Handle keyboard shortcuts for HUD overlay and solid parts.
+
+        Args:
+            key: Key code from cv2.waitKey (0-255).
+
+        Returns:
+            True if key was an overlay shortcut and handled, False otherwise.
+        """
+        if key in (ord('v'), ord('V'), ord('m'), ord('M')):
+            self.cycle_overlay_mode()
+            return True
+        elif key == ord('0'):
+            self.toggle_all_solid_parts()
+            return True
+        elif key in (ord('1'), ord('f'), ord('F')):
+            self.toggle_solid_part('forehead')
+            return True
+        elif key in (ord('2'), ord('c'), ord('C')):
+            self.toggle_solid_part('cheeks')
+            return True
+        elif key == ord('3'):
+            self.toggle_solid_part('chin')
+            return True
+        elif key in (ord('4'), ord('l'), ord('L')):
+            self.toggle_solid_part('lips')
+            return True
+        elif key in (ord('5'), ord('e'), ord('E')):
+            self.toggle_solid_part('eyes')
+            return True
+        elif key in (ord('6'), ord('n'), ord('N')):
+            self.toggle_solid_part('nose')
+            return True
+        elif key in (ord('7'), ord('b'), ord('B')):
+            self.toggle_solid_part('eyebrows')
+            return True
+        elif key == ord('8'):
+            self.toggle_solid_part('face')
+            return True
+        return False
+
     def draw(
         self,
         frame: np.ndarray,
@@ -340,6 +411,8 @@ class Visualizer:
             n_items = len(SOLID_REGIONS)
             box_h = 28 + n_items * 18 + 22
 
+            self._legend_item_boxes = []
+
             # Background box
             overlay = frame.copy()
             cv2.rectangle(overlay, (box_x, box_y), (box_x + box_w, box_y + box_h), (18, 18, 18), -1)
@@ -356,6 +429,9 @@ class Visualizer:
                 is_on = self.solid_parts.get(reg.key, True)
                 swatch_color = (reg.dimmed_color if is_gated else reg.color) if is_on else (40, 40, 40)
                 border_color = (180, 180, 180) if is_on else (70, 70, 70)
+
+                # Store bounding box for mouse clicks
+                self._legend_item_boxes.append((box_x, item_y - 12, box_x + box_w, item_y + 6, reg.key))
 
                 # Hotkey badge [1]..[8]
                 badge = f"[{reg.hotkey}]"
@@ -379,6 +455,7 @@ class Visualizer:
 
             # Footer hint
             footer_y = box_y + 36 + n_items * 18 + 4
+            self._legend_item_boxes.append((box_x, footer_y - 12, box_x + box_w, footer_y + 8, "__all__"))
             cv2.putText(frame, "[0] Toggle All | [1-8] Part", (box_x + 8, footer_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.32, (160, 160, 160), 1, cv2.LINE_AA)
             return

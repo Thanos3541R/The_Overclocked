@@ -356,49 +356,70 @@ class SolidFaceRegion:
     border_thickness: int = 1
 
 
+# Clean non-self-intersecting forehead loop strictly above the eyebrows (temple 162 -> hairline 10 -> temple 389 -> brow arches -> 162)
+SOLID_FOREHEAD_POLYGON = [
+    162, 21, 54, 103, 67, 109, 10, 338, 297, 332, 284, 251, 389,
+    300, 293, 334, 296, 336, 9, 107, 66, 105, 63, 70,
+]
+
 SOLID_FOREHEAD = SolidFaceRegion(
     name="Forehead",
     key="forehead",
     hotkey="1",
-    polygons=(np.array(FOREHEAD_CONTOUR, dtype=np.int32),),
+    polygons=(np.array(SOLID_FOREHEAD_POLYGON, dtype=np.int32),),
     color=(0, 200, 255),  # Warm Amber / Gold
     dimmed_color=_dim((0, 200, 255)),
+    alpha=0.40,
 )
 
+# Symmetric malar/buccal cheek polygons (excludes high temple 127/356 and avoids concave pinch)
 SOLID_CHEEKS = SolidFaceRegion(
     name="Cheeks",
     key="cheeks",
     hotkey="2",
     polygons=(
-        np.array([116, 117, 118, 101, 216, 212, 172, 58, 132, 93, 234, 127], dtype=np.int32),
-        np.array([345, 346, 347, 330, 436, 432, 397, 288, 361, 323, 454, 356], dtype=np.int32),
+        np.array([116, 117, 118, 101, 36, 206, 216, 212, 172, 58, 132, 93, 234], dtype=np.int32),
+        np.array([345, 346, 347, 330, 266, 426, 436, 432, 397, 288, 361, 323, 454], dtype=np.int32),
     ),
     color=(160, 160, 255),  # Rosy Peach / Coral
     dimmed_color=_dim((160, 160, 255)),
+    alpha=0.42,
 )
 
+# Symmetric menton / lower-jaw chin polygon (fixes right-cheek bleed 361/323 and cheek overlap)
 SOLID_CHIN = SolidFaceRegion(
     name="Chin",
     key="chin",
     hotkey="3",
     polygons=(
-        np.array([61, 58, 172, 136, 150, 149, 176, 148, 152, 377, 400, 378, 379, 365, 397, 288, 361, 323, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146], dtype=np.int32),
+        np.array([
+            61, 43, 212, 136, 150, 149, 176, 148, 152,
+            377, 400, 378, 379, 365, 432, 273, 291,
+            375, 321, 405, 314, 17, 84, 181, 91, 146
+        ], dtype=np.int32),
     ),
     color=(120, 220, 140),  # Mint / Light Green
     dimmed_color=_dim((120, 220, 140)),
+    alpha=0.42,
 )
 
+# Outer vermilion lip loop
 SOLID_LIPS = SolidFaceRegion(
     name="Lips",
     key="lips",
     hotkey="4",
     polygons=(
-        np.array([61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146], dtype=np.int32),
+        np.array([
+            61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291,
+            375, 321, 405, 314, 17, 84, 181, 91, 146
+        ], dtype=np.int32),
     ),
     color=(70, 50, 240),  # Crimson Red
     dimmed_color=_dim((70, 50, 240)),
+    alpha=0.48,
 )
 
+# Palpebral eye apertures
 SOLID_EYES = SolidFaceRegion(
     name="Eyes",
     key="eyes",
@@ -409,19 +430,27 @@ SOLID_EYES = SolidFaceRegion(
     ),
     color=(255, 230, 0),  # Electric Cyan
     dimmed_color=_dim((255, 230, 0)),
+    alpha=0.48,
 )
 
+# Full anatomical nose (nasion 168 -> left/right nasal bridge -> alar wings 64/294 -> subnasale 2)
+# Replaces wrong upper-lip landmark 393 with symmetric bridge landmark 417
 SOLID_NOSE = SolidFaceRegion(
     name="Nose",
     key="nose",
     hotkey="6",
     polygons=(
-        np.array([168, 193, 245, 122, 196, 3, 51, 45, 4, 275, 281, 248, 419, 351, 465, 393], dtype=np.int32),
+        np.array([
+            168, 193, 122, 188, 114, 129, 49, 64, 98, 97,
+            2, 326, 327, 294, 358, 279, 343, 412, 351, 417
+        ], dtype=np.int32),
     ),
     color=(50, 140, 255),  # Warm Orange / Bronze
     dimmed_color=_dim((50, 140, 255)),
+    alpha=0.45,
 )
 
+# Left and right eyebrow closed loops
 SOLID_EYEBROWS = SolidFaceRegion(
     name="Eyebrows",
     key="eyebrows",
@@ -432,18 +461,24 @@ SOLID_EYEBROWS = SolidFaceRegion(
     ),
     color=(210, 130, 180),  # Orchid / Purple
     dimmed_color=_dim((210, 130, 180)),
+    alpha=0.48,
 )
 
+# Full face oval contour
 SOLID_FACE = SolidFaceRegion(
     name="Face Oval",
     key="face",
     hotkey="8",
     polygons=(
-        np.array([10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109], dtype=np.int32),
+        np.array([
+            10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+            397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+            172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+        ], dtype=np.int32),
     ),
     color=(230, 180, 140),  # Slate Blue / Lavender
     dimmed_color=_dim((230, 180, 140)),
-    alpha=0.25,
+    alpha=0.18,
 )
 
 SOLID_REGIONS: Tuple[SolidFaceRegion, ...] = (
@@ -472,7 +507,9 @@ def draw_solid_face_regions(
     Highly optimized using local face bounding box ROI slicing:
     - Bounding box calculated once in NumPy
     - Zero per-landmark or per-pixel Python loops
-    - cv2.fillPoly and cv2.addWeighted run on the local crop (< 0.4 ms total)
+    - SOLID_FACE rendered as a subtle base layer (alpha=0.18) so it never muddies specific regions
+    - Specific anatomical regions filled on top with vivid colors
+    - Crisp anti-aliased 1px perimeter outlines drawn around each enabled region
 
     Args:
         frame: Display frame (modified in-place).
@@ -499,20 +536,39 @@ def draw_solid_face_regions(
         return
 
     roi = frame[y_min:y_max, x_min:x_max]
-    overlay_roi = roi.copy()
     pts_roi = pts - np.array([x_min, y_min], dtype=np.int32)
 
-    for region in SOLID_REGIONS:
-        if not enabled_parts.get(region.key, True):
+    face_region = next((r for r in SOLID_REGIONS if r.key == "face"), None)
+    face_enabled = bool(enabled_parts.get("face", True)) and (face_region is not None)
+    specific_regions = [r for r in SOLID_REGIONS if r.key != "face" and enabled_parts.get(r.key, True)]
+
+    # 1. Base layer: Face Oval if enabled
+    if face_enabled and face_region is not None:
+        face_polys = [pts_roi[p] for p in face_region.polygons if len(p) > 0 and int(np.max(p)) < len(pts)]
+        if face_polys:
+            face_color = face_region.dimmed_color if dimmed else face_region.color
+            face_alpha = min(face_region.alpha * 0.5, 0.12) if dimmed else face_region.alpha
+            face_overlay = roi.copy()
+            cv2.fillPoly(face_overlay, face_polys, face_color)
+            cv2.addWeighted(face_overlay, face_alpha, roi, 1.0 - face_alpha, 0.0, dst=roi)
+
+    # 2. Specific anatomical regions filled on top with vivid colors
+    if specific_regions:
+        spec_overlay = roi.copy()
+        for reg in specific_regions:
+            color = reg.dimmed_color if dimmed else reg.color
+            reg_polys = [pts_roi[p] for p in reg.polygons if len(p) > 0 and int(np.max(p)) < len(pts)]
+            if reg_polys:
+                cv2.fillPoly(spec_overlay, reg_polys, color)
+        blend_alpha = min(alpha * 0.5, 0.20) if dimmed else alpha
+        cv2.addWeighted(spec_overlay, blend_alpha, roi, 1.0 - blend_alpha, 0.0, dst=roi)
+
+    # 3. Crisp anti-aliased 1px perimeter outlines around each enabled region
+    for reg in SOLID_REGIONS:
+        if not enabled_parts.get(reg.key, True):
             continue
-
-        color = region.dimmed_color if dimmed else region.color
-        region_polys = [
-            pts_roi[poly] for poly in region.polygons
-            if len(poly) > 0 and int(np.max(poly)) < len(pts)
-        ]
-        if region_polys:
-            cv2.fillPoly(overlay_roi, region_polys, color)
-
-    blend_alpha = min(alpha * 0.5, 0.20) if dimmed else alpha
-    cv2.addWeighted(overlay_roi, blend_alpha, roi, 1.0 - blend_alpha, 0.0, dst=roi)
+        color = reg.dimmed_color if dimmed else reg.color
+        reg_polys = [pts_roi[p] for p in reg.polygons if len(p) > 0 and int(np.max(p)) < len(pts)]
+        if reg_polys:
+            cv2.polylines(roi, reg_polys, isClosed=True, color=color,
+                          thickness=reg.border_thickness, lineType=cv2.LINE_AA)

@@ -696,3 +696,115 @@ def test_solid_mode_visualizer_draw_and_legend():
     out2 = viz.draw(frame, pts, features=features)
     assert out2.shape == (720, 1280, 3)
 
+
+def test_solid_face_polygons_are_geometrically_simple_and_non_crossing():
+    """Verify that all anatomical polygons in SOLID_REGIONS have zero self-intersecting edges and valid bounds."""
+    from utils.overlay_regions import SOLID_REGIONS, SOLID_NOSE, SOLID_CHIN, SOLID_FOREHEAD_POLYGON
+
+    cap = cv2.VideoCapture("tests/sample_driver_video.mp4")
+    ret, frame = cap.read()
+    assert ret and frame is not None, "Failed to read sample driver video frame"
+
+    detector = FaceMeshDetector()
+    landmarks = detector.detect(frame)
+    detector.close()
+    cap.release()
+    assert landmarks is not None and len(landmarks) >= 468, "Failed to detect face landmarks on test frame"
+
+    pts = landmarks[:, :2]
+
+    def ccw(A, B, C):
+        return (B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0])
+
+    def segments_intersect(p1, p2, p3, p4):
+        d1 = ccw(p1, p2, p3)
+        d2 = ccw(p1, p2, p4)
+        d3 = ccw(p3, p4, p1)
+        d4 = ccw(p3, p4, p2)
+        return (d1 * d2 < -1e-7) and (d3 * d4 < -1e-7)
+
+    # 1. Zero self-crossing edges across every polygon in SOLID_REGIONS
+    for region in SOLID_REGIONS:
+        for p_idx, poly in enumerate(region.polygons):
+            poly_pts = pts[poly]
+            n = len(poly_pts)
+            for i in range(n):
+                p1, p2 = poly_pts[i], poly_pts[(i + 1) % n]
+                for j in range(i + 2, n):
+                    if i == 0 and j == n - 1:
+                        continue
+                    p3, p4 = poly_pts[j], poly_pts[(j + 1) % n]
+                    assert not segments_intersect(p1, p2, p3, p4), (
+                        f"Self-intersection in region '{region.name}' polygon {p_idx} "
+                        f"between edge {i} ({poly[i]}->{poly[(i+1)%n]}) and edge {j} ({poly[j]}->{poly[(j+1)%n]})"
+                    )
+
+    # 2. SOLID_NOSE does not contain upper-lip landmark 393 and stays above the upper lip
+    assert 393 not in SOLID_NOSE.polygons[0]
+    nose_bottom_y = max(pts[p, 1] for p in SOLID_NOSE.polygons[0])
+    upper_lip_y = pts[0, 1]
+    assert nose_bottom_y <= upper_lip_y + 5, f"Nose extends into upper lip: nose_y={nose_bottom_y}, lip_y={upper_lip_y}"
+
+    # 3. SOLID_CHIN is horizontally symmetric and stays below the mouth/jawline
+    assert all(pts[p, 1] >= pts[61, 1] - 5 for p in SOLID_CHIN.polygons[0])
+
+    # 4. SOLID_FOREHEAD stays above the eye contours
+    forehead_bottom_y = max(pts[p, 1] for p in SOLID_FOREHEAD_POLYGON)
+    eye_top_y = min(pts[p, 1] for p in (RIGHT_EYE_CONTOUR + LEFT_EYE_CONTOUR))
+    assert forehead_bottom_y <= eye_top_y + 10, (
+        f"Forehead loop extends into eyes: forehead_y={forehead_bottom_y}, eye_y={eye_top_y}"
+    )
+
+
+def test_visualizer_handle_key_and_mouse_click_part_selection():
+    """Verify visualizer.handle_key, handle_mouse_click, and enabled_solid_parts initialization."""
+    # 1. Key handler hotkey toggles
+    viz = Visualizer(overlay_mode="solid")
+    assert viz.is_solid_part_enabled("nose") is True
+    assert viz.handle_key(ord("6")) is True
+    assert viz.is_solid_part_enabled("nose") is False
+    assert viz.handle_key(ord("n")) is True
+    assert viz.is_solid_part_enabled("nose") is True
+
+    # 2. Toggle all hotkey
+    assert viz.handle_key(ord("0")) is True
+    assert all(not v for v in viz.solid_parts.values())
+    assert viz.handle_key(ord("0")) is True
+    assert all(v for v in viz.solid_parts.values())
+
+    # 3. Custom initial parts from CLI/config
+    viz_sel = Visualizer(overlay_mode="solid", enabled_solid_parts=["eyes", "nose"])
+    assert viz_sel.is_solid_part_enabled("eyes") is True
+    assert viz_sel.is_solid_part_enabled("nose") is True
+    assert viz_sel.is_solid_part_enabled("lips") is False
+    assert viz_sel.is_solid_part_enabled("forehead") is False
+
+    # 4. Mouse click hit testing on HUD legend
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    dummy_landmarks = np.zeros((478, 3), dtype=np.float64)
+    dummy_landmarks[:, 0] = np.random.randint(450, 750, size=478)
+    dummy_landmarks[:, 1] = np.random.randint(150, 550, size=478)
+    viz_sel.draw(frame, dummy_landmarks, features=FrameFeatures(face_valid=True))
+
+    assert len(viz_sel._legend_item_boxes) == 9
+
+    # Click lips row
+    lip_box = next(b for b in viz_sel._legend_item_boxes if b[4] == "lips")
+    cx = (lip_box[0] + lip_box[2]) // 2
+    cy = (lip_box[1] + lip_box[3]) // 2
+    assert viz_sel.is_solid_part_enabled("lips") is False
+    assert viz_sel.handle_mouse_click(cv2.EVENT_LBUTTONDOWN, cx, cy) is True
+    assert viz_sel.is_solid_part_enabled("lips") is True
+
+    # Click footer __all__ row
+    all_box = next(b for b in viz_sel._legend_item_boxes if b[4] == "__all__")
+    fx = (all_box[0] + all_box[2]) // 2
+    fy = (all_box[1] + all_box[3]) // 2
+    assert viz_sel.handle_mouse_click(cv2.EVENT_LBUTTONDOWN, fx, fy) is True
+    assert all(not v for v in viz_sel.solid_parts.values())
+
+    # Ignore clicks outside legend or non-LBUTTONDOWN events
+    assert viz_sel.handle_mouse_click(cv2.EVENT_MOUSEMOVE, cx, cy) is False
+    assert viz_sel.handle_mouse_click(cv2.EVENT_LBUTTONDOWN, 5, 5) is False
+
+

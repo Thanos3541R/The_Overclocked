@@ -1,6 +1,15 @@
+# ── Core Perception & Computer Vision ──
 opencv-python>=4.9.0
 mediapipe>=0.10.14
 numpy>=1.24.0
 scipy>=1.10.0
+
+# ── Machine Learning & Ingestion Pipeline ──
+scikit-learn>=1.3.0
+joblib>=1.2.0
+
+# ── Automated Testing & Quality Assurance ──
 pytest>=8.0.0
 
+# ── Optional: Advanced Gradient Boosting ──
+# xgboost>=1.7.0  # Optional: used automatically by train_baseline.py if installed

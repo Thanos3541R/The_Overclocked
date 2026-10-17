@@ -347,6 +347,16 @@ class ImpairmentClassifier:
         else:
             marker_scores["facial_flushing"] = 0.0
 
+        # Palpebral Eyelid Tremor (Section A Involuntary)
+        if features.eyelid_tremor_hz >= 5.0:
+            marker_scores["eyelid_tremor"] = 65.0
+            indicators.append(f"Palpebral eyelid micro-tremor ({features.eyelid_tremor_hz:.1f} Hz flutter)")
+        elif features.eyelid_tremor_hz >= 3.5:
+            marker_scores["eyelid_tremor"] = 30.0
+            indicators.append(f"Mild palpebral flutter ({features.eyelid_tremor_hz:.1f} Hz)")
+        else:
+            marker_scores["eyelid_tremor"] = 0.0
+
         # ── Section B: Voluntary & Masking Behaviors ──
         # 11. Voluntary Eye-Widening Spikes (Levator/Frontalis compensation)
         if features.voluntary_eye_widening:
@@ -378,6 +388,13 @@ class ImpairmentClassifier:
             indicators.append("Rigid head stabilization (unnatural neck tension suppressing sway)")
         else:
             marker_scores["rigid_head_stabilization"] = 0.0
+
+        # 15. Frontalis Eyebrow Elevation (Section B Voluntary)
+        if features.frontalis_compensation_active:
+            marker_scores["frontalis_compensation"] = 65.0
+            indicators.append(f"Frontalis eyebrow elevation (+{features.brow_elevation_delta*100:.0f}% brow lift fighting ptosis)")
+        else:
+            marker_scores["frontalis_compensation"] = 0.0
 
         # ── Anti-Masking Divergence Metric (M_mask) ──
         masking_divergence = features.masking_divergence_score
@@ -411,6 +428,11 @@ class ImpairmentClassifier:
                 inv_risk += 5.0
             if marker_scores["facial_flushing"] >= 35.0:
                 inv_risk += 5.0
+            if marker_scores.get("eyelid_tremor", 0.0) >= 30.0:
+                inv_risk += 4.0
+            if features.rppg_valid and 0.0 < features.rppg_hrv_rmssd_ms < 18.0:
+                inv_risk += 3.0
+                indicators.append(f"Depressed autonomic HRV (RMSSD={features.rppg_hrv_rmssd_ms:.1f}ms, BPM={features.rppg_pulse_bpm:.0f})")
 
         # Ingress alert: if driver biometrics at startup violated sober physiological bounds
         if self.ingress_impairment_detected:
@@ -421,7 +443,7 @@ class ImpairmentClassifier:
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
         # Voluntary masking magnitude
-        vol_keys = ["voluntary_eye_widening", "deliberate_blink_suppression", "compensatory_stare", "rigid_head_stabilization"]
+        vol_keys = ["voluntary_eye_widening", "deliberate_blink_suppression", "compensatory_stare", "rigid_head_stabilization", "frontalis_compensation"]
         vol_scores = [marker_scores[k] for k in vol_keys if marker_scores[k] > 0]
         vol_masking = float(np.mean(vol_scores)) if vol_scores else 0.0
 

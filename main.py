@@ -45,6 +45,7 @@ from pipeline.head_pose_estimator import HeadPoseGate
 from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
 from pipeline.calibration import PersonalBaselineCalibrator
 from pipeline.imu_gate import SoftwareIMUGate
+from pipeline.stabilizer import KinematicStabilizer
 from utils.visualization import Visualizer
 
 
@@ -195,6 +196,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         freeze_duration_ms=config.imu_freeze_ms,
         window_size=config.imu_accel_window,
     )
+    stabilizer = KinematicStabilizer()
 
     # Filter bank (lazy-initialized on first valid frame)
     filter_bank: Optional[OneEuroFilterBank] = None
@@ -287,12 +289,14 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             processed = preprocessor.process(frame)
 
             # ── Stage 2: Face Mesh Detection ──
-            landmarks = detector.detect(processed)
+            dx_cam, dy_cam, is_bumpy = stabilizer.estimate_frame_shift(frame)
+            landmarks = detector.detect(processed, shift_hint=(dx_cam, dy_cam))
 
             if landmarks is None:
                 # Invalidate pose and log held-last gated frame so frame_ids never drop
                 normalizer.reset()
                 imu_gate.reset()
+                stabilizer.reset()
                 filter_bank = None
                 features = extractor.compute(
                     landmarks=None,

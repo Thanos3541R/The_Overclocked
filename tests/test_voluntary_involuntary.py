@@ -359,6 +359,62 @@ class TestVoluntaryInvoluntaryFeatures:
         assert feat.rppg_valid is True
         assert 60.0 <= feat.rppg_pulse_bpm <= 85.0, f"Expected BPM in [60, 85], got {feat.rppg_pulse_bpm}"
 
+    def test_classifier_temporal_stream_eyelid_tremor_and_frontalis(self):
+        """ImpairmentClassifier evaluates eyelid tremor, frontalis compensation, and autonomic rPPG HRV."""
+        from pipeline.classifier import ImpairmentClassifier
+
+        clf = ImpairmentClassifier()
+
+        # 1. Feature with high eyelid tremor (6.5 Hz) and frontalis compensation
+        feats = FrameFeatures(
+            face_valid=True,
+            eyelid_tremor_hz=6.5,
+            frontalis_compensation_active=True,
+            brow_elevation_delta=0.20,
+            gen_detected=True,  # provides base inv_risk >= 20%
+            rppg_valid=True,
+            rppg_pulse_bpm=78.0,
+            rppg_hrv_rmssd_ms=12.5,  # depressed HRV (< 18ms)
+        )
+
+        assessment = clf.evaluate_temporal_stream(feats)
+        assert assessment.marker_scores.get("eyelid_tremor") == 65.0
+        assert assessment.marker_scores.get("frontalis_compensation") == 65.0
+        assert assessment.voluntary_masking_score >= 60.0
+        # Involuntary risk includes gen (90 * 0.24 = 21.6) + tremor corroboration (4.0) + HRV depression (3.0) = 28.6
+        assert assessment.involuntary_risk_score == pytest.approx(28.6)
+        assert any("Palpebral eyelid micro-tremor" in ind for ind in assessment.primary_indicators)
+        assert any("Frontalis eyebrow elevation" in ind for ind in assessment.primary_indicators)
+        assert any("Depressed autonomic HRV" in ind for ind in assessment.primary_indicators)
+
+    def test_calibration_brow_ratio_baseline(self):
+        """PersonalBaselineCalibrator tracks brow ratio and applies it to extractor."""
+        from pipeline.calibration import PersonalBaselineCalibrator
+
+        cal = PersonalBaselineCalibrator(calibration_duration_sec=1.0, min_samples=10, fps=30.0)
+
+        for i in range(15):
+            t = i / 30.0
+            feats = FrameFeatures(
+                timestamp=t,
+                face_valid=True,
+                ear_avg=0.30,
+                ear_left=0.30,
+                ear_right=0.30,
+                brow_eye_distance_ratio=0.35,
+                frontalis_compensation_active=False,
+                blink_detected=False,
+            )
+            cal.update(feats)
+
+        baselines = cal.get_baselines()
+        assert np.isclose(baselines.brow_ratio_baseline, 0.35, atol=1e-3)
+
+        ext = FeatureExtractor(fps=30.0)
+        cal.apply_to(ext)
+        assert np.isclose(ext.baseline_brow_ratio, 0.35, atol=1e-3)
+
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

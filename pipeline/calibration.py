@@ -37,6 +37,7 @@ class PersonalBaselines:
     blink_upstroke_baseline: float = 2.5
     flushing_baseline: float = 1.35
     asymmetry_baseline: float = 0.0
+    brow_ratio_baseline: float = 0.0
     head_pitch_baseline: float = 0.0
     head_roll_baseline: float = 0.0
     is_calibrated: bool = False
@@ -69,6 +70,7 @@ class PersonalBaselineCalibrator:
         self._blink_up_samples: Deque[float] = deque(maxlen=100)
         self._flushing_samples: Deque[float] = deque(maxlen=max_history)
         self._asymmetry_samples: Deque[float] = deque(maxlen=max_history)
+        self._brow_samples: Deque[float] = deque(maxlen=max_history)
         self._pitch_samples: Deque[float] = deque(maxlen=max_history)
         self._roll_samples: Deque[float] = deque(maxlen=max_history)
 
@@ -127,6 +129,10 @@ class PersonalBaselineCalibrator:
         if features.flushing_valid and features.facial_flushing_ratio > 0.5:
             self._flushing_samples.append(features.facial_flushing_ratio)
 
+        # Accumulate eyebrow elevation ratio (exclude active frontalis compensation and blinks)
+        if features.brow_eye_distance_ratio > 0.05 and not features.frontalis_compensation_active and not features.blink_detected:
+            self._brow_samples.append(features.brow_eye_distance_ratio)
+
         # Accumulate head pose
         self._pitch_samples.append(features.head_pitch)
         self._roll_samples.append(features.head_roll)
@@ -146,6 +152,7 @@ class PersonalBaselineCalibrator:
         raw_blink_up = float(np.median(self._blink_up_samples)) if self._blink_up_samples else 2.5
         raw_flush = float(np.median(self._flushing_samples)) if self._flushing_samples else 1.35
         raw_asym = float(np.median(self._asymmetry_samples)) if self._asymmetry_samples else 0.0
+        raw_brow = float(np.median(self._brow_samples)) if self._brow_samples else 0.0
         pitch_base = float(np.median(self._pitch_samples)) if self._pitch_samples else 0.0
         roll_base = float(np.median(self._roll_samples)) if self._roll_samples else 0.0
 
@@ -184,6 +191,7 @@ class PersonalBaselineCalibrator:
             blink_upstroke_baseline=blink_up_base,
             flushing_baseline=raw_flush,
             asymmetry_baseline=asym_base,
+            brow_ratio_baseline=raw_brow,
             head_pitch_baseline=pitch_base,
             head_roll_baseline=roll_base,
             is_calibrated=self._is_calibrated,
@@ -215,6 +223,8 @@ class PersonalBaselineCalibrator:
             extractor.sober_blink_up_baseline = b.blink_upstroke_baseline
         if hasattr(extractor, "baseline_flushing"):
             extractor.baseline_flushing = b.flushing_baseline
+        if b.brow_ratio_baseline > 0.0 and hasattr(extractor, "baseline_brow_ratio"):
+            extractor.baseline_brow_ratio = b.brow_ratio_baseline
 
         if classifier is not None:
             if hasattr(classifier, "sober_ear"):

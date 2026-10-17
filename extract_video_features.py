@@ -42,6 +42,7 @@ from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
 from pipeline.classifier import ImpairmentClassifier, ImpairmentAssessment
 from pipeline.calibration import PersonalBaselineCalibrator
 from pipeline.bayesian_filter import BayesianEvidenceAccumulator
+from pipeline.stabilizer import KinematicStabilizer
 
 
 def extract_video_features(video_path: str,
@@ -126,6 +127,7 @@ def extract_video_features(video_path: str,
         freeze_duration_ms=config.imu_freeze_ms,
         window_size=config.imu_accel_window,
     )
+    stabilizer = KinematicStabilizer()
     filter_bank: Optional[OneEuroFilterBank] = None
     extractor = FeatureExtractor(
         blink_threshold=config.ear_blink_threshold,
@@ -190,7 +192,8 @@ def extract_video_features(video_path: str,
             processed_frame = prep.process(frame)
 
             # 2. 478 3D facial landmark detection with iris refinement
-            landmarks = detector.detect(processed_frame)
+            dx_cam, dy_cam, is_bumpy = stabilizer.estimate_frame_shift(frame)
+            landmarks = detector.detect(processed_frame, shift_hint=(dx_cam, dy_cam))
 
             if landmarks is not None:
                 face_detected_frames += 1
@@ -251,6 +254,7 @@ def extract_video_features(video_path: str,
             else:
                 pnp.reset()
                 imu_gate.reset()
+                stabilizer.reset()
                 filter_bank = None
                 features = extractor.compute(
                     landmarks=None,
@@ -404,6 +408,12 @@ def extract_video_features(video_path: str,
     rigid_head_frames = sum(1 for r in valid_records if r['rigid_head_stabilization'])
     max_stare_duration = float(np.max([r['stare_fixation_duration_s'] for r in valid_records])) if valid_records else 0.0
 
+    mean_eyelid_tremor_hz = float(np.mean([r['eyelid_tremor_hz'] for r in valid_records])) if valid_records else 0.0
+    frontalis_compensation_frames = sum(1 for r in valid_records if r.get('frontalis_compensation_active', False))
+    rppg_records = [r for r in valid_records if r.get('rppg_valid', False)]
+    mean_rppg_bpm = float(np.mean([r['rppg_pulse_bpm'] for r in rppg_records])) if rppg_records else 0.0
+    mean_rppg_hrv_rmssd_ms = float(np.mean([r['rppg_hrv_rmssd_ms'] for r in rppg_records])) if rppg_records else 0.0
+
     # Primary Lockout Determination
     lockout_triggered = (lockout_triggers >= 5) or (high_risk_count / n_valid >= 0.10)
     final_classification = "HIGH_RISK_INTOXICATED" if lockout_triggered else (
@@ -444,12 +454,16 @@ def extract_video_features(video_path: str,
             'mean_head_postural_sway_deg': round(mean_sway, 3),
             'mean_facial_flushing_ratio': round(mean_flushing, 3),
             'mean_ear': round(mean_ear, 4),
+            'mean_eyelid_tremor_hz': round(mean_eyelid_tremor_hz, 2),
+            'mean_rppg_pulse_bpm': round(mean_rppg_bpm, 1),
+            'mean_rppg_hrv_rmssd_ms': round(mean_rppg_hrv_rmssd_ms, 2),
         },
         'section_b_voluntary_masking_biomarkers': {
             'deliberate_blink_suppression_frames': blink_suppress_frames,
             'voluntary_eye_widening_spikes': eye_widening_frames,
             'max_compensatory_stare_duration_s': round(max_stare_duration, 2),
             'rigid_head_stabilization_frames': rigid_head_frames,
+            'frontalis_compensation_frames': frontalis_compensation_frames,
         },
         'classification_breakdown': {
             'sober_frames': sober_count,
@@ -530,6 +544,10 @@ def _generate_text_report(summary: Dict[str, Any], records: List[Dict[str, Any]]
     lines.append(f"     * Diagnostic Significance   : Evaluates relative cheek delta >= +20% on RGB; cleanly disabled on NIR.")
     lines.append(f"  7. Palpebral Aperture & EAR    : Mean EAR = {sa['mean_ear']:.4f}  [Normal awake: 0.28 - 0.35]")
     lines.append(f"     * Diagnostic Significance   : Ptosis and levator motor neuron inhibition.")
+    lines.append(f"  8. Palpebral Eyelid Tremor     : Mean Flutter = {sa.get('mean_eyelid_tremor_hz', 0.0):.1f} Hz  [Drowsy/Intoxicated flutter: 5-12 Hz]")
+    lines.append(f"     * Diagnostic Significance   : Antagonistic levator/orbicularis conflict under subcortical sedation.")
+    lines.append(f"  9. T-Zone Autonomic Pulse (rPPG): Mean BPM = {sa.get('mean_rppg_pulse_bpm', 0.0):.1f}, HRV RMSSD = {sa.get('mean_rppg_hrv_rmssd_ms', 0.0):.1f} ms")
+    lines.append(f"     * Diagnostic Significance   : Non-contact camera photoplethysmography detecting autonomic cardiac tone.")
     lines.append("")
 
     lines.append("SECTION B — VOLUNTARY & SEMI-VOLUNTARY BEHAVIORS (CORROBORATING / GAMING)")
@@ -543,6 +561,8 @@ def _generate_text_report(summary: Dict[str, Any], records: List[Dict[str, Any]]
     lines.append(f"     * Mechanism                 : Rigid unbroken gaze (>6.0s with low spatial variance sigma<0.8 deg).")
     lines.append(f"  4. Rigid Head Stabilization    : {sb['rigid_head_stabilization_frames']} frames unnatural neck tension")
     lines.append(f"     * Mechanism                 : Tensing cervical muscles to artificially suppress natural head sway.")
+    lines.append(f"  5. Frontalis Brow Elevation    : {sb.get('frontalis_compensation_frames', 0)} frames active compensation")
+    lines.append(f"     * Mechanism                 : Chronic frontalis brow lift attempting to raise drooping upper eyelids.")
     lines.append("")
 
     lines.append("ANTI-MASKING DIVERGENCE METRIC (M_mask) ANALYSIS")

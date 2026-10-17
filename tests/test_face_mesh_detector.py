@@ -883,4 +883,29 @@ class TestTrackerRobustnessAndEdgeCases:
             calls = [c.args for c in mock_instance.set.mock_calls]
             assert (cv2.CAP_PROP_POS_FRAMES, 0) not in calls
 
+    def test_apply_shift_hint_updates_tracker_center(self):
+        """apply_shift_hint shifts center when is_tracking is True and shift exceeds threshold."""
+        tracker = AdaptiveROITracker(alpha=0.35, margin=2.0)
+        tracker.cx = 400.0
+        tracker.cy = 300.0
+        tracker.scale = 100.0
+        tracker.is_tracking = True
+
+        # Shift below threshold (< 2.0px) is ignored to avoid noise
+        tracker.apply_shift_hint(1.0, -1.5)
+        assert tracker.cx == 400.0
+        assert tracker.cy == 300.0
+
+        # Shift above threshold (> 2.0px) updates center immediately
+        tracker.apply_shift_hint(5.0, -12.0)
+        assert tracker.cx == 405.0
+        assert tracker.cy == 288.0
+
+        # When not tracking, shift_hint does nothing
+        tracker.is_tracking = False
+        tracker.apply_shift_hint(10.0, 10.0)
+        assert tracker.cx == 405.0
+        assert tracker.cy == 288.0
+
+
 

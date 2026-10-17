@@ -747,5 +747,33 @@ class TestExternalReviewFixes:
             assert cap.last_frame_timestamp >= t0
             cap.release()
 
+    def test_extract_video_features_summary_and_report_new_micromotions(self, tmp_path):
+        """extract_video_features output summary and text report include the 4 new micromotion fields."""
+        from extract_video_features import extract_video_features
+
+        summary = extract_video_features(
+            "tests/sample_driver_video.mp4",
+            output_dir=str(tmp_path),
+            max_frames=5,
+            headless=True,
+        )
+
+        sa = summary["section_a_involuntary_biomarkers"]
+        sb = summary["section_b_voluntary_masking_biomarkers"]
+
+        assert "mean_eyelid_tremor_hz" in sa
+        assert "mean_rppg_pulse_bpm" in sa
+        assert "mean_rppg_hrv_rmssd_ms" in sa
+        assert "frontalis_compensation_frames" in sb
+
+        # Check text report
+        report_path = tmp_path / "video_features_report.txt"
+        assert report_path.exists()
+        report_text = report_path.read_text(encoding="utf-8")
+        assert "Palpebral Eyelid Tremor" in report_text
+        assert "T-Zone Autonomic Pulse (rPPG)" in report_text
+        assert "Frontalis Brow Elevation" in report_text
+
+
 
 

@@ -165,6 +165,21 @@ class AdaptiveROITracker:
             self.cy = eff_alpha * raw_cy + (1.0 - eff_alpha) * self.cy
             self.scale = self.alpha * raw_scale + (1.0 - self.alpha) * self.scale
 
+    def apply_shift_hint(self, dx: float, dy: float) -> None:
+        """Apply feed-forward camera translation shift to ROI tracker center.
+
+        Moves the bounding box center along with vehicle bounce/bump jolts
+        before cropping, avoiding tracking loss during sudden camera motion.
+
+        Args:
+            dx: Horizontal camera shift in pixels.
+            dy: Vertical camera shift in pixels.
+        """
+        if self.is_tracking and self.cx is not None and self.cy is not None:
+            if abs(dx) > 2.0 or abs(dy) > 2.0:
+                self.cx += float(dx)
+                self.cy += float(dy)
+
     def get_crop_bounds(self, frame_shape: Tuple[int, ...]) -> Tuple[int, int, int, int]:
         """Compute pixel bounds (x_crop_min, y_crop_min, x_crop_max, y_crop_max) for the ROI.
 
@@ -517,11 +532,12 @@ class FaceMeshDetector:
             )
             return landmarks
 
-    def detect(self, frame: np.ndarray) -> Optional[np.ndarray]:
+    def detect(self, frame: np.ndarray, shift_hint: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
         """Detect face and extract landmarks with adaptive ROI tracking and multi-scale acquisition.
 
         Args:
             frame: Input frame in BGR (color) or grayscale format.
+            shift_hint: Optional (dx, dy) feed-forward camera translation shift from kinematic stabilizer.
 
         Returns:
             Landmarks as numpy array of shape (478, 3) in pixel coordinates
@@ -537,6 +553,8 @@ class FaceMeshDetector:
 
         # 1. High-resolution ROI tracking if active
         if self.enable_adaptive_roi and self.roi_tracker.is_tracking:
+            if shift_hint is not None:
+                self.roi_tracker.apply_shift_hint(shift_hint[0], shift_hint[1])
             crop, crop_box = self.roi_tracker.crop_frame(frame)
             norm_lms = self._detect_raw(crop)
             if norm_lms is not None:

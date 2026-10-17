@@ -527,48 +527,55 @@ def draw_solid_face_regions(
         return
 
     h, w = frame.shape[:2]
-    x_min = max(0, int(np.min(pts[:, 0])) - 6)
-    x_max = min(w, int(np.max(pts[:, 0])) + 6)
-    y_min = max(0, int(np.min(pts[:, 1])) - 6)
-    y_max = min(h, int(np.max(pts[:, 1])) + 6)
+    xs = pts[:, 0]
+    ys = pts[:, 1]
+    x_min = max(0, int(xs.min()) - 6)
+    x_max = min(w, int(xs.max()) + 6)
+    y_min = max(0, int(ys.min()) - 6)
+    y_max = min(h, int(ys.max()) + 6)
 
     if x_max <= x_min or y_max <= y_min:
         return
 
     roi = frame[y_min:y_max, x_min:x_max]
     pts_roi = pts - np.array([x_min, y_min], dtype=np.int32)
+    n_pts = len(pts)
 
     face_region = next((r for r in SOLID_REGIONS if r.key == "face"), None)
     face_enabled = bool(enabled_parts.get("face", True)) and (face_region is not None)
     specific_regions = [r for r in SOLID_REGIONS if r.key != "face" and enabled_parts.get(r.key, True)]
 
+    overlay = roi.copy()
+    face_polys = None
     # 1. Base layer: Face Oval if enabled
     if face_enabled and face_region is not None:
-        face_polys = [pts_roi[p] for p in face_region.polygons if len(p) > 0 and int(np.max(p)) < len(pts)]
+        face_polys = [pts_roi[p] for p in face_region.polygons if len(p) > 0 and int(np.max(p)) < n_pts]
         if face_polys:
             face_color = face_region.dimmed_color if dimmed else face_region.color
             face_alpha = min(face_region.alpha * 0.5, 0.12) if dimmed else face_region.alpha
-            face_overlay = roi.copy()
-            cv2.fillPoly(face_overlay, face_polys, face_color)
-            cv2.addWeighted(face_overlay, face_alpha, roi, 1.0 - face_alpha, 0.0, dst=roi)
+            cv2.fillPoly(overlay, face_polys, face_color)
+            cv2.addWeighted(overlay, face_alpha, roi, 1.0 - face_alpha, 0.0, dst=roi)
+            if specific_regions:
+                np.copyto(overlay, roi)
 
     # 2. Specific anatomical regions filled on top with vivid colors
+    collected_outlines = []
     if specific_regions:
-        spec_overlay = roi.copy()
         for reg in specific_regions:
             color = reg.dimmed_color if dimmed else reg.color
-            reg_polys = [pts_roi[p] for p in reg.polygons if len(p) > 0 and int(np.max(p)) < len(pts)]
+            reg_polys = [pts_roi[p] for p in reg.polygons if len(p) > 0 and int(np.max(p)) < n_pts]
             if reg_polys:
-                cv2.fillPoly(spec_overlay, reg_polys, color)
+                cv2.fillPoly(overlay, reg_polys, color)
+                collected_outlines.append((reg_polys, color, reg.border_thickness))
         blend_alpha = min(alpha * 0.5, 0.20) if dimmed else alpha
-        cv2.addWeighted(spec_overlay, blend_alpha, roi, 1.0 - blend_alpha, 0.0, dst=roi)
+        cv2.addWeighted(overlay, blend_alpha, roi, 1.0 - blend_alpha, 0.0, dst=roi)
 
     # 3. Crisp anti-aliased 1px perimeter outlines around each enabled region
-    for reg in SOLID_REGIONS:
-        if not enabled_parts.get(reg.key, True):
-            continue
-        color = reg.dimmed_color if dimmed else reg.color
-        reg_polys = [pts_roi[p] for p in reg.polygons if len(p) > 0 and int(np.max(p)) < len(pts)]
-        if reg_polys:
-            cv2.polylines(roi, reg_polys, isClosed=True, color=color,
-                          thickness=reg.border_thickness, lineType=cv2.LINE_AA)
+    if face_enabled and face_polys:
+        face_color = face_region.dimmed_color if dimmed else face_region.color
+        cv2.polylines(roi, face_polys, isClosed=True, color=face_color,
+                      thickness=face_region.border_thickness, lineType=cv2.LINE_AA)
+
+    for reg_polys, color, thickness in collected_outlines:
+        cv2.polylines(roi, reg_polys, isClosed=True, color=color,
+                      thickness=thickness, lineType=cv2.LINE_AA)

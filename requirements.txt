@@ -1,3 +1,12 @@
+# ==============================================================================
+# RECOMMENDED PYTHON ENVIRONMENT: Python 3.10 or Python 3.11 (64-bit)
+# 
+# • Supported: Python 3.9 – 3.11 (plug-and-play pre-compiled binary wheels)
+# • Python 3.8 is NOT supported (EOL; missing modern typing & package wheels)
+# • Python 3.12+ may fail during 'pip install mediapipe' if pre-compiled wheels
+#   are not yet published on PyPI for your OS (requires C++ / Bazel compilation).
+# ==============================================================================
+
 # ── Core Perception & Computer Vision ──
 opencv-python>=4.9.0
 mediapipe>=0.10.14

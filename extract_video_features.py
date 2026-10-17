@@ -17,6 +17,14 @@ import argparse
 import os
 import sys
 import time
+
+# Fast pre-flight Python version sanity check
+if sys.version_info < (3, 9):
+    sys.exit(
+        f"[FATAL] The Overclocked DMS requires Python 3.9+ (running {sys.version.split()[0]}).\n"
+        "Python 3.10 or 3.11 is strongly recommended for seamless pre-compiled binary wheels."
+    )
+
 import json
 from datetime import datetime
 from typing import Dict, List, Optional, Any

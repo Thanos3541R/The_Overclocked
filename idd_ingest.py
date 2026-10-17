@@ -307,6 +307,7 @@ def process_clip(
         min_fill_ratio=min_fill_ratio,
         gated_strategy=strategy_enum,
         default_label=clip.condition_label,
+        include_extended_features=True,
     )
 
     # 1-Euro filter bank (lazy-initialized on first valid frame)

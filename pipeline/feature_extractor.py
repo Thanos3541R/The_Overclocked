@@ -16,10 +16,14 @@ Alcohol-discriminating signals (Fransson et al. 2010):
   - Gaze yaw dispersion (σ_yaw): rolling std of horizontal gaze angle
     over ~15s; captures gaze tunneling toward road center
 """
+import logging
+import threading
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from utils.landmarks import (
     RIGHT_EYE_EAR_FLAT, LEFT_EYE_EAR_FLAT,
@@ -189,7 +193,18 @@ class FeatureExtractor:
                  vor_max_head_speed: float = 25.0,
                  pursuit_window_sec: float = 5.0,
                  perclos_min_warmup_sec: float = 0.0,
-                 fps: float = 30.0):
+                 fps: float = 30.0,
+                 deg_per_iris_unit: float = _DEG_PER_IRIS_UNIT,
+                 saccade_deg_per_unit: float = _SACCADE_DEG_PER_UNIT,
+                 saccade_subpixel_deadzone_dx: float = 0.026,
+                 saccade_subpixel_deadzone_hypot: float = 0.030,
+                 saccade_head_motion_dx: float = 0.055,
+                 eye_socket_vel_threshold: float = 0.75,
+                 blink_phase_timeout_frames: int = 8,
+                 sway_window_sec: float = 3.0,
+                 sway_yaw_gate_deg_s: float = 5.0,
+                 sway_nod_reset_deg_s: float = 35.0,
+                 rigid_head_sway_threshold: float = 0.12):
         """
         Args:
             blink_threshold: EAR below this = eyes closed.
@@ -219,6 +234,18 @@ class FeatureExtractor:
         self.saccade_offset_velocity = saccade_offset_velocity
         self._fps = fps
         self.perclos_min_warmup_sec = perclos_min_warmup_sec
+        self.deg_per_iris_unit = deg_per_iris_unit
+        self.saccade_deg_per_unit = saccade_deg_per_unit
+        self.saccade_subpixel_deadzone_dx = saccade_subpixel_deadzone_dx
+        self.saccade_subpixel_deadzone_hypot = saccade_subpixel_deadzone_hypot
+        self.saccade_head_motion_dx = saccade_head_motion_dx
+        self.eye_socket_vel_threshold = eye_socket_vel_threshold
+        self.blink_phase_timeout_frames = blink_phase_timeout_frames
+        self.sway_window_sec = sway_window_sec
+        self.sway_yaw_gate_deg_s = sway_yaw_gate_deg_s
+        self.sway_nod_reset_deg_s = sway_nod_reset_deg_s
+        self.rigid_head_sway_threshold = rigid_head_sway_threshold
+        self._lock = threading.RLock()
         self._flushing_cal_samples: Deque[float] = deque(maxlen=30)
         self._flushing_cal_locked: bool = False
 
@@ -303,7 +330,7 @@ class FeatureExtractor:
         self._pursuit_history: Deque[Tuple[bool, float]] = deque(maxlen=max(pursuit_buffer_size, 1))
 
         # ── Involuntary Postural Sway State (Section A) ──
-        self.sway_window_sec = 3.0
+        self.sway_window_sec = sway_window_sec
         sway_buffer_size = int(self.sway_window_sec * fps)
         self._head_pose_history: Deque[Tuple[float, float, float]] = deque(maxlen=max(sway_buffer_size, 1))
 
@@ -329,59 +356,60 @@ class FeatureExtractor:
 
         Essential when a scene cut, camera transition, or identity switch occurs.
         """
-        self._ear_history.clear()
-        self._consecutive_closed = 0
-        self._consecutive_yawn = 0
-        self._last_features = FrameFeatures()
-        self._prev_iris_x = None
-        self._prev_iris_y = None
-        self._prev_left_iris_x = None
-        self._prev_right_iris_x = None
-        self._prev_eye_center_norm = None
-        self._prev_timestamp = None
-        self._in_saccade = False
-        self._last_saccade_end_time = 0.0
-        self._prev_ear_avg = None
-        self._prev_ear_timestamp = None
-        self._blink_phase = "open"
-        self._closing_velocities.clear()
-        self._opening_velocities.clear()
-        self._last_blink_closing_vel = 0.0
-        self._last_blink_opening_vel = 0.0
-        self._open_ear_baseline = 0.28
-        self._phase_frames = 0
-        self._gaze_yaw_history.clear()
-        self._prev_head_yaw = None
-        self._prev_head_pitch = None
-        self._prev_head_roll = None
-        self._prev_head_timestamp = None
-        self._smoothed_vor_gain = 1.0
-        self._gen_drift_detected = False
-        self._gen_drift_vel = 0.0
-        self._gen_beat_times.clear()
-        self._pursuit_history.clear()
-        self._head_pose_history.clear()
-        self._smoothed_flushing = 1.0
-        self._flushing_cal_samples.clear()
-        self._flushing_cal_locked = False
-        self._flushing_initialized = False
-        self.baseline_brow_ratio = 0.0
-        self._brow_cal_samples.clear()
-        self._smoothed_brow_ratio = 0.0
-        self._brow_initialized = False
-        self._ear_tremor_history.clear()
-        self._rppg_green_history.clear()
-        self._last_rppg_bpm = 0.0
-        self._last_rppg_rmssd = 0.0
-        self._last_rppg_valid = False
-        self._ear_time_history.clear()
-        self._last_blink_time = 0.0
-        self._blink_times.clear()
-        self._stare_start_time = None
-        self._stare_anchor_x = None
-        self._stare_anchor_y = None
-        self._stare_iris_samples.clear()
-        self._just_resumed_from_gate = False
+        with self._lock:
+            self._ear_history.clear()
+            self._consecutive_closed = 0
+            self._consecutive_yawn = 0
+            self._last_features = FrameFeatures()
+            self._prev_iris_x = None
+            self._prev_iris_y = None
+            self._prev_left_iris_x = None
+            self._prev_right_iris_x = None
+            self._prev_eye_center_norm = None
+            self._prev_timestamp = None
+            self._in_saccade = False
+            self._last_saccade_end_time = 0.0
+            self._prev_ear_avg = None
+            self._prev_ear_timestamp = None
+            self._blink_phase = "open"
+            self._closing_velocities.clear()
+            self._opening_velocities.clear()
+            self._last_blink_closing_vel = 0.0
+            self._last_blink_opening_vel = 0.0
+            self._open_ear_baseline = 0.28
+            self._phase_frames = 0
+            self._gaze_yaw_history.clear()
+            self._prev_head_yaw = None
+            self._prev_head_pitch = None
+            self._prev_head_roll = None
+            self._prev_head_timestamp = None
+            self._smoothed_vor_gain = 1.0
+            self._gen_drift_detected = False
+            self._gen_drift_vel = 0.0
+            self._gen_beat_times.clear()
+            self._pursuit_history.clear()
+            self._head_pose_history.clear()
+            self._smoothed_flushing = 1.0
+            self._flushing_cal_samples.clear()
+            self._flushing_cal_locked = False
+            self._flushing_initialized = False
+            self.baseline_brow_ratio = 0.0
+            self._brow_cal_samples.clear()
+            self._smoothed_brow_ratio = 0.0
+            self._brow_initialized = False
+            self._ear_tremor_history.clear()
+            self._rppg_green_history.clear()
+            self._last_rppg_bpm = 0.0
+            self._last_rppg_rmssd = 0.0
+            self._last_rppg_valid = False
+            self._ear_time_history.clear()
+            self._last_blink_time = 0.0
+            self._blink_times.clear()
+            self._stare_start_time = None
+            self._stare_anchor_x = None
+            self._stare_anchor_y = None
+            self._stare_iris_samples.clear()
+            self._just_resumed_from_gate = False
 
     @staticmethod
     def compute_ear(landmarks: np.ndarray, indices: list) -> float:
@@ -610,23 +638,23 @@ class FeatureExtractor:
             effective_dx = raw_dx
 
         # Head-Motion / VOR Guard:
-        # Only activate when the eye sockets physically translate in pixel space (eye_socket_vel > 0.75)
+        # Only activate when the eye sockets physically translate in pixel space (eye_socket_vel > self.eye_socket_vel_threshold)
         # OR during large head rotations (head_vel_deg_s > 30.0) accompanied by socket translation,
         # so stationary PnP Euler jitter never blocks real saccades!
-        is_head_moving = (eye_socket_vel > 0.75) or (head_vel_deg_s > 30.0 and eye_socket_vel > 0.25)
+        is_head_moving = (eye_socket_vel > self.eye_socket_vel_threshold) or (head_vel_deg_s > 30.0 and eye_socket_vel > 0.25)
 
         if is_head_moving:
-            if effective_dx < 0.055:
+            if effective_dx < self.saccade_head_motion_dx:
                 velocity = 0.0
             else:
-                dx_deg = effective_dx * _SACCADE_DEG_PER_UNIT
+                dx_deg = effective_dx * self.saccade_deg_per_unit
                 velocity = max(0.0, (dx_deg / dt) - 0.5 * head_vel_deg_s)
         else:
-            # Sub-pixel deadzone: < 0.026 (~0.5 px) or hypot(raw_dx, raw_dy*0.5) < 0.030 is sensor noise
-            if effective_dx < 0.026 or np.hypot(raw_dx, raw_dy * 0.5) < 0.030:
+            # Sub-pixel deadzone: < self.saccade_subpixel_deadzone_dx or hypot < self.saccade_subpixel_deadzone_hypot is sensor noise
+            if effective_dx < self.saccade_subpixel_deadzone_dx or np.hypot(raw_dx, raw_dy * 0.5) < self.saccade_subpixel_deadzone_hypot:
                 velocity = 0.0
             else:
-                dx_deg = effective_dx * _SACCADE_DEG_PER_UNIT
+                dx_deg = effective_dx * self.saccade_deg_per_unit
                 velocity = dx_deg / dt  # deg/s
 
         # Saccade detection with hysteresis
@@ -693,8 +721,8 @@ class FeatureExtractor:
 
         self._phase_frames += 1
 
-        # Phase timeout guard: if trapped in closing or opening for > 8 frames
-        if self._phase_frames > 8:
+        # Phase timeout guard: if trapped in closing or opening for > self.blink_phase_timeout_frames frames
+        if self._phase_frames > self.blink_phase_timeout_frames:
             if self._closing_velocities:
                 self._last_blink_closing_vel = float(np.max(self._closing_velocities))
             if self._opening_velocities:
@@ -807,7 +835,7 @@ class FeatureExtractor:
         Divergent strabismus / inability to hold convergence (DRE LOC sign) has negative vergence (< -3.5°).
         Pure conjugate saccades yield vergence ≈ 0.0° (no false-positive LOC triggers).
         """
-        vergence = (right_iris_x - left_iris_x) * _DEG_PER_IRIS_UNIT
+        vergence = (right_iris_x - left_iris_x) * self.deg_per_iris_unit
         loc = bool(vergence < self.loc_vergence_threshold_deg)
         return (float(vergence), loc)
 
@@ -829,7 +857,7 @@ class FeatureExtractor:
         head_vel = d_yaw / dt   # deg/s
 
         if blink_phase == "open" and self._prev_iris_x is not None:
-            eye_vel = (avg_iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT / dt  # deg/s
+            eye_vel = (avg_iris_x - self._prev_iris_x) * self.deg_per_iris_unit / dt  # deg/s
 
             if self.vor_min_head_speed <= abs(head_vel) <= self.vor_max_head_speed:
                 raw_gain = -(eye_vel / head_vel)
@@ -857,7 +885,7 @@ class FeatureExtractor:
             return (recent_beats >= 2, recent_beats, self._gen_drift_vel)
 
         is_eccentric = abs(avg_iris_x) >= self.eccentric_gaze_threshold
-        iris_vel = (avg_iris_x - self._prev_iris_x) * _DEG_PER_IRIS_UNIT / dt  # deg/s
+        iris_vel = (avg_iris_x - self._prev_iris_x) * self.deg_per_iris_unit / dt  # deg/s
 
         if is_eccentric:
             # Centripetal velocity points back toward 0:
@@ -909,7 +937,7 @@ class FeatureExtractor:
         filtered out. We isolate 0.5 - 2.0 Hz tremor by applying high-pass linear detrending across
         the recent window to reject road grade/banking drift and evaluating residual variance.
         """
-        if head_angular_vel > 5.0 and len(self._head_pose_history) > 0:
+        if head_angular_vel > self.sway_yaw_gate_deg_s and len(self._head_pose_history) > 0:
             return (float(self._last_features.head_postural_sway), False)
 
         self._head_pose_history.append((timestamp, head_pitch, head_roll))
@@ -933,14 +961,15 @@ class FeatureExtractor:
             else:
                 detrended_pitches = pitches - np.mean(pitches)
                 detrended_rolls = rolls - np.mean(rolls)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Postural sway polyfit detrending fallback: %s", exc, exc_info=True)
             detrended_pitches = pitches - np.mean(pitches)
             detrended_rolls = rolls - np.mean(rolls)
 
         std_p = float(np.std(detrended_pitches))
         std_r = float(np.std(detrended_rolls))
         sway = float(np.sqrt(std_p**2 + std_r**2))
-        rigid_stabilization = bool(sway < 0.12 and len(recent) >= 20)
+        rigid_stabilization = bool(sway < self.rigid_head_sway_threshold and len(recent) >= 20)
         return (sway, rigid_stabilization)
 
     def _compute_facial_flushing(self, frame: Optional[np.ndarray], landmarks: np.ndarray) -> Tuple[float, bool, float]:
@@ -1000,8 +1029,8 @@ class FeatureExtractor:
 
                 flushing_delta = float((self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing))
                 return (float(self._smoothed_flushing), True, flushing_delta)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Facial flushing patch sampling failed: %s", exc, exc_info=True)
 
         return (float(self._smoothed_flushing), True, 0.0)
 
@@ -1059,8 +1088,8 @@ class FeatureExtractor:
             return (0.0, False)
 
         drift_deg = np.sqrt(
-            ((avg_iris_x - self._stare_anchor_x) * _DEG_PER_IRIS_UNIT) ** 2 +
-            ((avg_iris_y - self._stare_anchor_y) * _DEG_PER_IRIS_UNIT) ** 2
+            ((avg_iris_x - self._stare_anchor_x) * self.deg_per_iris_unit) ** 2 +
+            ((avg_iris_y - self._stare_anchor_y) * self.deg_per_iris_unit) ** 2
         )
 
         if saccade_detected or blink_detected or drift_deg > 2.5:
@@ -1080,7 +1109,7 @@ class FeatureExtractor:
         if duration >= 6.0 and len(self._stare_iris_samples) >= 15:
             xs = [x for x, _ in self._stare_iris_samples]
             ys = [y for _, y in self._stare_iris_samples]
-            sigma_deg = float(np.sqrt(np.std(xs)**2 + np.std(ys)**2) * _DEG_PER_IRIS_UNIT)
+            sigma_deg = float(np.sqrt(np.std(xs)**2 + np.std(ys)**2) * self.deg_per_iris_unit)
             compensatory_stare = bool(sigma_deg < 0.8)
 
         return (duration, compensatory_stare)
@@ -1128,7 +1157,8 @@ class FeatureExtractor:
             brow_delta = float((self._smoothed_brow_ratio - self.baseline_brow_ratio) / max(0.1, abs(self.baseline_brow_ratio)))
             frontalis_active = bool(brow_delta >= 0.12)
             return (float(self._smoothed_brow_ratio), float(brow_delta), frontalis_active)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Brow ratio computation failed: %s", exc, exc_info=True)
             return (0.0, 0.0, False)
 
     def _compute_eyelid_tremor(self, ear_avg: float, timestamp: float, blink_phase: str) -> float:
@@ -1246,7 +1276,8 @@ class FeatureExtractor:
             self._last_rppg_rmssd = rmssd
             self._last_rppg_valid = True
             return (bpm, rmssd, True)
-        except Exception:
+        except Exception as exc:
+            logger.debug("rPPG pulse FFT/HRV computation failed: %s", exc, exc_info=True)
             return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
 
     def _compute_anti_masking_divergence(self, features: FrameFeatures, timestamp: float = 0.0) -> Tuple[float, bool]:
@@ -1350,277 +1381,278 @@ class FeatureExtractor:
         Returns:
             FrameFeatures dataclass with all computed values.
         """
-        features = FrameFeatures(
-            timestamp=timestamp,
-            frame_id=frame_id,
-            face_valid=face_valid,
-            head_yaw=head_yaw,
-            head_pitch=head_pitch,
-            head_roll=head_roll,
-            imu_gated=imu_gated,
-            gating_reason=gating_reason,
-        )
+        with self._lock:
+            features = FrameFeatures(
+                timestamp=timestamp,
+                frame_id=frame_id,
+                face_valid=face_valid,
+                head_yaw=head_yaw,
+                head_pitch=head_pitch,
+                head_roll=head_roll,
+                imu_gated=imu_gated,
+                gating_reason=gating_reason,
+            )
 
-        if imu_gated and not features.gating_reason:
-            features.gating_reason = "imu_shock"
+            if imu_gated and not features.gating_reason:
+                features.gating_reason = "imu_shock"
 
-        if not face_valid or imu_gated:
-            self._just_resumed_from_gate = True
-            self._in_saccade = False
-            # Hold last valid features, but update metadata
-            features.ear_left = self._last_features.ear_left
-            features.ear_right = self._last_features.ear_right
-            features.ear_avg = self._last_features.ear_avg
-            features.mar = self._last_features.mar
-            features.perclos = self._last_features.perclos
-            features.left_iris_x = self._last_features.left_iris_x
-            features.left_iris_y = self._last_features.left_iris_y
-            features.right_iris_x = self._last_features.right_iris_x
-            features.right_iris_y = self._last_features.right_iris_y
-            features.saccade_velocity = 0.0
-            features.saccade_detected = False
-            features.saccade_latency_ms = self._last_features.saccade_latency_ms
-            features.raw_iris_dx = 0.0
-            features.blink_phase = "open"
-            self._blink_phase = "open"
-            features.blink_closing_velocity = self._last_features.blink_closing_velocity
-            features.blink_opening_velocity = self._last_features.blink_opening_velocity
-            features.gaze_yaw_dispersion = self._last_features.gaze_yaw_dispersion
-            features.gen_detected = self._last_features.gen_detected
-            features.gen_beat_count = self._last_features.gen_beat_count
-            features.gen_slow_phase_vel = self._last_features.gen_slow_phase_vel
-            features.pursuit_fragmentation_ratio = self._last_features.pursuit_fragmentation_ratio
-            features.vergence_angle_deg = self._last_features.vergence_angle_deg
-            features.lack_of_convergence = self._last_features.lack_of_convergence
-            features.vor_gain = self._last_features.vor_gain
-            features.head_postural_sway = self._last_features.head_postural_sway
-            features.facial_flushing_ratio = self._last_features.facial_flushing_ratio
-            features.flushing_valid = self._last_features.flushing_valid
-            features.flushing_delta = self._last_features.flushing_delta
-            features.brow_eye_distance_ratio = self._last_features.brow_eye_distance_ratio
-            features.brow_elevation_delta = self._last_features.brow_elevation_delta
-            features.frontalis_compensation_active = self._last_features.frontalis_compensation_active
-            features.eyelid_tremor_hz = self._last_features.eyelid_tremor_hz
-            features.rppg_pulse_bpm = self._last_features.rppg_pulse_bpm
-            features.rppg_hrv_rmssd_ms = self._last_features.rppg_hrv_rmssd_ms
-            features.rppg_valid = self._last_features.rppg_valid
-            features.deliberate_blink_suppression = self._last_features.deliberate_blink_suppression
-            features.voluntary_eye_widening = self._last_features.voluntary_eye_widening
-            features.stare_fixation_duration_s = self._last_features.stare_fixation_duration_s
-            features.compensatory_stare_active = self._last_features.compensatory_stare_active
-            features.rigid_head_stabilization = self._last_features.rigid_head_stabilization
-            features.masking_divergence_score = self._last_features.masking_divergence_score
-            features.masking_detected = self._last_features.masking_detected
-            return features
+            if not face_valid or imu_gated:
+                self._just_resumed_from_gate = True
+                self._in_saccade = False
+                # Hold last valid features, but update metadata
+                features.ear_left = self._last_features.ear_left
+                features.ear_right = self._last_features.ear_right
+                features.ear_avg = self._last_features.ear_avg
+                features.mar = self._last_features.mar
+                features.perclos = self._last_features.perclos
+                features.left_iris_x = self._last_features.left_iris_x
+                features.left_iris_y = self._last_features.left_iris_y
+                features.right_iris_x = self._last_features.right_iris_x
+                features.right_iris_y = self._last_features.right_iris_y
+                features.saccade_velocity = 0.0
+                features.saccade_detected = False
+                features.saccade_latency_ms = self._last_features.saccade_latency_ms
+                features.raw_iris_dx = 0.0
+                features.blink_phase = "open"
+                self._blink_phase = "open"
+                features.blink_closing_velocity = self._last_features.blink_closing_velocity
+                features.blink_opening_velocity = self._last_features.blink_opening_velocity
+                features.gaze_yaw_dispersion = self._last_features.gaze_yaw_dispersion
+                features.gen_detected = self._last_features.gen_detected
+                features.gen_beat_count = self._last_features.gen_beat_count
+                features.gen_slow_phase_vel = self._last_features.gen_slow_phase_vel
+                features.pursuit_fragmentation_ratio = self._last_features.pursuit_fragmentation_ratio
+                features.vergence_angle_deg = self._last_features.vergence_angle_deg
+                features.lack_of_convergence = self._last_features.lack_of_convergence
+                features.vor_gain = self._last_features.vor_gain
+                features.head_postural_sway = self._last_features.head_postural_sway
+                features.facial_flushing_ratio = self._last_features.facial_flushing_ratio
+                features.flushing_valid = self._last_features.flushing_valid
+                features.flushing_delta = self._last_features.flushing_delta
+                features.brow_eye_distance_ratio = self._last_features.brow_eye_distance_ratio
+                features.brow_elevation_delta = self._last_features.brow_elevation_delta
+                features.frontalis_compensation_active = self._last_features.frontalis_compensation_active
+                features.eyelid_tremor_hz = self._last_features.eyelid_tremor_hz
+                features.rppg_pulse_bpm = self._last_features.rppg_pulse_bpm
+                features.rppg_hrv_rmssd_ms = self._last_features.rppg_hrv_rmssd_ms
+                features.rppg_valid = self._last_features.rppg_valid
+                features.deliberate_blink_suppression = self._last_features.deliberate_blink_suppression
+                features.voluntary_eye_widening = self._last_features.voluntary_eye_widening
+                features.stare_fixation_duration_s = self._last_features.stare_fixation_duration_s
+                features.compensatory_stare_active = self._last_features.compensatory_stare_active
+                features.rigid_head_stabilization = self._last_features.rigid_head_stabilization
+                features.masking_divergence_score = self._last_features.masking_divergence_score
+                features.masking_detected = self._last_features.masking_detected
+                return features
 
-        if getattr(self, "_just_resumed_from_gate", False):
-            self._just_resumed_from_gate = False
-            self._in_saccade = False
-            self._prev_timestamp = timestamp
-            self._prev_ear_timestamp = timestamp
-            self._prev_head_timestamp = timestamp
-            self._prev_ear_avg = (self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT) + self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)) / 2.0
+            if getattr(self, "_just_resumed_from_gate", False):
+                self._just_resumed_from_gate = False
+                self._in_saccade = False
+                self._prev_timestamp = timestamp
+                self._prev_ear_timestamp = timestamp
+                self._prev_head_timestamp = timestamp
+                self._prev_ear_avg = (self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT) + self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)) / 2.0
+                iris_lms = image_landmarks if image_landmarks is not None else landmarks
+                left_x, left_y = self.compute_iris_position(iris_lms, LEFT_IRIS_CENTER, 33, 133)
+                right_x, right_y = self.compute_iris_position(iris_lms, RIGHT_IRIS_CENTER, 263, 362)
+                self._prev_iris_x = (left_x + right_x) / 2.0
+                self._prev_iris_y = (left_y + right_y) / 2.0
+                self._prev_left_iris_x = left_x
+                self._prev_right_iris_x = right_x
+                self._prev_eye_center_norm = self._compute_eye_socket_center_norm(iris_lms)
+                self._prev_head_yaw = head_yaw
+                self._prev_head_pitch = head_pitch
+                self._prev_head_roll = head_roll
+
+            # ── EAR ──
+            features.ear_right = self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)
+            features.ear_left = self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT)
+            features.ear_avg = (features.ear_left + features.ear_right) / 2.0
+
+            # ── MAR ──
+            features.mar = self.compute_mar(landmarks)
+
+            # ── Blink / Micro-sleep detection ──
+            eyes_closed = features.ear_avg < self.blink_threshold
+            if eyes_closed:
+                self._consecutive_closed += 1
+            else:
+                if self._consecutive_closed > 0:
+                    features.blink_detected = True
+                self._consecutive_closed = 0
+
+            features.microsleep_detected = (
+                self._consecutive_closed >= self.microsleep_frames)
+
+            # ── Yawn detection ──
+            if features.mar > self.mar_yawn_threshold:
+                self._consecutive_yawn += 1
+            else:
+                self._consecutive_yawn = 0
+            features.yawn_detected = (
+                self._consecutive_yawn >= self.yawn_frames)
+
+            # ── PERCLOS (O(1) sliding window ring counter) ──
+            if getattr(self, "_last_blink_threshold", None) != self.blink_threshold:
+                self._last_blink_threshold = self.blink_threshold
+                self._perclos_closed_count = sum(1 for e in self._ear_history if e < self.blink_threshold)
+
+            if len(self._ear_history) == self._ear_history.maxlen:
+                old_ear = self._ear_history[0]
+                if old_ear < self.blink_threshold:
+                    self._perclos_closed_count = max(0, self._perclos_closed_count - 1)
+
+            self._ear_history.append(features.ear_avg)
+            if features.ear_avg < self.blink_threshold:
+                self._perclos_closed_count += 1
+
+            min_samples = int(self.perclos_min_warmup_sec * self._fps) if self.perclos_min_warmup_sec > 0.0 else 1
+            denom = max(len(self._ear_history), min_samples, 1)
+            features.perclos = float(np.clip(self._perclos_closed_count / denom, 0.0, 1.0))
+
+            # ── Blink closing/opening velocity & FSM tracking ──
+            features.blink_closing_velocity, features.blink_opening_velocity = \
+                self._compute_blink_velocity(features.ear_avg, timestamp)
+            features.blink_phase = self._blink_phase
+
+            # ── Iris gaze ──
             iris_lms = image_landmarks if image_landmarks is not None else landmarks
-            left_x, left_y = self.compute_iris_position(iris_lms, LEFT_IRIS_CENTER, 33, 133)
-            right_x, right_y = self.compute_iris_position(iris_lms, RIGHT_IRIS_CENTER, 263, 362)
-            self._prev_iris_x = (left_x + right_x) / 2.0
-            self._prev_iris_y = (left_y + right_y) / 2.0
-            self._prev_left_iris_x = left_x
-            self._prev_right_iris_x = right_x
-            self._prev_eye_center_norm = self._compute_eye_socket_center_norm(iris_lms)
+            # Left eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
+            features.left_iris_x, features.left_iris_y = self.compute_iris_position(
+                iris_lms, LEFT_IRIS_CENTER, 33, 133)
+            # Right eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
+            features.right_iris_x, features.right_iris_y = self.compute_iris_position(
+                iris_lms, RIGHT_IRIS_CENTER, 263, 362)
+
+            # Compute head angular velocity & eye socket translation velocity for VOR / motion suppression
+            head_total_vel = 0.0
+            if self._prev_head_yaw is not None and self._prev_head_pitch is not None and self._prev_head_timestamp is not None:
+                dt_head = timestamp - self._prev_head_timestamp
+                if dt_head > 1e-6:
+                    d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
+                    d_pitch = (head_pitch - self._prev_head_pitch + 180.0) % 360.0 - 180.0
+                    head_total_vel = float(np.hypot(d_yaw, d_pitch) / dt_head)
+
+            curr_socket = self._compute_eye_socket_center_norm(iris_lms)
+            eye_socket_vel = 0.0
+            if curr_socket is not None and self._prev_eye_center_norm is not None and self._prev_timestamp is not None:
+                dt_socket = timestamp - self._prev_timestamp
+                if dt_socket > 1e-6:
+                    eye_socket_vel = float(np.linalg.norm(curr_socket - self._prev_eye_center_norm) / dt_socket)
+
+            # ── Saccadic velocity & latency (Fransson et al. 2010) ──
+            avg_iris_x = (features.left_iris_x + features.right_iris_x) / 2.0
+            avg_iris_y = (features.left_iris_y + features.right_iris_y) / 2.0
+            features.saccade_velocity, features.saccade_detected, features.saccade_latency_ms, features.raw_iris_dx = \
+                self._compute_saccade_dynamics(
+                    avg_iris_x, avg_iris_y, timestamp,
+                    blink_phase=self._blink_phase,
+                    left_iris_x=features.left_iris_x,
+                    right_iris_x=features.right_iris_x,
+                    head_vel_deg_s=head_total_vel,
+                    eye_socket_vel=eye_socket_vel,
+                )
+
+            # ── Gaze yaw dispersion (σ_yaw) ──
+            if self._blink_phase == "open" and not features.blink_detected:
+                features.gaze_yaw_dispersion = self._compute_gaze_yaw_dispersion(avg_iris_x)
+            else:
+                features.gaze_yaw_dispersion = (
+                    float(np.std(self._gaze_yaw_history)) if len(self._gaze_yaw_history) >= 10 else 0.0
+                )
+
+            # ── Advanced Oculomotor Impairment Signals ──
+            # 1. Binocular vergence & Lack of Convergence (LOC - DRE sign)
+            # Gate on blink, extreme yaw (>20°), steep pitch (>15°), and eccentric gaze (>0.30)
+            # where eyeball geometry naturally foreshortens the abducting eye
+            if self._blink_phase != "open" or abs(head_yaw) > 20.0 or abs(head_pitch) > 15.0 or abs(avg_iris_x) > 0.30:
+                features.vergence_angle_deg = self._last_features.vergence_angle_deg
+                features.lack_of_convergence = False
+            else:
+                features.vergence_angle_deg, features.lack_of_convergence = \
+                    self._compute_binocular_vergence(features.left_iris_x, features.right_iris_x)
+
+            # 2. Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842)
+            features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase)
+
+            # 3. Gaze-Evoked Nystagmus (GEN - Romano et al. 2017)
+            features.gen_detected, features.gen_beat_count, features.gen_slow_phase_vel = \
+                self._compute_gen(avg_iris_x, timestamp)
+
+            # 4. Smooth Pursuit Fragmentation Ratio
+            features.pursuit_fragmentation_ratio = \
+                self._compute_pursuit_fragmentation(features.saccade_detected, timestamp)
+
+            # ── Postural Sway & Head Stabilization (Section A & B) ──
+            head_angular_vel = 0.0
+            pitch_roll_vel = 0.0
+            if self._prev_head_yaw is not None and self._prev_head_timestamp is not None:
+                dt_head = timestamp - self._prev_head_timestamp
+                if dt_head > 1e-6:
+                    d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
+                    head_angular_vel = float(abs(d_yaw) / dt_head)
+                    if self._prev_head_pitch is not None and self._prev_head_roll is not None:
+                        d_pitch = (head_pitch - self._prev_head_pitch + 180.0) % 360.0 - 180.0
+                        d_roll = (head_roll - self._prev_head_roll + 180.0) % 360.0 - 180.0
+                        pitch_roll_vel = float(np.hypot(d_pitch, d_roll) / dt_head)
+
+            if pitch_roll_vel > self.sway_nod_reset_deg_s:
+                self._head_pose_history.clear()
+                features.head_postural_sway = float(self._last_features.head_postural_sway)
+                features.rigid_head_stabilization = False
+            else:
+                features.head_postural_sway, features.rigid_head_stabilization = \
+                    self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
+
+            # Involuntary impairment override: drowsy drivers in microsleep or high PERCLOS cannot be masking with rigid head
+            if features.microsleep_detected or features.perclos > 0.15:
+                features.rigid_head_stabilization = False
+
+            # ── Facial Flushing / Vasodilation (Section A) ──
+            sample_lms = image_landmarks if image_landmarks is not None else landmarks
+            features.facial_flushing_ratio, features.flushing_valid, features.flushing_delta = \
+                self._compute_facial_flushing(frame, sample_lms)
+
+            # ── Eyebrow / Frontalis Micromotions ──
+            features.brow_eye_distance_ratio, features.brow_elevation_delta, features.frontalis_compensation_active = \
+                self._compute_brow_micromotion(sample_lms, features.ear_avg)
+
+            # ── Palpebral Eyelid Tremor (3-15 Hz) ──
+            features.eyelid_tremor_hz = \
+                self._compute_eyelid_tremor(features.ear_avg, timestamp, self._blink_phase)
+
+            # ── T-zone rPPG Pulse & HRV ──
+            features.rppg_pulse_bpm, features.rppg_hrv_rmssd_ms, features.rppg_valid = \
+                self._compute_rppg_pulse(frame, sample_lms, timestamp)
+
+            # ── Voluntary Masking Behaviors (Section B) ──
+            if features.blink_detected:
+                self._blink_times.append(timestamp)
+
+            features.voluntary_eye_widening = \
+                self._compute_voluntary_eye_widening(
+                    features.ear_avg, timestamp,
+                    frontalis_compensation_active=features.frontalis_compensation_active,
+                )
+            features.deliberate_blink_suppression = \
+                self._compute_deliberate_blink_suppression(features.blink_detected, features.ear_avg, timestamp)
+            features.stare_fixation_duration_s, features.compensatory_stare_active = \
+                self._compute_fixation_stare(avg_iris_x, avg_iris_y, features.saccade_detected, features.blink_detected, timestamp)
+
+            # ── Anti-Masking Divergence Metric (M_mask) ──
+            features.masking_divergence_score, features.masking_detected = \
+                self._compute_anti_masking_divergence(features, timestamp)
+
+            self._prev_left_iris_x = features.left_iris_x
+            self._prev_right_iris_x = features.right_iris_x
+            self._prev_eye_center_norm = curr_socket
+            self._prev_iris_x = avg_iris_x
+            self._prev_iris_y = avg_iris_y
             self._prev_head_yaw = head_yaw
             self._prev_head_pitch = head_pitch
             self._prev_head_roll = head_roll
+            self._prev_head_timestamp = timestamp
+            self._prev_timestamp = timestamp
 
-        # ── EAR ──
-        features.ear_right = self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)
-        features.ear_left = self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT)
-        features.ear_avg = (features.ear_left + features.ear_right) / 2.0
-
-        # ── MAR ──
-        features.mar = self.compute_mar(landmarks)
-
-        # ── Blink / Micro-sleep detection ──
-        eyes_closed = features.ear_avg < self.blink_threshold
-        if eyes_closed:
-            self._consecutive_closed += 1
-        else:
-            if self._consecutive_closed > 0:
-                features.blink_detected = True
-            self._consecutive_closed = 0
-
-        features.microsleep_detected = (
-            self._consecutive_closed >= self.microsleep_frames)
-
-        # ── Yawn detection ──
-        if features.mar > self.mar_yawn_threshold:
-            self._consecutive_yawn += 1
-        else:
-            self._consecutive_yawn = 0
-        features.yawn_detected = (
-            self._consecutive_yawn >= self.yawn_frames)
-
-        # ── PERCLOS (O(1) sliding window ring counter) ──
-        if getattr(self, "_last_blink_threshold", None) != self.blink_threshold:
-            self._last_blink_threshold = self.blink_threshold
-            self._perclos_closed_count = sum(1 for e in self._ear_history if e < self.blink_threshold)
-
-        if len(self._ear_history) == self._ear_history.maxlen:
-            old_ear = self._ear_history[0]
-            if old_ear < self.blink_threshold:
-                self._perclos_closed_count = max(0, self._perclos_closed_count - 1)
-
-        self._ear_history.append(features.ear_avg)
-        if features.ear_avg < self.blink_threshold:
-            self._perclos_closed_count += 1
-
-        min_samples = int(self.perclos_min_warmup_sec * self._fps) if self.perclos_min_warmup_sec > 0.0 else 1
-        denom = max(len(self._ear_history), min_samples, 1)
-        features.perclos = float(np.clip(self._perclos_closed_count / denom, 0.0, 1.0))
-
-        # ── Blink closing/opening velocity & FSM tracking ──
-        features.blink_closing_velocity, features.blink_opening_velocity = \
-            self._compute_blink_velocity(features.ear_avg, timestamp)
-        features.blink_phase = self._blink_phase
-
-        # ── Iris gaze ──
-        iris_lms = image_landmarks if image_landmarks is not None else landmarks
-        # Left eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
-        features.left_iris_x, features.left_iris_y = self.compute_iris_position(
-            iris_lms, LEFT_IRIS_CENTER, 33, 133)
-        # Right eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
-        features.right_iris_x, features.right_iris_y = self.compute_iris_position(
-            iris_lms, RIGHT_IRIS_CENTER, 263, 362)
-
-        # Compute head angular velocity & eye socket translation velocity for VOR / motion suppression
-        head_total_vel = 0.0
-        if self._prev_head_yaw is not None and self._prev_head_pitch is not None and self._prev_head_timestamp is not None:
-            dt_head = timestamp - self._prev_head_timestamp
-            if dt_head > 1e-6:
-                d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
-                d_pitch = (head_pitch - self._prev_head_pitch + 180.0) % 360.0 - 180.0
-                head_total_vel = float(np.hypot(d_yaw, d_pitch) / dt_head)
-
-        curr_socket = self._compute_eye_socket_center_norm(iris_lms)
-        eye_socket_vel = 0.0
-        if curr_socket is not None and self._prev_eye_center_norm is not None and self._prev_timestamp is not None:
-            dt_socket = timestamp - self._prev_timestamp
-            if dt_socket > 1e-6:
-                eye_socket_vel = float(np.linalg.norm(curr_socket - self._prev_eye_center_norm) / dt_socket)
-
-        # ── Saccadic velocity & latency (Fransson et al. 2010) ──
-        avg_iris_x = (features.left_iris_x + features.right_iris_x) / 2.0
-        avg_iris_y = (features.left_iris_y + features.right_iris_y) / 2.0
-        features.saccade_velocity, features.saccade_detected, features.saccade_latency_ms, features.raw_iris_dx = \
-            self._compute_saccade_dynamics(
-                avg_iris_x, avg_iris_y, timestamp,
-                blink_phase=self._blink_phase,
-                left_iris_x=features.left_iris_x,
-                right_iris_x=features.right_iris_x,
-                head_vel_deg_s=head_total_vel,
-                eye_socket_vel=eye_socket_vel,
-            )
-
-        # ── Gaze yaw dispersion (σ_yaw) ──
-        if self._blink_phase == "open" and not features.blink_detected:
-            features.gaze_yaw_dispersion = self._compute_gaze_yaw_dispersion(avg_iris_x)
-        else:
-            features.gaze_yaw_dispersion = (
-                float(np.std(self._gaze_yaw_history)) if len(self._gaze_yaw_history) >= 10 else 0.0
-            )
-
-        # ── Advanced Oculomotor Impairment Signals ──
-        # 1. Binocular vergence & Lack of Convergence (LOC - DRE sign)
-        # Gate on blink, extreme yaw (>20°), steep pitch (>15°), and eccentric gaze (>0.30)
-        # where eyeball geometry naturally foreshortens the abducting eye
-        if self._blink_phase != "open" or abs(head_yaw) > 20.0 or abs(head_pitch) > 15.0 or abs(avg_iris_x) > 0.30:
-            features.vergence_angle_deg = self._last_features.vergence_angle_deg
-            features.lack_of_convergence = False
-        else:
-            features.vergence_angle_deg, features.lack_of_convergence = \
-                self._compute_binocular_vergence(features.left_iris_x, features.right_iris_x)
-
-        # 2. Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842)
-        features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase)
-
-        # 3. Gaze-Evoked Nystagmus (GEN - Romano et al. 2017)
-        features.gen_detected, features.gen_beat_count, features.gen_slow_phase_vel = \
-            self._compute_gen(avg_iris_x, timestamp)
-
-        # 4. Smooth Pursuit Fragmentation Ratio
-        features.pursuit_fragmentation_ratio = \
-            self._compute_pursuit_fragmentation(features.saccade_detected, timestamp)
-
-        # ── Postural Sway & Head Stabilization (Section A & B) ──
-        head_angular_vel = 0.0
-        pitch_roll_vel = 0.0
-        if self._prev_head_yaw is not None and self._prev_head_timestamp is not None:
-            dt_head = timestamp - self._prev_head_timestamp
-            if dt_head > 1e-6:
-                d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
-                head_angular_vel = float(abs(d_yaw) / dt_head)
-                if self._prev_head_pitch is not None and self._prev_head_roll is not None:
-                    d_pitch = (head_pitch - self._prev_head_pitch + 180.0) % 360.0 - 180.0
-                    d_roll = (head_roll - self._prev_head_roll + 180.0) % 360.0 - 180.0
-                    pitch_roll_vel = float(np.hypot(d_pitch, d_roll) / dt_head)
-
-        if pitch_roll_vel > 35.0:
-            self._head_pose_history.clear()
-            features.head_postural_sway = float(self._last_features.head_postural_sway)
-            features.rigid_head_stabilization = False
-        else:
-            features.head_postural_sway, features.rigid_head_stabilization = \
-                self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
-
-        # Involuntary impairment override: drowsy drivers in microsleep or high PERCLOS cannot be masking with rigid head
-        if features.microsleep_detected or features.perclos > 0.15:
-            features.rigid_head_stabilization = False
-
-        # ── Facial Flushing / Vasodilation (Section A) ──
-        sample_lms = image_landmarks if image_landmarks is not None else landmarks
-        features.facial_flushing_ratio, features.flushing_valid, features.flushing_delta = \
-            self._compute_facial_flushing(frame, sample_lms)
-
-        # ── Eyebrow / Frontalis Micromotions ──
-        features.brow_eye_distance_ratio, features.brow_elevation_delta, features.frontalis_compensation_active = \
-            self._compute_brow_micromotion(sample_lms, features.ear_avg)
-
-        # ── Palpebral Eyelid Tremor (3-15 Hz) ──
-        features.eyelid_tremor_hz = \
-            self._compute_eyelid_tremor(features.ear_avg, timestamp, self._blink_phase)
-
-        # ── T-zone rPPG Pulse & HRV ──
-        features.rppg_pulse_bpm, features.rppg_hrv_rmssd_ms, features.rppg_valid = \
-            self._compute_rppg_pulse(frame, sample_lms, timestamp)
-
-        # ── Voluntary Masking Behaviors (Section B) ──
-        if features.blink_detected:
-            self._blink_times.append(timestamp)
-
-        features.voluntary_eye_widening = \
-            self._compute_voluntary_eye_widening(
-                features.ear_avg, timestamp,
-                frontalis_compensation_active=features.frontalis_compensation_active,
-            )
-        features.deliberate_blink_suppression = \
-            self._compute_deliberate_blink_suppression(features.blink_detected, features.ear_avg, timestamp)
-        features.stare_fixation_duration_s, features.compensatory_stare_active = \
-            self._compute_fixation_stare(avg_iris_x, avg_iris_y, features.saccade_detected, features.blink_detected, timestamp)
-
-        # ── Anti-Masking Divergence Metric (M_mask) ──
-        features.masking_divergence_score, features.masking_detected = \
-            self._compute_anti_masking_divergence(features, timestamp)
-
-        self._prev_left_iris_x = features.left_iris_x
-        self._prev_right_iris_x = features.right_iris_x
-        self._prev_eye_center_norm = curr_socket
-        self._prev_iris_x = avg_iris_x
-        self._prev_iris_y = avg_iris_y
-        self._prev_head_yaw = head_yaw
-        self._prev_head_pitch = head_pitch
-        self._prev_head_roll = head_roll
-        self._prev_head_timestamp = timestamp
-        self._prev_timestamp = timestamp
-
-        self._last_features = features
-        return features
+            self._last_features = features
+            return features

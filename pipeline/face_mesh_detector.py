@@ -12,12 +12,15 @@ Critical implementation details:
   - Multi-Scale Pyramid Acquisition: Falls back to central driver quadrant crop
     ([0.2*W, 0.1*H] to [0.8*W, 0.85*H]) on frame 0 or when lost.
 """
+import logging
 import os
 import urllib.request
 import cv2
 import numpy as np
 import mediapipe as mp
 from typing import Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 
@@ -73,7 +76,8 @@ class AdaptiveROITracker:
             return 0.0, 0.0, 0.0, 0.0
         try:
             lms = np.asarray(landmarks)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed converting landmarks in compute_bbox: %s", exc, exc_info=True)
             return 0.0, 0.0, 0.0, 0.0
 
         if (lms.size == 0 or lms.ndim < 1 or
@@ -119,7 +123,8 @@ class AdaptiveROITracker:
 
         try:
             landmarks = np.asarray(landmarks)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed converting landmarks in AdaptiveROITracker.update: %s", exc, exc_info=True)
             self.reset()
             return
 

@@ -16,10 +16,13 @@ Evaluates biological markers of alcohol intoxication and drowsiness:
      - Gaze tunneling (reduced σ_yaw)
      - Elevated PERCLOS & microsleep episodes
 """
-import cv2
-import numpy as np
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+import cv2
+import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from pipeline.feature_extractor import FrameFeatures, is_monochrome_frame
 from utils.landmarks import RIGHT_EYE_CONTOUR, LEFT_EYE_CONTOUR
@@ -511,5 +514,6 @@ class ImpairmentClassifier:
             mean_gb = (np.mean(g) + np.mean(b)) / 2.0
 
             return float(mean_r / (mean_gb + 1e-5))
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to extract sclera redness: %s", exc, exc_info=True)
             return 1.0

@@ -128,6 +128,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     normalizer = PnPNormalizer(
         frame_width=capture.frame_width,
         frame_height=capture.frame_height,
+        focal_length=config.focal_length_px,
+        calibration_path=config.camera_calibration_path,
     )
     pose_gate = HeadPoseGate(
         yaw_limit=config.yaw_limit,
@@ -158,6 +160,17 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         pursuit_window_sec=config.pursuit_window_sec,
         perclos_min_warmup_sec=5.0,
         fps=capture.fps,
+        deg_per_iris_unit=config.deg_per_iris_unit,
+        saccade_deg_per_unit=config.saccade_deg_per_unit,
+        saccade_subpixel_deadzone_dx=config.saccade_subpixel_deadzone_dx,
+        saccade_subpixel_deadzone_hypot=config.saccade_subpixel_deadzone_hypot,
+        saccade_head_motion_dx=config.saccade_head_motion_dx,
+        eye_socket_vel_threshold=config.eye_socket_vel_threshold,
+        blink_phase_timeout_frames=config.blink_phase_timeout_frames,
+        sway_window_sec=config.sway_window_sec,
+        sway_yaw_gate_deg_s=config.sway_yaw_gate_deg_s,
+        sway_nod_reset_deg_s=config.sway_nod_reset_deg_s,
+        rigid_head_sway_threshold=config.rigid_head_sway_threshold,
     )
     calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=capture.fps)
     imu_gate = SoftwareIMUGate(

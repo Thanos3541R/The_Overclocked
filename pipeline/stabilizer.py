@@ -3,10 +3,13 @@
 Operates in coordinate and ROI-window space rather than warping image pixels
 (preserving 100% sub-pixel sharpness for iris and eyelid contour extraction).
 """
+import logging
 from collections import deque
 from typing import Deque, Optional, Tuple
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class KinematicStabilizer:
@@ -61,7 +64,8 @@ class KinematicStabilizer:
             (sx, sy), response = cv2.phaseCorrelate(self._prev_gray_small, small)
             dx = float(sx * (w / float(small_w))) if response > 0.15 else 0.0
             dy = float(sy * (h / float(small_h))) if response > 0.15 else 0.0
-        except Exception:
+        except Exception as exc:
+            logger.debug("cv2.phaseCorrelate failed in estimate_frame_shift: %s", exc, exc_info=True)
             dx, dy = 0.0, 0.0
 
         self._prev_gray_small = small

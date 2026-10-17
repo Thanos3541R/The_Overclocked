@@ -11,6 +11,8 @@
 import os
 import sys
 import time
+import json
+import threading
 import numpy as np
 import pytest
 import cv2
@@ -24,7 +26,14 @@ from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
 from pipeline.preprocessing import LightingNormalizer
 from pipeline.frame_capture import FrameCapture
 from pipeline.classifier import ImpairmentClassifier
-from train_baseline import compute_subject_invariant_delta_features, compute_window_summary_features, generate_synthetic_dataset, train_and_evaluate
+from pipeline.training_buffer import TrainingBuffer
+from train_baseline import (
+    compute_subject_invariant_delta_features,
+    compute_window_summary_features,
+    generate_synthetic_dataset,
+    train_and_evaluate,
+    load_dataset_from_npz,
+)
 from tests.test_pnp import make_frontal_face_landmarks
 from tests.test_alcohol_signals import make_full_landmarks
 
@@ -336,3 +345,159 @@ class TestRobustnessAndEdgeCases:
         )
         assert c_feat2.shape == (2, 2)
         assert "delta_base" in c_names2[0]
+
+
+class TestAuditRemediation:
+    """Tests for the 6 technical audit findings and non-regression invariants."""
+
+    def test_pnp_custom_camera_intrinsics_and_json_load(self, tmp_path):
+        """PnPNormalizer must support focal length, JSON/NPZ calibration files, and aspect scaling."""
+        # 1. Custom focal length
+        pnp_fl = PnPNormalizer(1280, 720, focal_length=1500.0)
+        assert pnp_fl.camera_matrix[0, 0] == pytest.approx(1500.0)
+        assert pnp_fl.camera_matrix[1, 1] == pytest.approx(1500.0)
+        assert pnp_fl.camera_matrix[0, 2] == pytest.approx(640.0)
+        assert pnp_fl.camera_matrix[1, 2] == pytest.approx(360.0)
+
+        # 2. JSON calibration file loading
+        calib_data = {
+            "camera_matrix": [
+                [1100.0, 0.0, 640.0],
+                [0.0, 1100.0, 360.0],
+                [0.0, 0.0, 1.0],
+            ],
+            "dist_coeffs": [0.01, -0.02, 0.0, 0.0, 0.0],
+        }
+        json_path = tmp_path / "camera_calib.json"
+        with open(json_path, "w") as f:
+            json.dump(calib_data, f)
+
+        pnp_json = PnPNormalizer(1280, 720, calibration_path=str(json_path))
+        assert pnp_json.camera_matrix[0, 0] == pytest.approx(1100.0)
+        assert pnp_json.dist_coeffs[0, 0] == pytest.approx(0.01)
+
+        # Classmethod constructor
+        pnp_cls = PnPNormalizer.from_calibration_file(str(json_path), 1280, 720)
+        assert pnp_cls.camera_matrix[0, 0] == pytest.approx(1100.0)
+
+        # Scaling on frame size change
+        pnp_json.update_frame_size(1920, 1080)
+        assert pnp_json.camera_matrix[0, 0] == pytest.approx(1100.0 * 1.5)
+        assert pnp_json.camera_matrix[1, 1] == pytest.approx(1100.0 * 1.5)
+        assert pnp_json.camera_matrix[0, 2] == pytest.approx(640.0 * 1.5)
+        assert pnp_json.camera_matrix[1, 2] == pytest.approx(360.0 * 1.5)
+
+        # 3. NPZ calibration file loading
+        npz_path = tmp_path / "camera_calib.npz"
+        np.savez(
+            npz_path,
+            camera_matrix=np.array([[1200.0, 0.0, 640.0], [0.0, 1200.0, 360.0], [0.0, 0.0, 1.0]]),
+            dist_coeffs=np.array([0.05, -0.01, 0.0, 0.0, 0.0]),
+        )
+        pnp_npz = PnPNormalizer(1280, 720, calibration_path=str(npz_path))
+        assert pnp_npz.camera_matrix[0, 0] == pytest.approx(1200.0)
+        assert pnp_npz.dist_coeffs[0, 0] == pytest.approx(0.05)
+
+    def test_feature_extractor_configurable_thresholds_and_thread_safety(self):
+        """FeatureExtractor must expose configurable thresholds matching config and be thread-safe."""
+        # 1. Configurable threshold default values
+        ext = FeatureExtractor()
+        assert ext.deg_per_iris_unit == pytest.approx(15.0)
+        assert ext.saccade_deg_per_unit == pytest.approx(22.0)
+        assert ext.saccade_subpixel_deadzone_dx == pytest.approx(0.026)
+        assert ext.saccade_subpixel_deadzone_hypot == pytest.approx(0.030)
+        assert ext.saccade_head_motion_dx == pytest.approx(0.055)
+        assert ext.eye_socket_vel_threshold == pytest.approx(0.75)
+        assert ext.blink_phase_timeout_frames == 8
+        assert ext.sway_yaw_gate_deg_s == pytest.approx(5.0)
+        assert ext.sway_nod_reset_deg_s == pytest.approx(35.0)
+        assert ext.rigid_head_sway_threshold == pytest.approx(0.12)
+
+        # 2. Custom values override
+        ext_custom = FeatureExtractor(
+            saccade_deg_per_unit=30.0,
+            eye_socket_vel_threshold=0.85,
+            blink_phase_timeout_frames=20,
+        )
+        assert ext_custom.saccade_deg_per_unit == pytest.approx(30.0)
+        assert ext_custom.eye_socket_vel_threshold == pytest.approx(0.85)
+        assert ext_custom.blink_phase_timeout_frames == 20
+
+        # 3. Thread-safety: RLock present and concurrent compute() calls succeed
+        assert hasattr(ext, "_lock")
+        lms = make_full_landmarks()
+        errors = []
+
+        def worker(thread_id: int):
+            try:
+                for i in range(25):
+                    t = float(i) * 0.033 + float(thread_id)
+                    res = ext.compute(lms, timestamp=t, frame_id=i, face_valid=True)
+                    assert res is not None
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(k,)) for k in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        assert len(errors) == 0, f"Concurrent execution errors: {errors}"
+
+    def test_training_buffer_core_vs_extended_modes(self, tmp_path):
+        """TrainingBuffer must default to 29 channels and support 48 channels in extended mode."""
+        # 1. Channel counts
+        tb_core = TrainingBuffer(subject_id="sub_core", window_size_sec=0.5, stride_sec=0.25, fps=30.0)
+        assert tb_core.include_extended_features is False
+        assert len(tb_core.feature_names) == 29
+        assert tb_core.n_features == 29
+
+        tb_ext = TrainingBuffer(subject_id="sub_ext", include_extended_features=True, window_size_sec=0.5, stride_sec=0.25, fps=30.0)
+        assert tb_ext.include_extended_features is True
+        assert len(tb_ext.feature_names) == 48
+        assert tb_ext.n_features == 48
+
+        # 2. Vector shapes and encoding
+        f = FrameFeatures(timestamp=1.0, frame_id=1, face_valid=True, ear_avg=0.27, blink_detected=True)
+        v_core = tb_core._features_to_vector(f)
+        v_ext = tb_ext._features_to_vector(f)
+
+        assert v_core.shape == (29,)
+        assert v_ext.shape == (48,)
+        assert v_core[2] == pytest.approx(0.27)
+        assert v_ext[2] == pytest.approx(0.27)
+        # blink_detected boolean flag
+        assert v_core[22] == 1.0
+        assert v_ext[33] == 1.0
+
+        # 3. Populate samples and extract windows
+        for i in range(30):
+            sample = FrameFeatures(
+                timestamp=float(i) * 0.033,
+                frame_id=i,
+                face_valid=True,
+                ear_avg=0.28,
+                head_yaw=1.0,
+            )
+            tb_core.add_sample(sample)
+            tb_ext.add_sample(sample)
+
+        wins_core = tb_core.extract_windows()
+        wins_ext = tb_ext.extract_windows()
+        assert len(wins_core) > 0
+        assert len(wins_ext) > 0
+        assert wins_core[0].features.shape[1] == 29
+        assert wins_ext[0].features.shape[1] == 48
+
+        # 4. Save and load mixed archives via load_dataset_from_npz
+        p_core = tmp_path / "test_core.npz"
+        p_ext = tmp_path / "test_ext.npz"
+        tb_core.save_to_disk(p_core)
+        tb_ext.save_to_disk(p_ext)
+
+        X_3d, y, subs, fnames = load_dataset_from_npz([str(p_core), str(p_ext)])
+        assert X_3d.shape[2] == 48  # Aligned union schema
+        assert len(fnames) == 48
+        assert len(subs) == len(wins_core) + len(wins_ext)
+

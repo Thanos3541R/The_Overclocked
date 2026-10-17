@@ -7,12 +7,15 @@ Handles:
 
 Auto-detects input type and sets the `is_grayscale` flag accordingly.
 """
+import logging
 import sys
 import threading
 import time
 import cv2
 import numpy as np
 from typing import Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 
 class FrameCapture:
@@ -92,7 +95,8 @@ class FrameCapture:
                 if not hasattr(self, "cap") or not self.cap.isOpened():
                     break
                 ret, frame = self.cap.read()
-            except Exception:
+            except Exception as exc:
+                logger.debug("Exception in FrameCapture._capture_worker: %s", exc, exc_info=True)
                 break
 
             if not ret or frame is None:
@@ -147,8 +151,8 @@ class FrameCapture:
         if hasattr(self, "cap") and self.cap.isOpened():
             try:
                 self.cap.release()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Exception while releasing capture: %s", exc, exc_info=True)
         if hasattr(self, "_thread") and self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=0.2)
 

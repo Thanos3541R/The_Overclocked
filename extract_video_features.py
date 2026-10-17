@@ -102,7 +102,12 @@ def extract_video_features(video_path: str,
         roi_margin=config.roi_margin,
         roi_alpha=config.roi_alpha,
     )
-    pnp = PnPNormalizer(width, height)
+    pnp = PnPNormalizer(
+        width,
+        height,
+        focal_length=config.focal_length_px,
+        calibration_path=config.camera_calibration_path,
+    )
     pose_gate = HeadPoseGate(
         yaw_limit=config.yaw_limit,
         pitch_down_limit=config.pitch_down_limit,
@@ -134,6 +139,17 @@ def extract_video_features(video_path: str,
         pursuit_window_sec=config.pursuit_window_sec,
         perclos_min_warmup_sec=5.0,
         fps=fps,
+        deg_per_iris_unit=config.deg_per_iris_unit,
+        saccade_deg_per_unit=config.saccade_deg_per_unit,
+        saccade_subpixel_deadzone_dx=config.saccade_subpixel_deadzone_dx,
+        saccade_subpixel_deadzone_hypot=config.saccade_subpixel_deadzone_hypot,
+        saccade_head_motion_dx=config.saccade_head_motion_dx,
+        eye_socket_vel_threshold=config.eye_socket_vel_threshold,
+        blink_phase_timeout_frames=config.blink_phase_timeout_frames,
+        sway_window_sec=config.sway_window_sec,
+        sway_yaw_gate_deg_s=config.sway_yaw_gate_deg_s,
+        sway_nod_reset_deg_s=config.sway_nod_reset_deg_s,
+        rigid_head_sway_threshold=config.rigid_head_sway_threshold,
     )
     classifier = ImpairmentClassifier()
     calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=fps)

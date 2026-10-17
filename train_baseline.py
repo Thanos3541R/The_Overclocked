@@ -195,6 +195,21 @@ def filter_involuntary_features(
         if name.startswith("imu_gated_"):
             continue
 
+        # Exclude Section B voluntary/gaming and validity-mask prefixes when involuntary-only is active
+        if name.startswith((
+            "deliberate_blink_suppression_",
+            "voluntary_eye_widening_",
+            "stare_fixation_duration_s_",
+            "compensatory_stare_active_",
+            "rigid_head_stabilization_",
+            "frontalis_compensation_active_",
+            "brow_eye_distance_ratio_",
+            "brow_elevation_delta_",
+            "flushing_valid_",
+            "rppg_valid_",
+        )):
+            continue
+
         keep_indices.append(idx)
         keep_names.append(name)
 
@@ -203,33 +218,56 @@ def filter_involuntary_features(
 
 def load_dataset_from_npz(npz_paths: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """Load and concatenate training windows from multiple .npz archives."""
-    all_features = []
-    all_subjects = []
-    all_labels = []
-    feature_names = None
+    raw_archives = []
+    target_feature_names = []
 
     for path in npz_paths:
         data = np.load(path, allow_pickle=True)
         feats = data["features"]  # (n_windows, window_frames, n_features)
         subs = data["subject_ids"]
         labs = data["labels"]
+        fnames = list(data["feature_names"]) if "feature_names" in data else [f"feat_{i}" for i in range(feats.shape[2])]
+        raw_archives.append({
+            "features": feats,
+            "subject_ids": subs,
+            "labels": labs,
+            "feature_names": fnames,
+        })
+        for fn in fnames:
+            if fn not in target_feature_names:
+                target_feature_names.append(fn)
 
-        if feature_names is None and "feature_names" in data:
-            feature_names = list(data["feature_names"])
+    if not raw_archives:
+        raise ValueError("No valid .npz data files found to load.")
 
-        all_features.append(feats)
+    all_features = []
+    all_subjects = []
+    all_labels = []
+    n_target_features = len(target_feature_names)
+
+    for arc in raw_archives:
+        feats = arc["features"]
+        fnames = arc["feature_names"]
+        subs = arc["subject_ids"]
+        labs = arc["labels"]
+
+        if fnames == target_feature_names:
+            aligned_feats = feats
+        else:
+            n_win, win_frames, _ = feats.shape
+            aligned_feats = np.zeros((n_win, win_frames, n_target_features), dtype=np.float32)
+            fname_to_idx = {fn: idx for idx, fn in enumerate(fnames)}
+            for t_idx, t_name in enumerate(target_feature_names):
+                if t_name in fname_to_idx:
+                    aligned_feats[:, :, t_idx] = feats[:, :, fname_to_idx[t_name]]
+
+        all_features.append(aligned_feats)
         all_subjects.append(subs)
         all_labels.append(labs)
-
-    if not all_features:
-        raise ValueError("No valid .npz data files found to load.")
 
     X_3d = np.concatenate(all_features, axis=0)
     subjects = np.concatenate(all_subjects, axis=0)
     raw_labels = np.concatenate(all_labels, axis=0)
-
-    if feature_names is None:
-        feature_names = [f"feat_{i}" for i in range(X_3d.shape[2])]
 
     # Convert labels to binary integers (0 = Sober, 1 = Impaired)
     y = np.zeros(len(raw_labels), dtype=np.int32)
@@ -240,7 +278,7 @@ def load_dataset_from_npz(npz_paths: List[str]) -> Tuple[np.ndarray, np.ndarray,
         else:
             y[i] = 0
 
-    return X_3d, y, subjects, feature_names
+    return X_3d, y, subjects, target_feature_names
 
 
 def generate_synthetic_dataset(n_subjects: int = 10, windows_per_subject: int = 24, window_frames: int = 90) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:

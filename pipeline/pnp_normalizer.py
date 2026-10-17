@@ -12,9 +12,14 @@ Pipeline:
   5. Single-frame Euler jump rejection (>25 deg) with persistence escape (>= 2 frames)
   6. Transform landmarks from camera-space to face-centered space while preserving pixel coordinate range
 """
+import json
+import logging
+import os
 from typing import Optional, Tuple
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from utils.landmarks import (
     CANONICAL_FACE_3D,
@@ -33,7 +38,10 @@ class PnPNormalizer:
     def __init__(self, frame_width: int = 1280, frame_height: int = 720,
                  focal_length: Optional[float] = None,
                  max_euler_jump_deg: float = 25.0,
-                 max_jump_rejections: int = 2):
+                 max_jump_rejections: int = 2,
+                 camera_matrix: Optional[np.ndarray] = None,
+                 dist_coeffs: Optional[np.ndarray] = None,
+                 calibration_path: Optional[str] = None):
         """
         Args:
             frame_width: Camera frame width in pixels.
@@ -44,23 +52,51 @@ class PnPNormalizer:
                                 to reject single-frame PnP flips (e.g. Frame 113 artifact).
             max_jump_rejections: Number of consecutive rejected frames before accepting the new pose
                                  as a genuine fast head turn, preventing tracker deadlock.
+            camera_matrix: Optional explicit 3x3 camera matrix.
+            dist_coeffs: Optional distortion coefficients array.
+            calibration_path: Optional path to JSON or NPZ file with camera_matrix and dist_coeffs.
         """
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.max_euler_jump_deg = float(max_euler_jump_deg)
         self.max_jump_rejections = int(max_jump_rejections)
 
-        f = focal_length if focal_length is not None else float(frame_width)
-        cx = frame_width / 2.0
-        cy = frame_height / 2.0
+        self._custom_intrinsics = False
+        loaded_cam_mat = camera_matrix
+        loaded_dist_coeffs = dist_coeffs
 
-        self.camera_matrix = np.array([
-            [f,   0.0, cx],
-            [0.0, f,   cy],
-            [0.0, 0.0, 1.0],
-        ], dtype=np.float64)
+        if calibration_path is not None and os.path.exists(calibration_path):
+            try:
+                if calibration_path.endswith(".npz"):
+                    with np.load(calibration_path) as data:
+                        loaded_cam_mat = data["camera_matrix"]
+                        if "dist_coeffs" in data:
+                            loaded_dist_coeffs = data["dist_coeffs"]
+                else:
+                    with open(calibration_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        loaded_cam_mat = data.get("camera_matrix", None)
+                        loaded_dist_coeffs = data.get("dist_coeffs", None)
+            except Exception as exc:
+                logger.debug("Failed loading calibration from %s: %s", calibration_path, exc, exc_info=True)
 
-        self.dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+        if loaded_cam_mat is not None:
+            self.camera_matrix = np.asarray(loaded_cam_mat, dtype=np.float64).reshape(3, 3).copy()
+            self._custom_intrinsics = True
+        else:
+            f = focal_length if focal_length is not None else float(frame_width)
+            cx = frame_width / 2.0
+            cy = frame_height / 2.0
+            self.camera_matrix = np.array([
+                [f,   0.0, cx],
+                [0.0, f,   cy],
+                [0.0, 0.0, 1.0],
+            ], dtype=np.float64)
+
+        if loaded_dist_coeffs is not None:
+            self.dist_coeffs = np.asarray(loaded_dist_coeffs, dtype=np.float64).reshape(-1, 1).copy()
+        else:
+            self.dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
         # Stored pose state for current frame (strictly None when pose fails)
         self.rvec: Optional[np.ndarray] = None
@@ -134,7 +170,8 @@ class PnPNormalizer:
 
         try:
             lms = np.asarray(landmarks, dtype=np.float64)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed converting landmarks in solve_pose: %s", exc, exc_info=True)
             return False
 
         if (lms.ndim != 2 or
@@ -222,8 +259,8 @@ class PnPNormalizer:
                                 )
                                 if ret_ref and np.all(np.isfinite(r_ref)) and np.all(np.isfinite(t_ref)):
                                     r_sol, t_sol = r_ref, t_ref
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Iterative refinement fallback failed in solve_pose: %s", exc, exc_info=True)
                             success = True
                             rvec = r_sol
                             tvec = t_sol
@@ -327,7 +364,8 @@ class PnPNormalizer:
 
         try:
             lms = np.asarray(landmarks)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed converting landmarks in normalize_landmarks: %s", exc, exc_info=True)
             return landmarks.copy() if hasattr(landmarks, "copy") else landmarks
 
         if self.rotation_matrix is None or lms.ndim != 2 or lms.shape[0] == 0 or lms.shape[1] < 2:
@@ -367,10 +405,21 @@ class PnPNormalizer:
     def update_frame_size(self, width: int, height: int):
         """Update camera parameters if frame size changes."""
         if width != self.frame_width or height != self.frame_height:
-            self.frame_width = width
-            self.frame_height = height
-            f = float(width)
-            self.camera_matrix[0, 0] = f
-            self.camera_matrix[1, 1] = f
-            self.camera_matrix[0, 2] = width / 2.0
-            self.camera_matrix[1, 2] = height / 2.0
+            if self._custom_intrinsics and self.frame_width > 0 and self.frame_height > 0:
+                self.camera_matrix[0, :] *= (width / float(self.frame_width))
+                self.camera_matrix[1, :] *= (height / float(self.frame_height))
+                self.frame_width = width
+                self.frame_height = height
+            else:
+                self.frame_width = width
+                self.frame_height = height
+                f = float(width)
+                self.camera_matrix[0, 0] = f
+                self.camera_matrix[1, 1] = f
+                self.camera_matrix[0, 2] = width / 2.0
+                self.camera_matrix[1, 2] = height / 2.0
+
+    @classmethod
+    def from_calibration_file(cls, calibration_path: str, frame_width: int = 1280, frame_height: int = 720) -> "PnPNormalizer":
+        """Factory method to instantiate PnPNormalizer with camera intrinsics loaded from file."""
+        return cls(frame_width=frame_width, frame_height=frame_height, calibration_path=calibration_path)

@@ -34,20 +34,50 @@ class TrainingWindow:
     label: Optional[str] = None
 
 
+CORE_NUMERIC_NAMES = (
+    "ear_left", "ear_right", "ear_avg", "mar", "perclos",
+    "left_iris_x", "left_iris_y", "right_iris_x", "right_iris_y",
+    "head_yaw", "head_pitch", "head_roll",
+    "saccade_velocity", "saccade_latency_ms",
+    "blink_closing_velocity", "blink_opening_velocity",
+    "gaze_yaw_dispersion",
+    "gen_slow_phase_vel", "gen_beat_count",
+    "pursuit_fragmentation_ratio",
+    "vergence_angle_deg", "vor_gain",
+)  # 22 core numeric
+
+EXTENDED_NUMERIC_NAMES = CORE_NUMERIC_NAMES + (
+    "raw_iris_dx",
+    "head_postural_sway", "facial_flushing_ratio", "flushing_delta",
+    "stare_fixation_duration_s", "masking_divergence_score",
+    "brow_eye_distance_ratio", "brow_elevation_delta", "eyelid_tremor_hz",
+    "rppg_pulse_bpm", "rppg_hrv_rmssd_ms",
+)  # 33 extended numeric
+
+CORE_BOOL_NAMES = (
+    "blink_detected", "microsleep_detected", "yawn_detected",
+    "saccade_detected", "gen_detected", "lack_of_convergence", "imu_gated",
+)  # 7 core booleans (imu_gated at -1)
+
+EXTENDED_BOOL_NAMES = (
+    "blink_detected", "microsleep_detected", "yawn_detected",
+    "saccade_detected", "gen_detected", "lack_of_convergence",
+    "flushing_valid", "deliberate_blink_suppression", "voluntary_eye_widening",
+    "compensatory_stare_active", "rigid_head_stabilization", "masking_detected",
+    "frontalis_compensation_active", "rppg_valid", "imu_gated",
+)  # 15 extended booleans (imu_gated at -1)
+
+FEATURE_NAMES = CORE_NUMERIC_NAMES + CORE_BOOL_NAMES              # 29 channels
+EXTENDED_FEATURE_NAMES = EXTENDED_NUMERIC_NAMES + EXTENDED_BOOL_NAMES  # 48 channels
+
+
 class TrainingBuffer:
-    FEATURE_NAMES = (
-        "ear_left", "ear_right", "ear_avg", "mar", "perclos",
-        "left_iris_x", "left_iris_y", "right_iris_x", "right_iris_y",
-        "head_yaw", "head_pitch", "head_roll",
-        "saccade_velocity", "saccade_latency_ms",
-        "blink_closing_velocity", "blink_opening_velocity",
-        "gaze_yaw_dispersion",
-        "gen_slow_phase_vel", "gen_beat_count",
-        "pursuit_fragmentation_ratio",
-        "vergence_angle_deg", "vor_gain",
-        "blink_detected", "microsleep_detected", "yawn_detected", 
-        "saccade_detected", "gen_detected", "lack_of_convergence", "imu_gated"
-    )
+    CORE_NUMERIC_NAMES = CORE_NUMERIC_NAMES
+    EXTENDED_NUMERIC_NAMES = EXTENDED_NUMERIC_NAMES
+    CORE_BOOL_NAMES = CORE_BOOL_NAMES
+    EXTENDED_BOOL_NAMES = EXTENDED_BOOL_NAMES
+    FEATURE_NAMES = FEATURE_NAMES
+    EXTENDED_FEATURE_NAMES = EXTENDED_FEATURE_NAMES
 
     def __init__(
         self,
@@ -58,7 +88,8 @@ class TrainingBuffer:
         min_fill_ratio: float = 0.70,
         gated_strategy: GatedFrameStrategy = GatedFrameStrategy.HOLD_LAST,
         max_session_hours: float = 1.0,
-        default_label: Optional[str] = None
+        default_label: Optional[str] = None,
+        include_extended_features: bool = False,
     ):
         """
         Initialize the training data buffer.
@@ -72,6 +103,8 @@ class TrainingBuffer:
             gated_strategy: Strategy for handling gated/frozen frames.
             max_session_hours: Maximum session duration to keep in the buffer.
             default_label: Optional default ground-truth label for extracted windows.
+            include_extended_features: If True, uses all 48 features (33 numeric + 15 boolean);
+                                       if False (default), uses the 29 core features.
         """
         self.subject_id = subject_id
         self.fps = fps
@@ -80,6 +113,17 @@ class TrainingBuffer:
         self.min_fill_ratio = min_fill_ratio
         self.gated_strategy = gated_strategy
         self.default_label = default_label
+        self.include_extended_features = bool(include_extended_features)
+
+        if self.include_extended_features:
+            self._numeric_names = self.EXTENDED_NUMERIC_NAMES
+            self._bool_names = self.EXTENDED_BOOL_NAMES
+            self.feature_names = self.EXTENDED_FEATURE_NAMES
+        else:
+            self._numeric_names = self.CORE_NUMERIC_NAMES
+            self._bool_names = self.CORE_BOOL_NAMES
+            self.feature_names = self.FEATURE_NAMES
+        self._n_bool_features = len(self._bool_names)
         
         self.window_frames = int(window_size_sec * fps)
         self.stride_frames = int(stride_sec * fps)
@@ -103,25 +147,18 @@ class TrainingBuffer:
     def __len__(self) -> int:
         """Return number of accumulated samples."""
         return len(self._buffer)
+
+    @property
+    def n_features(self) -> int:
+        """Return total number of features in the assembled vector."""
+        return len(self.feature_names)
         
     def _extract_vector(self, ff: FrameFeatures) -> np.ndarray:
-        numeric = [
-            ff.ear_left, ff.ear_right, ff.ear_avg, ff.mar, ff.perclos,
-            ff.left_iris_x, ff.left_iris_y, ff.right_iris_x, ff.right_iris_y,
-            ff.head_yaw, ff.head_pitch, ff.head_roll,
-            ff.saccade_velocity, ff.saccade_latency_ms,
-            ff.blink_closing_velocity, ff.blink_opening_velocity,
-            ff.gaze_yaw_dispersion,
-            ff.gen_slow_phase_vel, float(ff.gen_beat_count),
-            ff.pursuit_fragmentation_ratio,
-            ff.vergence_angle_deg, ff.vor_gain
-        ]
-        bools = [
-            int(ff.blink_detected), int(ff.microsleep_detected), 
-            int(ff.yawn_detected), int(ff.saccade_detected), 
-            int(ff.gen_detected), int(ff.lack_of_convergence), int(ff.imu_gated)
-        ]
+        numeric = [float(getattr(ff, name)) for name in self._numeric_names]
+        bools = [int(bool(getattr(ff, name))) for name in self._bool_names]
         return np.array(numeric + bools, dtype=np.float32)
+
+    _features_to_vector = _extract_vector
 
     def add_sample(self, ff: FrameFeatures):
         """
@@ -129,6 +166,7 @@ class TrainingBuffer:
         """
         is_gated = ff.imu_gated or not ff.face_valid
         vec = self._extract_vector(ff)
+        n_b = self._n_bool_features
         
         if self.gated_strategy == GatedFrameStrategy.DROP:
             if is_gated:
@@ -140,7 +178,7 @@ class TrainingBuffer:
                 if self._last_valid_vector is not None:
                     held_vec = self._last_valid_vector.copy()
                     # Retain boolean values from current frame
-                    held_vec[-7:] = vec[-7:]
+                    held_vec[-n_b:] = vec[-n_b:]
                     vec = held_vec
             else:
                 self._last_valid_vector = vec
@@ -154,11 +192,11 @@ class TrainingBuffer:
                     for i, (g_ts, g_vec, g_is_gated) in enumerate(self._lookahead_buffer):
                         alpha = (i + 1) / (n_gated + 1)
                         interp_vec = (1 - alpha) * self._last_valid_vector + alpha * vec
-                        interp_vec[-7:] = g_vec[-7:]
+                        interp_vec[-n_b:] = g_vec[-n_b:]
                         self._buffer.append((g_ts, interp_vec, g_is_gated))
                 elif len(self._lookahead_buffer) > 0:
                     for (g_ts, g_vec, g_is_gated) in self._lookahead_buffer:
-                        g_vec[:-7] = vec[:-7]
+                        g_vec[:-n_b] = vec[:-n_b]
                         self._buffer.append((g_ts, g_vec, g_is_gated))
                 self._lookahead_buffer.clear()
                 self._last_valid_vector = vec
@@ -168,7 +206,7 @@ class TrainingBuffer:
                 if len(self._lookahead_buffer) > 2:
                     oldest_ts, oldest_vec, oldest_is_gated = self._lookahead_buffer.popleft()
                     if self._last_valid_vector is not None:
-                        oldest_vec[:-7] = self._last_valid_vector[:-7]
+                        oldest_vec[:-n_b] = self._last_valid_vector[:-n_b]
                     self._buffer.append((oldest_ts, oldest_vec, oldest_is_gated))
 
     def extract_windows(self, label: Optional[str] = None) -> List[TrainingWindow]:
@@ -211,7 +249,7 @@ class TrainingBuffer:
             window_slice = buf_list[left_idx:right_idx]
             
             if len(window_slice) >= min_required_frames:
-                feats = np.zeros((self.window_frames, len(self.FEATURE_NAMES)), dtype=np.float32)
+                feats = np.zeros((self.window_frames, len(self.feature_names)), dtype=np.float32)
                 timestamps = np.zeros(self.window_frames, dtype=np.float64)
                 
                 n_copy = min(len(window_slice), self.window_frames)
@@ -266,7 +304,7 @@ class TrainingBuffer:
             path,
             features=features_arr,
             timestamps=timestamps_arr,
-            feature_names=np.array(self.FEATURE_NAMES, dtype=str),
+            feature_names=np.array(self.feature_names, dtype=str),
             subject_ids=subject_ids_arr,
             session_id=self.session_id,
             labels=labels_arr,

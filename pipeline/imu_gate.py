@@ -9,9 +9,12 @@ The underlying assumption: if the entire face translates rapidly without
 corresponding head rotation, it's likely a vehicle shock (pothole, speed bump)
 rather than intentional driver movement.
 """
-import numpy as np
+import logging
 from collections import deque
 from typing import Deque, Optional, Tuple
+import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class SoftwareIMUGate:
@@ -110,7 +113,8 @@ class SoftwareIMUGate:
             accel_mm_s2 = 2.0 * C[0, :]
             accel_norm_m_s2 = float(np.linalg.norm(accel_mm_s2)) / 1000.0  # mm/s² -> m/s²
             return accel_norm_m_s2
-        except Exception:
+        except Exception as exc:
+            logger.debug("Savitzky-Golay acceleration estimation failed: %s", exc, exc_info=True)
             return 0.0
 
     def update(self, timestamp: float,

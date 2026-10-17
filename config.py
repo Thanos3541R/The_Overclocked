@@ -7,7 +7,7 @@ detection sensitivity requirements.
 WARNING: All feature extraction and oculomotor thresholds are uncalibrated placeholders.
 """
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,23 @@ class PipelineConfig:
     # >= 60 fps (preferably 90-120 fps) global-shutter camera hardware is required
     # to eliminate derivative quantization noise.
     target_fps: float = 30.0
+
+    # ── Camera Intrinsics & Angular Scaling ──
+    camera_calibration_path: Optional[str] = None  # Optional path to JSON/NPZ with camera_matrix & dist_coeffs
+    focal_length_px: Optional[float] = None        # Optional explicit focal length in pixels (None = frame_width)
+    deg_per_iris_unit: float = 15.0                # Standard angular scale (deg per normalized iris unit)  # [PLACEHOLDER]
+    saccade_deg_per_unit: float = 22.0             # Saccadic angular scale (deg per normalized iris unit)  # [PLACEHOLDER]
+
+    # ── Saccade, Blink & Sway Internal Thresholds (Formerly Inline Magic Numbers) ──
+    saccade_subpixel_deadzone_dx: float = 0.026    # Normalized horizontal sub-pixel noise floor (~0.5 px)
+    saccade_subpixel_deadzone_hypot: float = 0.030 # Combined 2D sub-pixel noise floor
+    saccade_head_motion_dx: float = 0.055          # Min iris shift required during active head movement
+    eye_socket_vel_threshold: float = 0.75         # Normalized eye-socket translation speed for head-motion guard
+    blink_phase_timeout_frames: int = 8            # Max frames allowed in closing/opening phase before timeout
+    sway_window_sec: float = 3.0                   # Rolling window (s) for high-pass postural sway detrending
+    sway_yaw_gate_deg_s: float = 5.0               # Yaw angular speed (deg/s) above which postural sway pauses
+    sway_nod_reset_deg_s: float = 35.0             # Pitch/roll angular speed (deg/s) that clears sway history
+    rigid_head_sway_threshold: float = 0.12        # Sway residual (deg) below which rigid neck locking is flagged
 
     # ── Preprocessing (CLAHE) ──
     clahe_clip_limit: float = 2.0

@@ -242,7 +242,10 @@ The repository provides a complete ingestion and training workflow for research 
 
 ## Installation & Quick Start Guide
 
-Compatible with Python 3.9 through 3.14 on Windows, Linux, and macOS.
+> [!TIP]
+> **Recommended Python Version: Python 3.10 or 3.11 (64-bit)**  
+> - **Why Python 3.8 is NOT supported:** Python 3.8 reached official End-of-Life (EOL) in October 2024. Core dependencies (`mediapipe >= 0.10.14`, `opencv-python >= 4.9.0`, `scikit-learn >= 1.3.0`, `numpy >= 1.25.0`) have completely dropped Python 3.8 wheels and syntax.
+> - **Why Python 3.10 or 3.11 is the plug-and-play sweet spot:** Google's `mediapipe` relies on compiled C++ and TensorFlow Lite binaries. PyPI provides pre-compiled binary wheels out-of-the-box for Python 3.9, 3.10, and 3.11. Brand-new releases (like Python 3.12 or 3.13) may fail during `pip install mediapipe` with wheel build errors. Using Python 3.10 or 3.11 guarantees a 10-second installation with zero compilation.
 
 ### 1. Clone & Install
 ```bash

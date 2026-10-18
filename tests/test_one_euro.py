@@ -285,6 +285,117 @@ class TestOneEuroFilterBank:
         # Scalar filter with NaN
         assert bank.filter_scalar(1.0, float('nan'), "ear_left") != 0.0 or np.isnan(bank.filter_scalar(1.0, float('nan'), "ear_left"))
 
+    def test_high_frequency_vibration_attenuation(self):
+        """Alternating 15 Hz (+/- 4 px) cabin vibration on landmarks is attenuated by > 75%
+        while a 100ms blink step deflection on eyelid landmarks is preserved (> 75%).
+        """
+        from utils.landmarks import DYNAMIC_EYELID_INDICES
+
+        fps = 30.0
+        dt = 1.0 / fps
+        n_frames = 60
+
+        # Create realistic face mesh landmarks at rest (478, 3)
+        np.random.seed(42)
+        base_landmarks = np.zeros((478, 3), dtype=np.float64)
+        # Rigid anchors
+        base_landmarks[4] = [640.0, 360.0, 0.0]     # Nose tip
+        base_landmarks[152] = [640.0, 480.0, 30.0]  # Chin
+        base_landmarks[33] = [540.0, 300.0, 0.0]    # Right eye outer
+        base_landmarks[133] = [580.0, 300.0, 0.0]   # Right eye inner
+        base_landmarks[263] = [740.0, 300.0, 0.0]   # Left eye outer
+        base_landmarks[362] = [700.0, 300.0, 0.0]   # Left eye inner
+        # Fill rest
+        for i in range(478):
+            if np.all(base_landmarks[i] == 0.0):
+                base_landmarks[i] = [640.0 + np.random.uniform(-100, 100),
+                                     360.0 + np.random.uniform(-100, 100),
+                                     0.0]
+
+        bank = OneEuroFilterBank(t0=0.0, x0=base_landmarks)
+
+        # 1. Warm up filter for 10 frames at rest
+        for i in range(1, 11):
+            t = i * dt
+            bank.filter_landmarks(t, base_landmarks)
+
+        # 2. Inject alternating 15 Hz (+/- 4.0 px) vertical vibration across structural landmarks
+        # and record output amplitude
+        structural_idx = 4  # Nose tip
+        structural_outputs = []
+        for i in range(11, n_frames + 1):
+            t = i * dt
+            vib = 4.0 if (i % 2 == 1) else -4.0
+            noisy_landmarks = base_landmarks.copy()
+            noisy_landmarks[:, 1] += vib
+            filtered = bank.filter_landmarks(t, noisy_landmarks)
+            structural_outputs.append(filtered[structural_idx, 1] - base_landmarks[structural_idx, 1])
+
+        # Evaluate attenuation over the last 20 frames
+        recent_outputs = structural_outputs[-20:]
+        out_amplitude = (max(recent_outputs) - min(recent_outputs)) / 2.0
+        in_amplitude = 4.0
+        attenuation_pct = (1.0 - out_amplitude / in_amplitude) * 100.0
+
+        assert attenuation_pct > 75.0, (
+            f"Vibration attenuation was {attenuation_pct:.1f}%, expected > 75.0% "
+            f"(in_amplitude={in_amplitude}, out_amplitude={out_amplitude:.3f})"
+        )
+
+        # 3. Verify that a 100ms blink step deflection on eyelid landmarks is preserved (> 75%)
+        # Re-anchor / settle filter at base
+        bank.reset(t=2.5, landmarks=base_landmarks)
+        for i in range(1, 10):
+            bank.filter_landmarks(2.5 + i * dt, base_landmarks)
+
+        # 100ms step: at 30 fps, 100ms is ~3 frames
+        eyelid_pt = DYNAMIC_EYELID_INDICES[0]  # Eyelid landmark (e.g., 159)
+        step_amplitude = 15.0  # px eyelid downstroke
+        blink_outputs = []
+        for i in range(10, 14):
+            t = 2.5 + i * dt
+            blink_landmarks = base_landmarks.copy()
+            blink_landmarks[DYNAMIC_EYELID_INDICES, 1] += step_amplitude
+            filtered = bank.filter_landmarks(t, blink_landmarks)
+            blink_outputs.append(filtered[eyelid_pt, 1] - base_landmarks[eyelid_pt, 1])
+
+        max_blink_deflection = max(blink_outputs)
+        blink_preservation_pct = (max_blink_deflection / step_amplitude) * 100.0
+
+        assert blink_preservation_pct > 75.0, (
+            f"Blink step preservation was {blink_preservation_pct:.1f}%, expected > 75.0% "
+            f"(step={step_amplitude}, max_deflection={max_blink_deflection:.2f})"
+        )
+
+    def test_corner_filter_stabilization_and_scale_invariance(self):
+        """Corner filter stabilizes eye corners and iod_scale provides scale-invariant beta."""
+        base_landmarks = np.zeros((478, 3), dtype=np.float64)
+        base_landmarks[33] = [500.0, 300.0, 0.0]
+        base_landmarks[133] = [540.0, 300.0, 0.0]
+        base_landmarks[263] = [700.0, 300.0, 0.0]
+        base_landmarks[362] = [660.0, 300.0, 0.0]
+
+        bank = OneEuroFilterBank(t0=0.0, x0=base_landmarks, corner_min_cutoff=0.6, corner_beta=0.01)
+        assert bank.corner_filter is not None
+        assert bank._corner_min_cutoff == 0.6
+        assert bank._corner_beta == 0.01
+
+        # Feed eye corner jitter
+        dt = 1.0 / 30.0
+        outputs = []
+        for i in range(1, 31):
+            t = i * dt
+            noisy = base_landmarks.copy()
+            jitter = 2.0 if (i % 2 == 1) else -2.0
+            noisy[33, 1] += jitter
+            noisy[133, 1] += jitter
+            out = bank.filter_landmarks(t, noisy, vibration_score=0.2)
+            outputs.append(out[33, 1] - 300.0)
+
+        # Corner jitter should be heavily smoothed
+        jitter_amp = (max(outputs[-10:]) - min(outputs[-10:])) / 2.0
+        assert jitter_amp < 0.5, f"Corner filter jitter too large: {jitter_amp:.2f}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

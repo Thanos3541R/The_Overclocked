@@ -212,12 +212,16 @@ def extract_video_features(video_path: str,
                         iris_min_cutoff=config.iris_min_cutoff,
                         iris_beta=config.iris_beta,
                         iris_d_cutoff=config.iris_d_cutoff,
+                        corner_min_cutoff=config.corner_min_cutoff,
+                        corner_beta=config.corner_beta,
                         ear_min_cutoff=config.ear_min_cutoff,
                         ear_beta=config.ear_beta,
                     )
                     smooth_landmarks = landmarks
                 else:
-                    smooth_landmarks = filter_bank.filter_landmarks(timestamp, landmarks)
+                    smooth_landmarks = filter_bank.filter_landmarks(
+                        timestamp, landmarks, vibration_score=stabilizer.vibration_score
+                    )
 
                 # 4. PnP 3D Head Pose Estimation & Normalization
                 pnp_success = pnp.solve_pose(smooth_landmarks)

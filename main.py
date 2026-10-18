@@ -349,12 +349,16 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     iris_min_cutoff=config.iris_min_cutoff,
                     iris_beta=config.iris_beta,
                     iris_d_cutoff=config.iris_d_cutoff,
+                    corner_min_cutoff=config.corner_min_cutoff,
+                    corner_beta=config.corner_beta,
                     ear_min_cutoff=config.ear_min_cutoff,
                     ear_beta=config.ear_beta,
                 )
                 smooth_landmarks = landmarks
             else:
-                smooth_landmarks = filter_bank.filter_landmarks(timestamp, landmarks)
+                smooth_landmarks = filter_bank.filter_landmarks(
+                    timestamp, landmarks, vibration_score=stabilizer.vibration_score
+                )
 
             # ── Stage 4: PnP Pose Estimation on Smoothed Landmarks ──
             pnp_success = normalizer.solve_pose(smooth_landmarks)

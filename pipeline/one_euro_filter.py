@@ -66,6 +66,9 @@ class VectorizedOneEuroFilter:
         """
         self.x_prev = np.asarray(x0, dtype=np.float64).copy()
         self.dx_prev = np.zeros_like(self.x_prev, dtype=np.float64)
+        self.raw_dx_prev = np.zeros_like(self.x_prev, dtype=np.float64)
+        self.oscillation_rate = np.zeros_like(self.x_prev, dtype=np.float64)
+        self.alpha_osc = 0.35
         self.t_prev = float(t0)
 
         self.min_cutoff = (
@@ -90,12 +93,23 @@ class VectorizedOneEuroFilter:
         r = 2.0 * np.pi * cutoff * dt
         return r / (r + 1.0)
 
-    def __call__(self, t: float, x: np.ndarray) -> np.ndarray:
+    def __call__(
+        self,
+        t: float,
+        x: np.ndarray,
+        iod_scale: float = 100.0,
+        is_structural: Optional[Union[bool, np.ndarray]] = None,
+        vibration_score: float = 0.0,
+    ) -> np.ndarray:
         """Filter a new sample.
 
         Args:
             t: Current timestamp (seconds).
             x: Current signal value, same shape as x0.
+            iod_scale: Inter-ocular distance in pixels for scale-invariant velocity normalization.
+            is_structural: Mask or boolean indicating structural/rigid landmarks eligible for
+                           vibration attenuation cutoff scaling.
+            vibration_score: Optional external cabin vibration score from KinematicStabilizer [0.0, 1.0].
 
         Returns:
             Filtered signal, same shape as x.
@@ -115,15 +129,66 @@ class VectorizedOneEuroFilter:
             self.reset(t, x)
             return self.x_prev.copy()
 
-        # 1. Filtered derivative (velocity estimate)
+        # 1. Unsmoothed velocity & oscillation detection (sign reversal)
         dx = (x - self.x_prev) / dt
-        alpha_d = self._smoothing_factor(dt, self.d_cutoff)
+        reversal = np.where(dx * self.raw_dx_prev < 0.0, 1.0, 0.0)
+        self.oscillation_rate = (
+            self.alpha_osc * reversal + (1.0 - self.alpha_osc) * self.oscillation_rate
+        )
+        self.raw_dx_prev = dx.copy()
+
+        # Effective oscillation blending external vibration score
+        eff_osc = self.oscillation_rate
+        if vibration_score > 0.0:
+            eff_osc = np.maximum(eff_osc, float(np.clip(vibration_score, 0.0, 1.0)))
+
+        # 2. Filtered derivative (velocity estimate)
+        d_cutoff = self.d_cutoff
+        if isinstance(d_cutoff, np.ndarray):
+            while d_cutoff.ndim < x.ndim:
+                d_cutoff = np.expand_dims(d_cutoff, -1)
+        alpha_d = self._smoothing_factor(dt, d_cutoff)
         dx_hat = alpha_d * dx + (1.0 - alpha_d) * self.dx_prev
 
-        # 2. Adaptive cutoff = min_cutoff + beta * |velocity|
-        cutoff = self.min_cutoff + self.beta * np.abs(dx_hat)
+        # 3. Scale-normalized velocity: normalize by inter-ocular distance iod_scale
+        scale_norm = 100.0 / max(float(iod_scale), 1.0)
+        norm_dx_hat = np.abs(dx_hat) * scale_norm
 
-        # 3. Filter the signal with adaptive alpha
+        # 4. Oscillation-gated effective beta:
+        # High vibration reverses direction rapidly -> eff_beta throttles down to prevent noise pass-through
+        beta = self.beta
+        if isinstance(beta, np.ndarray):
+            while beta.ndim < x.ndim:
+                beta = np.expand_dims(beta, -1)
+        eff_beta = beta * np.maximum(0.05, 1.0 - 1.5 * eff_osc)
+
+        # 5. Oscillation-gated min_cutoff for structural landmarks:
+        # When oscillation_rate > 0.4, scale min_cutoff down by 0.5 to reject continuous cabin vibration
+        mc = self.min_cutoff
+        if isinstance(mc, np.ndarray):
+            while mc.ndim < x.ndim:
+                mc = np.expand_dims(mc, -1)
+
+        if is_structural is None:
+            if isinstance(mc, np.ndarray):
+                is_structural = (mc <= 1.0)
+            else:
+                is_structural = True
+        elif isinstance(is_structural, np.ndarray):
+            if is_structural.ndim > x.ndim:
+                is_structural = np.squeeze(is_structural)
+            while is_structural.ndim < x.ndim:
+                is_structural = np.expand_dims(is_structural, -1)
+            if is_structural.shape[0] != x.shape[0]:
+                is_structural = None
+
+        scale_min = np.where((eff_osc > 0.4) & is_structural, 0.5, 1.0)
+        eff_min_cutoff = mc * scale_min
+
+        # 6. Adaptive cutoff = eff_min_cutoff + eff_beta * norm_dx_hat
+        cutoff = eff_min_cutoff + eff_beta * norm_dx_hat
+
+        # 7. Filter the signal with adaptive alpha
         alpha = self._smoothing_factor(dt, cutoff)
         x_hat = alpha * x + (1.0 - alpha) * self.x_prev
 
@@ -138,6 +203,8 @@ class VectorizedOneEuroFilter:
         """Reset filter state (e.g., when face is re-detected after loss)."""
         self.x_prev = np.asarray(x, dtype=np.float64).copy()
         self.dx_prev = np.zeros_like(self.x_prev)
+        self.raw_dx_prev = np.zeros_like(self.x_prev)
+        self.oscillation_rate = np.zeros_like(self.x_prev)
         self.t_prev = float(t)
         if (isinstance(self.min_cutoff, np.ndarray) and self.x_prev.ndim >= 1 and
                 self.min_cutoff.shape[0] != self.x_prev.shape[0]):
@@ -168,13 +235,20 @@ class OneEuroFilterBank:
     """
 
     @staticmethod
-    def _compute_local_anchors(lms: np.ndarray, skull_center: np.ndarray) -> np.ndarray:
+    def _compute_local_anchors(
+        lms: np.ndarray,
+        skull_center: np.ndarray,
+        c_r: Optional[np.ndarray] = None,
+        c_l: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         anchors = np.broadcast_to(skull_center, lms.shape).copy()
         if lms.ndim != 2 or lms.shape[0] <= 362:
             return anchors
         n_pts = lms.shape[0]
-        c_r = 0.5 * (lms[33] + lms[133])
-        c_l = 0.5 * (lms[263] + lms[362])
+        if c_r is None:
+            c_r = 0.5 * (lms[33] + lms[133])
+        if c_l is None:
+            c_l = 0.5 * (lms[263] + lms[362])
         r_idx = [i for i in _RIGHT_EYE_OCULO_INDICES if i < n_pts]
         l_idx = [i for i in _LEFT_EYE_OCULO_INDICES if i < n_pts]
         if r_idx:
@@ -202,6 +276,8 @@ class OneEuroFilterBank:
                  iris_min_cutoff: float = 1.0,
                  iris_beta: float = 0.20,
                  iris_d_cutoff: float = 3.0,
+                 corner_min_cutoff: float = 0.6,
+                 corner_beta: float = 0.01,
                  preserve_oculomotor: bool = True,
                  ear_min_cutoff: float = 1.5,
                  ear_beta: float = 0.003,
@@ -221,6 +297,8 @@ class OneEuroFilterBank:
             iris_min_cutoff: Smoothing for iris landmarks (default 1.0 Hz).
             iris_beta: Speed coefficient for iris landmarks (default 0.20).
             iris_d_cutoff: Derivative cutoff for iris landmarks (default 3.0 Hz).
+            corner_min_cutoff: Smoothing for eye corner anchors (default 0.6 Hz).
+            corner_beta: Speed coefficient for eye corner anchors (default 0.01).
             preserve_oculomotor: If True, applies high-bandwidth profiles to eyelid and iris landmarks.
             ear_min_cutoff: Smoothing for auxiliary scalar signals.
             ear_beta: Speed coefficient for auxiliary scalar signals.
@@ -251,6 +329,21 @@ class OneEuroFilterBank:
         else:
             init_skull = np.zeros(x0_arr.shape[-1] if x0_arr.ndim >= 1 else 1, dtype=np.float64)
 
+        if x0_arr.ndim == 2 and n_pts > 362:
+            init_c_r = 0.5 * (x0_arr[33] + x0_arr[133]) - init_skull
+            init_c_l = 0.5 * (x0_arr[263] + x0_arr[362]) - init_skull
+            init_corners = np.vstack([init_c_r, init_c_l])
+        else:
+            dim = x0_arr.shape[-1] if x0_arr.ndim >= 1 else 3
+            init_corners = np.zeros((2, dim), dtype=np.float64)
+
+        self.corner_filter = VectorizedOneEuroFilter(
+            t0, init_corners,
+            min_cutoff=corner_min_cutoff,
+            beta=corner_beta,
+            d_cutoff=1.0,
+        )
+
         self.skull_filter = VectorizedOneEuroFilter(
             t0, init_skull,
             min_cutoff=1.8,
@@ -260,6 +353,10 @@ class OneEuroFilterBank:
 
         eyelid_indices = [i for i in DYNAMIC_EYELID_INDICES if i < n_pts]
         iris_indices = [i for i in DYNAMIC_IRIS_INDICES if i < n_pts]
+        oculo_set = set(eyelid_indices + iris_indices)
+        self._structural_mask = np.ones((n_pts, 1), dtype=bool) if n_pts > 0 else np.array([[True]], dtype=bool)
+        if oculo_set:
+            self._structural_mask[list(oculo_set), 0] = False
 
         if preserve_oculomotor and x0_arr.ndim == 2 and (eyelid_indices or iris_indices):
             min_cutoff_vec = np.full((n_pts, 1), float(landmark_min_cutoff), dtype=np.float64)
@@ -304,10 +401,12 @@ class OneEuroFilterBank:
         self._iris_min_cutoff = iris_min_cutoff
         self._iris_beta = iris_beta
         self._iris_d_cutoff = iris_d_cutoff
+        self._corner_min_cutoff = corner_min_cutoff
+        self._corner_beta = corner_beta
         self._preserve_oculomotor = preserve_oculomotor
 
-    def filter_landmarks(self, t: float, landmarks: np.ndarray) -> np.ndarray:
-        """Filter landmark array."""
+    def filter_landmarks(self, t: float, landmarks: np.ndarray, vibration_score: float = 0.0) -> np.ndarray:
+        """Filter landmark array with oscillation gating, scale normalization, and stabilized eye corners."""
         lms = np.asarray(landmarks, dtype=np.float64)
         if np.isnan(lms).any() or np.isinf(lms).any():
             return getattr(self, "_last_output", self.landmark_filter.x_prev).copy()
@@ -316,6 +415,13 @@ class OneEuroFilterBank:
                  self.landmark_filter.min_cutoff.shape[0] != lms.shape[0])):
             self.reset(t, lms)
             return self._last_output.copy()
+
+        iod_scale = 100.0
+        if lms.ndim == 2 and lms.shape[0] > 263:
+            dist = float(np.linalg.norm(lms[33, :2] - lms[263, :2]))
+            if dist > 5.0:
+                iod_scale = dist
+
         if self._preserve_oculomotor and lms.ndim == 2 and lms.shape[0] > 362:
             n_pts = lms.shape[0]
             valid_skull_idx = [i for i in _SKULL_ANCHOR_INDICES if i < n_pts]
@@ -326,13 +432,47 @@ class OneEuroFilterBank:
             else:
                 raw_skull = np.mean(lms, axis=0)
 
-            filt_skull = self.skull_filter(t, raw_skull)
-            rel_in = lms - self._compute_local_anchors(lms, raw_skull)
-            rel_out = self.landmark_filter(t, rel_in)
-            out = rel_out + self._compute_local_anchors(rel_out + filt_skull, filt_skull)
+            # Filter eye corners relative to raw_skull with dedicated low-cutoff corner_filter
+            raw_c_r = 0.5 * (lms[33] + lms[133]) - raw_skull
+            raw_c_l = 0.5 * (lms[263] + lms[362]) - raw_skull
+            raw_corners = np.vstack([raw_c_r, raw_c_l])
+            filt_rel_corners = self.corner_filter(
+                t, raw_corners,
+                iod_scale=iod_scale,
+                is_structural=True,
+                vibration_score=vibration_score,
+            )
+            stable_rel_r = filt_rel_corners[0]
+            stable_rel_l = filt_rel_corners[1]
+
+            filt_skull = self.skull_filter(
+                t, raw_skull,
+                iod_scale=iod_scale,
+                is_structural=True,
+                vibration_score=vibration_score,
+            )
+            c_r_in = raw_skull + stable_rel_r
+            c_l_in = raw_skull + stable_rel_l
+            c_r_out = filt_skull + stable_rel_r
+            c_l_out = filt_skull + stable_rel_l
+
+            rel_in = lms - self._compute_local_anchors(lms, raw_skull, c_r=c_r_in, c_l=c_l_in)
+            rel_out = self.landmark_filter(
+                t, rel_in,
+                iod_scale=iod_scale,
+                is_structural=self._structural_mask,
+                vibration_score=vibration_score,
+            )
+            out = rel_out + self._compute_local_anchors(rel_out + filt_skull, filt_skull, c_r=c_r_out, c_l=c_l_out)
             self._last_output = out.copy()
             return out
-        out = self.landmark_filter(t, lms)
+
+        out = self.landmark_filter(
+            t, lms,
+            iod_scale=iod_scale,
+            is_structural=self._structural_mask,
+            vibration_score=vibration_score,
+        )
         self._last_output = out.copy()
         return out
 
@@ -368,6 +508,8 @@ class OneEuroFilterBank:
                 iris_min_cutoff=self._iris_min_cutoff,
                 iris_beta=self._iris_beta,
                 iris_d_cutoff=self._iris_d_cutoff,
+                corner_min_cutoff=self._corner_min_cutoff,
+                corner_beta=self._corner_beta,
                 preserve_oculomotor=self._preserve_oculomotor,
                 ear_min_cutoff=self._ear_min_cutoff,
                 ear_beta=self._ear_beta,
@@ -384,9 +526,20 @@ class OneEuroFilterBank:
             else:
                 raw_skull = np.zeros(lms.shape[-1] if lms.ndim >= 1 else 1, dtype=np.float64)
 
+            if lms.ndim == 2 and n_pts > 362:
+                init_c_r = 0.5 * (lms[33] + lms[133]) - raw_skull
+                init_c_l = 0.5 * (lms[263] + lms[362]) - raw_skull
+                init_corners = np.vstack([init_c_r, init_c_l])
+            else:
+                dim = lms.shape[-1] if lms.ndim >= 1 else 3
+                init_corners = np.zeros((2, dim), dtype=np.float64)
+
+            self.corner_filter.reset(t, init_corners)
             self.skull_filter.reset(t, raw_skull)
-            if self._preserve_oculomotor and lms.ndim == 2 and lms.shape[0] > 362:
-                self.landmark_filter.reset(t, lms - self._compute_local_anchors(lms, raw_skull))
+            if self._preserve_oculomotor and lms.ndim == 2 and n_pts > 362:
+                c_r_init = raw_skull + init_c_r
+                c_l_init = raw_skull + init_c_l
+                self.landmark_filter.reset(t, lms - self._compute_local_anchors(lms, raw_skull, c_r=c_r_init, c_l=c_l_init))
             else:
                 self.landmark_filter.reset(t, lms)
             self._last_output = lms.copy()

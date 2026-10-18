@@ -68,6 +68,8 @@ class PipelineConfig:
     iris_min_cutoff: float = 1.5       # smoothing for iris landmarks at rest
     iris_beta: float = 0.55            # fast response for relative iris saccades
     iris_d_cutoff: float = 8.0         # fast derivative cutoff for 1-2 frame saccades
+    corner_min_cutoff: float = 0.6     # low cutoff for stabilized eye corners
+    corner_beta: float = 0.01          # low speed coefficient to prevent eye-corner jitter injection
     ear_min_cutoff: float = 1.5        # less smoothing for EAR signal
     ear_beta: float = 0.003
 

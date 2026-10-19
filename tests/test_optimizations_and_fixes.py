@@ -882,5 +882,158 @@ class TestExternalReviewFixes:
         assert cfg.max_occlusion_hold_frames == 15
 
 
+class TestPhase8Enhancements:
+    """Unit tests for Phase 8: Eyeglass Glare, Sunglass Occlusion, and Rolling-Shutter Normalization."""
+
+    @staticmethod
+    def _make_landmarks_with_contours(ear_l=0.30, ear_r=0.30):
+        from utils.landmarks import RIGHT_EYE_CONTOUR, LEFT_EYE_CONTOUR
+        lm = np.zeros((478, 3), dtype=np.float64)
+
+        # Right eye (subject's right, viewer's left) around (200, 200)
+        cx_r, cy_r = 200.0, 200.0
+        w_r, h_r = 40.0, ear_r * 40.0
+        for i, idx in enumerate(RIGHT_EYE_CONTOUR):
+            ang = 2.0 * np.pi * i / len(RIGHT_EYE_CONTOUR)
+            lm[idx] = [cx_r + (w_r / 2.0) * np.cos(ang), cy_r + (h_r / 2.0) * np.sin(ang), 0.0]
+
+        # Left eye (subject's left, viewer's right) around (400, 200)
+        cx_l, cy_l = 400.0, 200.0
+        w_l, h_l = 40.0, ear_l * 40.0
+        for i, idx in enumerate(LEFT_EYE_CONTOUR):
+            ang = 2.0 * np.pi * i / len(LEFT_EYE_CONTOUR)
+            lm[idx] = [cx_l + (w_l / 2.0) * np.cos(ang), cy_l + (h_l / 2.0) * np.sin(ang), 0.0]
+
+        # Explicit EAR 6-points for exact EAR Soukupová formula: EAR = (v1 + v2)/(2*h) = h_r/w_r = ear_r
+        lm[33]  = [cx_r - w_r / 2, cy_r, 0]
+        lm[160] = [cx_r - w_r * 0.15, cy_r - h_r / 2, 0]
+        lm[158] = [cx_r + w_r * 0.15, cy_r - h_r / 2, 0]
+        lm[133] = [cx_r + w_r / 2, cy_r, 0]
+        lm[153] = [cx_r + w_r * 0.15, cy_r + h_r / 2, 0]
+        lm[144] = [cx_r - w_r * 0.15, cy_r + h_r / 2, 0]
+
+        lm[263] = [cx_l + w_l / 2, cy_l, 0]
+        lm[385] = [cx_l + w_l * 0.15, cy_l - h_l / 2, 0]
+        lm[387] = [cx_l - w_l * 0.15, cy_l - h_l / 2, 0]
+        lm[362] = [cx_l - w_l / 2, cy_l, 0]
+        lm[373] = [cx_l - w_l * 0.15, cy_l + h_l / 2, 0]
+        lm[380] = [cx_l + w_l * 0.15, cy_l + h_l / 2, 0]
+
+        # Irises
+        lm[468] = [cx_r, cy_r, 0]
+        lm[473] = [cx_l, cy_l, 0]
+
+        # Nose bridge and tip (for rolling shutter)
+        lm[168] = [300.0, 200.0, 0.0]  # Mid-nose bridge
+        lm[4]   = [300.0, 280.0, 0.0]  # Nose tip
+        return lm
+
+    def test_uniform_synthetic_frames_no_glare_or_sunglasses(self):
+        """Uniform synthetic test frames (std < 1.0) must never trigger glare or sunglasses."""
+        ext = FeatureExtractor(fps=30.0)
+        lm = self._make_landmarks_with_contours(0.30, 0.30)
+
+        # Zero frame (black)
+        f_black = np.zeros((720, 1280, 3), dtype=np.uint8)
+        gl_l, gl_r, any_gl, sunglass = ext._evaluate_eye_glare_and_occlusion(f_black, lm, 0.30, 0.30)
+        assert (gl_l, gl_r, any_gl, sunglass) == (False, False, False, False)
+
+        feat_black = ext.compute(lm, timestamp=0.0, frame_id=0, face_valid=True, frame=f_black)
+        assert feat_black.eyeglass_glare_detected is False
+        assert feat_black.sunglasses_occluded is False
+
+        # Gray frame (uniform 128)
+        f_gray = np.full((720, 1280, 3), 128, dtype=np.uint8)
+        gl_l, gl_r, any_gl, sunglass = ext._evaluate_eye_glare_and_occlusion(f_gray, lm, 0.30, 0.30)
+        assert (gl_l, gl_r, any_gl, sunglass) == (False, False, False, False)
+
+    def test_eyeglass_glare_monocular_fallback(self):
+        """Specular reflection on one eyeglass lens triggers monocular fallback from clean eye."""
+        ext = FeatureExtractor(fps=30.0)
+        # Left eye: corrupted EAR 0.45; Right eye: clean EAR 0.25
+        lm = self._make_landmarks_with_contours(ear_l=0.45, ear_r=0.25)
+        # Offset irises to verify copying
+        lm[468] = [200.0 - 8.0, 200.0 + 5.0, 0]  # Left eye in viewer frame (corners 33 & 133)
+        lm[473] = [400.0 + 4.0, 200.0 - 2.0, 0]  # Right eye in viewer frame (corners 263 & 362)
+
+        # Base frame with natural texture (std ~ 6.0)
+        np.random.seed(42)
+        frame = np.random.randint(90, 115, (720, 1280, 3), dtype=np.uint8)
+
+        # Add specular glare (>242 lum) to left eye (subject's left, around 400, 200)
+        # 18x18 patch gives ~31% contour glare (>25%) and crop mean ~136 (<210)
+        frame[191:209, 391:409] = 255
+
+        feat = ext.compute(lm, timestamp=0.0, frame_id=0, face_valid=True, frame=frame)
+        assert feat.eyeglass_glare_detected is True
+        # Monocular fallback: clean right eye (ear_right=0.25) used for ear_avg
+        assert feat.ear_avg == pytest.approx(feat.ear_right, rel=1e-3)
+        # Left iris coordinates copied from clean right iris
+        assert feat.left_iris_x == pytest.approx(feat.right_iris_x, abs=1e-5)
+        assert feat.left_iris_y == pytest.approx(feat.right_iris_y, abs=1e-5)
+
+        # Opposite case: right eye has glare, left eye is clean
+        ext.reset()
+        frame_r = np.random.randint(90, 115, (720, 1280, 3), dtype=np.uint8)
+        frame_r[191:209, 191:209] = 255  # Right eye contour around (200, 200)
+
+        feat_r = ext.compute(lm, timestamp=0.0, frame_id=0, face_valid=True, frame=frame_r)
+        assert feat_r.eyeglass_glare_detected is True
+        # Monocular fallback: clean left eye used for ear_avg
+        assert feat_r.ear_avg == pytest.approx(feat_r.ear_left, rel=1e-3)
+        assert feat_r.right_iris_x == pytest.approx(feat_r.left_iris_x, abs=1e-5)
+        assert feat_r.right_iris_y == pytest.approx(feat_r.left_iris_y, abs=1e-5)
+
+    def test_sunglasses_occlusion_and_masking_suppression(self):
+        """Dark sunglasses with static landmarks suppress false deliberate blink suppression and stare."""
+        ext = FeatureExtractor(fps=30.0)
+        lm = self._make_landmarks_with_contours(ear_l=0.30, ear_r=0.30)
+
+        # Create color frame with dark eye crops (lum < 45, std in [1.0, 8.0))
+        np.random.seed(123)
+        frame = np.random.randint(22, 34, (720, 1280, 3), dtype=np.uint8)
+        frame[:, :, 0] += 5  # Non-monochrome chromaticity
+
+        # Feed 65 frames of static landmarks (inter-blink interval > 2.0s)
+        feat = None
+        for i in range(65):
+            t = i / 30.0
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True, frame=frame)
+
+        assert feat is not None
+        assert feat.sunglasses_occluded is True
+        assert feat.deliberate_blink_suppression is False
+        assert feat.compensatory_stare_active is False
+
+    def test_rolling_shutter_vertical_midface_compensation(self):
+        """Rolling shutter vertical elongation under vibration is canceled out by mid-face ratio."""
+        ext = FeatureExtractor(fps=30.0)
+        lm = self._make_landmarks_with_contours(ear_l=0.30, ear_r=0.30)
+        # Distance nose: ||[300, 280] - [300, 200]|| = 80.0 px
+        # Distance canthal: ||[420, 200] - [180, 200]|| = 240.0 px
+        # Baseline ratio = 80 / 240 = 0.3333
+
+        # Step 1: Calibrate baseline under low vibration (<= 0.15) over 30 frames
+        for i in range(30):
+            ext.compute(lm, timestamp=i / 30.0, frame_id=i, face_valid=True,
+                        head_pitch=0.0, vibration_score=0.10)
+
+        assert ext._baseline_nose_ratio == pytest.approx(80.0 / 240.0, rel=1e-3)
+
+        # Step 2: High cabin vibration (> 0.25) with 10% rolling-shutter vertical stretch
+        # Nose bridge stretches by 1.10x: 80 -> 88 px (tip moves from 280 to 288)
+        # Eye landmarks also stretch vertically by 1.10x, inflating raw EAR to 0.33
+        lm_stretched = self._make_landmarks_with_contours(ear_l=0.33, ear_r=0.33)
+        lm_stretched[4] = [300.0, 288.0, 0.0]  # Nose length 88 px -> ratio 88/240 = 0.3667
+
+        feat = ext.compute(lm_stretched, timestamp=1.5, frame_id=31, face_valid=True,
+                           head_pitch=0.0, vibration_score=0.35)
+
+        # Stretch ratio = 0.3667 / 0.3333 = 1.10.
+        # EAR should be compensated by dividing by 1.10: 0.33 / 1.10 = 0.30
+        assert feat.ear_avg == pytest.approx(0.30, abs=0.005)
+
+
+
 
 

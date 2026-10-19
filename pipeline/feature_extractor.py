@@ -1466,8 +1466,9 @@ class FeatureExtractor:
             if dt <= 1e-4:
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
 
-            freqs = np.fft.rfftfreq(len(sig), d=dt)
-            fft_mag = np.abs(np.fft.rfft(sig))
+            n_fft = max(len(sig), 1024)
+            freqs = np.fft.rfftfreq(n_fft, d=dt)
+            fft_mag = np.abs(np.fft.rfft(sig, n=n_fft))
 
             band_mask = (freqs >= 0.75) & (freqs <= 2.5)
             if not np.any(band_mask):

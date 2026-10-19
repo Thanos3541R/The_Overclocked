@@ -172,3 +172,40 @@ def test_physiological_bounding_clamps():
     assert b.ingress_impairment_detected is False
     assert b.ear_baseline == 0.38  # Clamped to PHYSIOLOGICAL_EAR_MAX
     assert b.blink_upstroke_baseline == 3.20  # Clamped to PHYSIOLOGICAL_BLINK_UP_MAX
+
+
+def test_calibrator_yaw_baseline_and_pose_gate_injection():
+    """Verify that PersonalBaselineCalibrator tracks head_yaw_baseline and injects offsets into pose_gate and classifier."""
+    from pipeline.head_pose_estimator import HeadPoseGate
+
+    calibrator = PersonalBaselineCalibrator(calibration_duration_sec=1.0, min_samples=10, fps=10.0)
+    for i in range(15):
+        ff = FrameFeatures(
+            timestamp=i * 0.1,
+            face_valid=True,
+            ear_left=0.30,
+            ear_right=0.30,
+            ear_avg=0.30,
+            head_pitch=-6.0,
+            head_roll=3.0,
+            head_yaw=18.5,
+        )
+        calibrator.update(ff)
+
+    b = calibrator.finalize()
+    assert b.is_calibrated is True
+    assert abs(b.head_yaw_baseline - 18.5) < 0.1
+    assert abs(b.head_pitch_baseline - (-6.0)) < 0.1
+    assert abs(b.head_roll_baseline - 3.0) < 0.1
+
+    extractor = FeatureExtractor()
+    classifier = ImpairmentClassifier()
+    pose_gate = HeadPoseGate()
+
+    calibrator.apply_to(extractor, classifier=classifier, pose_gate=pose_gate)
+
+    assert abs(classifier.pitch_baseline - (-6.0)) < 0.1
+    assert abs(classifier.roll_baseline - 3.0) < 0.1
+    assert abs(pose_gate.yaw_offset - 18.5) < 0.1
+    assert abs(pose_gate.pitch_offset - (-6.0)) < 0.1
+    assert abs(pose_gate.roll_offset - 3.0) < 0.1

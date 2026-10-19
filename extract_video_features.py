@@ -178,6 +178,7 @@ def extract_video_features(video_path: str,
     start_time = time.time()
 
     prev_pts = 0.0
+    missing_face_frames = 0
 
     try:
         while True:
@@ -210,6 +211,7 @@ def extract_video_features(video_path: str,
             landmarks = detector.detect(processed_frame, shift_hint=(dx_cam, dy_cam))
 
             if landmarks is not None:
+                missing_face_frames = 0
                 face_detected_frames += 1
 
                 # 3. Split-Bandwidth 1-Euro Temporal Filtering
@@ -271,12 +273,14 @@ def extract_video_features(video_path: str,
                 # Online Personal Baseline Auto-Calibration
                 calibrator.update(features)
                 if calibrator.is_calibrated:
-                    calibrator.apply_to(extractor, classifier)
+                    calibrator.apply_to(extractor, classifier, pose_gate=pose_gate)
             else:
-                pnp.reset()
-                imu_gate.reset()
-                stabilizer.reset()
-                filter_bank = None
+                missing_face_frames += 1
+                if missing_face_frames > config.max_occlusion_hold_frames:
+                    pnp.reset()
+                    imu_gate.reset()
+                    stabilizer.reset()
+                    filter_bank = None
                 features = extractor.compute(
                     landmarks=None,
                     timestamp=timestamp,

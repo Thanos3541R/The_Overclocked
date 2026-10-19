@@ -827,6 +827,60 @@ class TestExternalReviewFixes:
             assert out_degen_bgr.shape == bgr.shape
             assert out_degen_gray.shape == gray.shape
 
+    def test_head_pose_gate_mounting_offsets(self):
+        """HeadPoseGate with mounting offset evaluates relative angles without false gating."""
+        from pipeline.head_pose_estimator import HeadPoseGate
+
+        # Camera mounted at 20 deg yaw offset (e.g. A-pillar or center console)
+        gate = HeadPoseGate(yaw_limit=35.0, yaw_offset=20.0, pitch_offset=-5.0)
+
+        # Forward driver gaze: yaw=20.0, pitch=-5.0 from camera frame
+        state = gate.check((-5.0, 20.0, 0.0))
+        assert state.face_valid is True
+        assert state.yaw == 20.0  # Raw reporting preserved
+        assert state.pitch == -5.0
+
+        # Looking left 30 deg relative to road: yaw = 20 + 30 = 50.0 deg
+        state_left = gate.check((-5.0, 50.0, 0.0))
+        assert state_left.face_valid is True  # rel_yaw = 30.0 <= 35.0
+
+        # Looking right 40 deg relative to road: yaw = 20 - 40 = -20.0 deg
+        state_right = gate.check((-5.0, -20.0, 0.0))
+        assert state_right.face_valid is False  # rel_yaw = -40.0 > 35.0
+        assert "yaw=-40.0° exceeds ±35.0°" in state_right.gating_reason
+
+    def test_classifier_head_slump_relative_posture(self):
+        """ImpairmentClassifier evaluates head slump relative to driver baseline posture."""
+        from pipeline.classifier import ImpairmentClassifier
+
+        clf = ImpairmentClassifier()
+        dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        dummy_lms = np.zeros((478, 3))
+
+        # Driver with -16 deg camera pitch (downward looking camera)
+        # Without baseline calibration: pitch=-16.0 triggers false head slump
+        res_uncal = clf.evaluate_static_image(
+            frame=dummy_frame, landmarks=dummy_lms,
+            ear_left=0.30, ear_right=0.30, mar=0.10,
+            head_pitch=-16.0, head_roll=0.0,
+        )
+        assert res_uncal.marker_scores["head_slump"] > 0.0
+
+        # With baseline calibration: pitch_baseline=-16.0 -> rel_pitch = 0.0
+        clf.pitch_baseline = -16.0
+        res_cal = clf.evaluate_static_image(
+            frame=dummy_frame, landmarks=dummy_lms,
+            ear_left=0.30, ear_right=0.30, mar=0.10,
+            head_pitch=-16.0, head_roll=0.0,
+        )
+        assert res_cal.marker_scores["head_slump"] == 0.0
+
+    def test_occlusion_survival_holdover_config(self):
+        """PipelineConfig specifies max_occlusion_hold_frames to survive transient hand occlusions."""
+        from config import PipelineConfig
+        cfg = PipelineConfig()
+        assert cfg.max_occlusion_hold_frames == 15
+
 
 
 

@@ -65,6 +65,8 @@ class ImpairmentClassifier:
         self.baseline_asymmetry = baseline_asymmetry
         self.ingress_impairment_detected: bool = False
         self.ingress_reason: str = ""
+        self.pitch_baseline: float = 0.0
+        self.roll_baseline: float = 0.0
 
     def evaluate_static_image(self,
                               frame: np.ndarray,
@@ -134,11 +136,13 @@ class ImpairmentClassifier:
         # ── 3. Head Slump / Loss of Cervical Tone ──
         # Pitch < -12 deg indicates forward drooping head. Roll > 12 deg indicates head list.
         head_slump_score = 0.0
-        if head_pitch < -14.0:  # [PLACEHOLDER — pending calibration against real data]
-            head_slump_score += min(60.0, abs(head_pitch - (-14.0)) * 5.0)  # [PLACEHOLDER — pending calibration against real data]
+        rel_pitch = head_pitch - self.pitch_baseline
+        rel_roll = head_roll - self.roll_baseline
+        if rel_pitch < -14.0:  # [PLACEHOLDER — pending calibration against real data]
+            head_slump_score += min(60.0, abs(rel_pitch - (-14.0)) * 5.0)  # [PLACEHOLDER — pending calibration against real data]
             indicators.append(f"Cervical head slump (Pitch={head_pitch:.1f}°)")
-        if abs(head_roll) > 14.0:  # [PLACEHOLDER — pending calibration against real data]
-            head_slump_score += min(40.0, (abs(head_roll) - 14.0) * 4.0)  # [PLACEHOLDER — pending calibration against real data]
+        if abs(rel_roll) > 14.0:  # [PLACEHOLDER — pending calibration against real data]
+            head_slump_score += min(40.0, (abs(rel_roll) - 14.0) * 4.0)  # [PLACEHOLDER — pending calibration against real data]
             indicators.append(f"Lateral head tilt/sway (Roll={head_roll:.1f}°)")
         marker_scores["head_slump"] = float(np.clip(head_slump_score, 0.0, 85.0))
 

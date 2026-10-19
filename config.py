@@ -58,6 +58,7 @@ class PipelineConfig:
     enable_adaptive_roi: bool = True
     roi_margin: float = 2.0
     roi_alpha: float = 0.15
+    max_occlusion_hold_frames: int = 15  # max frame dropouts tolerated before state wipeout (0.5s at 30fps)
 
     # ── 1-Euro Filter ──
     landmark_min_cutoff: float = 0.8   # smoothing at rest

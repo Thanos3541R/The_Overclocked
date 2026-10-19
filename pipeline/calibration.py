@@ -40,6 +40,7 @@ class PersonalBaselines:
     brow_ratio_baseline: float = 0.0
     head_pitch_baseline: float = 0.0
     head_roll_baseline: float = 0.0
+    head_yaw_baseline: float = 0.0
     is_calibrated: bool = False
     samples_collected: int = 0
     duration_s: float = 0.0
@@ -73,6 +74,7 @@ class PersonalBaselineCalibrator:
         self._brow_samples: Deque[float] = deque(maxlen=max_history)
         self._pitch_samples: Deque[float] = deque(maxlen=max_history)
         self._roll_samples: Deque[float] = deque(maxlen=max_history)
+        self._yaw_samples: Deque[float] = deque(maxlen=max_history)
 
         self._start_timestamp: Optional[float] = None
         self._last_timestamp: float = 0.0
@@ -136,6 +138,7 @@ class PersonalBaselineCalibrator:
         # Accumulate head pose
         self._pitch_samples.append(features.head_pitch)
         self._roll_samples.append(features.head_roll)
+        self._yaw_samples.append(features.head_yaw)
 
         # Check if calibration criteria met
         elapsed = features.timestamp - self._start_timestamp
@@ -155,6 +158,7 @@ class PersonalBaselineCalibrator:
         raw_brow = float(np.median(self._brow_samples)) if self._brow_samples else 0.0
         pitch_base = float(np.median(self._pitch_samples)) if self._pitch_samples else 0.0
         roll_base = float(np.median(self._roll_samples)) if self._roll_samples else 0.0
+        yaw_base = float(np.median(self._yaw_samples)) if self._yaw_samples else 0.0
 
         # Check for Drunk Ingress: if driver enters with impaired open EAR or sluggish eyelid velocity
         ingress_flag = False
@@ -194,6 +198,7 @@ class PersonalBaselineCalibrator:
             brow_ratio_baseline=raw_brow,
             head_pitch_baseline=pitch_base,
             head_roll_baseline=roll_base,
+            head_yaw_baseline=yaw_base,
             is_calibrated=self._is_calibrated,
             samples_collected=len(self._ear_samples),
             duration_s=float(elapsed),
@@ -214,8 +219,8 @@ class PersonalBaselineCalibrator:
             return self._frozen_baselines
         return self._compute_metrics()
 
-    def apply_to(self, extractor: Any, classifier: Optional[Any] = None) -> None:
-        """Inject calibrated personal baselines into FeatureExtractor and ImpairmentClassifier instances."""
+    def apply_to(self, extractor: Any, classifier: Optional[Any] = None, pose_gate: Optional[Any] = None) -> None:
+        """Inject calibrated personal baselines into FeatureExtractor, ImpairmentClassifier, and HeadPoseGate instances."""
         b = self.get_baselines()
         if hasattr(extractor, "sober_ear_baseline"):
             extractor.sober_ear_baseline = b.ear_baseline
@@ -237,3 +242,10 @@ class PersonalBaselineCalibrator:
                 classifier.ingress_impairment_detected = b.ingress_impairment_detected
             if hasattr(classifier, "ingress_reason"):
                 classifier.ingress_reason = b.ingress_reason
+            classifier.pitch_baseline = b.head_pitch_baseline
+            classifier.roll_baseline = b.head_roll_baseline
+
+        if pose_gate is not None:
+            pose_gate.pitch_offset = b.head_pitch_baseline
+            pose_gate.yaw_offset = b.head_yaw_baseline
+            pose_gate.roll_offset = b.head_roll_baseline

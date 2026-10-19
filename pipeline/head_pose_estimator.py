@@ -27,16 +27,25 @@ class HeadPoseGate:
 
     def __init__(self, yaw_limit: float = 35.0,
                  pitch_down_limit: float = -30.0,
-                 pitch_up_limit: float = 25.0):
+                 pitch_up_limit: float = 25.0,
+                 yaw_offset: float = 0.0,
+                 pitch_offset: float = 0.0,
+                 roll_offset: float = 0.0):
         """
         Args:
             yaw_limit: Maximum absolute yaw before gating (degrees).
             pitch_down_limit: Minimum pitch before gating (degrees, negative = down).
             pitch_up_limit: Maximum pitch before gating (degrees).
+            yaw_offset: Baseline yaw offset from off-axis mounting (degrees).
+            pitch_offset: Baseline pitch offset from mounting angle (degrees).
+            roll_offset: Baseline roll offset from mounting angle (degrees).
         """
         self.yaw_limit = yaw_limit
         self.pitch_down_limit = pitch_down_limit
         self.pitch_up_limit = pitch_up_limit
+        self.yaw_offset = float(yaw_offset)
+        self.pitch_offset = float(pitch_offset)
+        self.roll_offset = float(roll_offset)
         self._last_valid_state = PoseState()
 
     def check(self, euler_angles: Optional[Tuple[float, float, float]]) -> PoseState:
@@ -61,16 +70,19 @@ class HeadPoseGate:
         pitch, yaw, roll = euler_angles
         state = PoseState(yaw=yaw, pitch=pitch, roll=roll)
 
+        rel_pitch = pitch - self.pitch_offset
+        rel_yaw = yaw - self.yaw_offset
+
         # Check gating conditions
-        if abs(yaw) > self.yaw_limit:
+        if abs(rel_yaw) > self.yaw_limit:
             state.face_valid = False
-            state.gating_reason = f"yaw={yaw:.1f}° exceeds ±{self.yaw_limit}°"
-        elif pitch < self.pitch_down_limit:
+            state.gating_reason = f"yaw={rel_yaw:.1f}° exceeds ±{self.yaw_limit}°"
+        elif rel_pitch < self.pitch_down_limit:
             state.face_valid = False
-            state.gating_reason = f"pitch={pitch:.1f}° below {self.pitch_down_limit}°"
-        elif pitch > self.pitch_up_limit:
+            state.gating_reason = f"pitch={rel_pitch:.1f}° below {self.pitch_down_limit}°"
+        elif rel_pitch > self.pitch_up_limit:
             state.face_valid = False
-            state.gating_reason = f"pitch={pitch:.1f}° above {self.pitch_up_limit}°"
+            state.gating_reason = f"pitch={rel_pitch:.1f}° above {self.pitch_up_limit}°"
         else:
             state.face_valid = True
             state.gating_reason = ""

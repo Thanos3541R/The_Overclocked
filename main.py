@@ -258,6 +258,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     last_features = None
     last_normalizer = None
     last_pnp_success = None
+    missing_face_frames = 0
 
     try:
         while capture.is_open():
@@ -312,11 +313,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             landmarks = detector.detect(processed, shift_hint=(dx_cam, dy_cam))
 
             if landmarks is None:
-                # Invalidate pose and log held-last gated frame so frame_ids never drop
-                normalizer.reset()
-                imu_gate.reset()
-                stabilizer.reset()
-                filter_bank = None
+                missing_face_frames += 1
+                if missing_face_frames > config.max_occlusion_hold_frames:
+                    normalizer.reset()
+                    imu_gate.reset()
+                    stabilizer.reset()
+                    filter_bank = None
                 features = extractor.compute(
                     landmarks=None,
                     timestamp=timestamp,
@@ -352,6 +354,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                         args.headless = True
                 continue
+
+            missing_face_frames = 0
 
             # ── Stage 3: Split-Bandwidth 1-Euro Temporal Filtering ──
             # Filter raw 2D/3D landmarks FIRST to eliminate detector sub-pixel jitter
@@ -421,7 +425,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             if features.face_valid and not features.imu_gated:
                 calibrator.update(features)
                 if calibrator.is_calibrated:
-                    calibrator.apply_to(extractor)
+                    calibrator.apply_to(extractor, pose_gate=pose_gate)
 
             # ── Output ──
             if csv_logger is not None:

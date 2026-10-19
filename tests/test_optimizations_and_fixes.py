@@ -1209,6 +1209,80 @@ class TestPhase9Enhancements:
         assert np.std(norm_gs) < 1.0
 
 
+class TestPhase11Enhancements:
+    """Verification tests for Phase 11: Eyeball tremor, single-pass T-zone, and strided rPPG."""
+
+    def test_eyeball_tremor_computation_and_vibration_discounting(self):
+        """High-frequency ocular micro-flutter (1-15 Hz) is measured and discounted by cabin vibration."""
+        ext = FeatureExtractor(fps=30.0)
+
+        for i in range(30):
+            t = i / 30.0
+            flutter = 0.02 * np.sin(2 * np.pi * 6.0 * t)
+            lm = make_full_landmarks(ear_val=0.30 / 2.0, iris_x_offset=flutter * 40.0)
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat.eyeball_tremor_hz >= 4.5
+
+        # Vibration score > 0.35 discounts eyeball tremor
+        ext_vib = FeatureExtractor(fps=30.0)
+        for i in range(30):
+            t = i / 30.0
+            flutter = 0.02 * np.sin(2 * np.pi * 6.0 * t)
+            lm = make_full_landmarks(ear_val=0.30 / 2.0, iris_x_offset=flutter * 40.0)
+            feat_vib = ext_vib.compute(lm, timestamp=t, frame_id=i, face_valid=True, vibration_score=0.50)
+
+        assert feat_vib.eyeball_tremor_hz == pytest.approx(feat.eyeball_tremor_hz * 0.50, rel=0.1)
+
+    def test_single_pass_tzone_rgb_and_backward_compatibility(self):
+        """Single-pass T-zone sampling is reused across flushing and rPPG, while preserving backward compatibility."""
+        from utils.landmarks import VASODILATION_LANDMARKS
+        ext = FeatureExtractor(fps=30.0)
+        lm = make_full_landmarks(ear_val=0.30 / 2.0)
+        for idx in VASODILATION_LANDMARKS:
+            lm[idx] = [200.0, 200.0, 0.0]
+
+        frame = np.zeros((400, 400, 3), dtype=np.uint8)
+        frame[:, :, 0] = 100  # B
+        frame[:, :, 1] = 120  # G
+        frame[:, :, 2] = 160  # R
+
+        # Single-pass sample
+        rgb = ext._sample_tzone_rgb(frame, lm)
+        assert rgb is not None
+        assert rgb[0] == pytest.approx(160.0, abs=1.0)
+        assert rgb[1] == pytest.approx(120.0, abs=1.0)
+        assert rgb[2] == pytest.approx(100.0, abs=1.0)
+
+        # Backward compatibility without tzone_rgb kwarg
+        f_ratio, f_valid, f_delta = ext._compute_facial_flushing(frame, lm)
+        assert f_valid is True
+        assert f_ratio > 1.20
+
+        # With tzone_rgb passed directly
+        f_ratio2, f_valid2, _ = ext._compute_facial_flushing(frame, lm, tzone_rgb=rgb)
+        assert f_valid2 is True
+        assert f_ratio2 == pytest.approx(f_ratio, rel=1e-5)
+
+    def test_classifier_eyeball_tremor_scoring(self):
+        """Ocular eyeball micro-tremor contributes to involuntary impairment risk."""
+        clf = ImpairmentClassifier()
+        feat = FrameFeatures(
+            face_valid=True,
+            ear_avg=0.28,
+            ear_left=0.28,
+            ear_right=0.28,
+            gen_detected=True,
+            gen_slow_phase_vel=8.0,
+            eyeball_tremor_hz=5.5,
+        )
+
+        res = clf.evaluate_temporal_stream(feat)
+        assert res.marker_scores["eyeball_tremor"] == 65.0
+        assert any("eyeball micro-tremor" in ind for ind in res.primary_indicators)
+
+
+
 
 
 

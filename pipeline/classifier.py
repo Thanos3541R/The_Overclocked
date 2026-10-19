@@ -364,6 +364,17 @@ class ImpairmentClassifier:
         else:
             marker_scores["eyelid_tremor"] = 0.0
 
+        # Ocular Eyeball Micro-Tremor / Flutter (Section A Involuntary)
+        eye_tremor = getattr(features, "eyeball_tremor_hz", 0.0)
+        if eye_tremor >= 5.0:
+            marker_scores["eyeball_tremor"] = 65.0
+            indicators.append(f"Ocular eyeball micro-tremor ({eye_tremor:.1f} Hz oscillation)")
+        elif eye_tremor >= 3.5:
+            marker_scores["eyeball_tremor"] = 30.0
+            indicators.append(f"Mild ocular eyeball flutter ({eye_tremor:.1f} Hz)")
+        else:
+            marker_scores["eyeball_tremor"] = 0.0
+
         # ── Section B: Voluntary & Masking Behaviors ──
         # 11. Voluntary Eye-Widening Spikes (Levator/Frontalis compensation)
         if features.voluntary_eye_widening:
@@ -436,6 +447,8 @@ class ImpairmentClassifier:
             if marker_scores["facial_flushing"] >= 35.0:
                 inv_risk += 5.0
             if marker_scores.get("eyelid_tremor", 0.0) >= 30.0:
+                inv_risk += 4.0
+            if marker_scores.get("eyeball_tremor", 0.0) >= 30.0:
                 inv_risk += 4.0
             if features.rppg_valid and 0.0 < features.rppg_hrv_rmssd_ms < 18.0:
                 inv_risk += 3.0

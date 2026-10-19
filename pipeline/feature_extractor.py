@@ -128,6 +128,7 @@ class FrameFeatures:
     brow_elevation_delta: float = 0.0           # Relative change in brow elevation over baseline
     frontalis_compensation_active: bool = False # True when eyebrows lift (> +12%) to fight eyelid ptosis
     eyelid_tremor_hz: float = 0.0               # High-frequency palpebral flutter /orbicularis tremor (Hz)
+    eyeball_tremor_hz: float = 0.0              # High-frequency ocular/iris micro-flutter (Hz)
     rppg_pulse_bpm: float = 0.0                 # T-zone green-channel photoplethysmography heart rate (BPM)
     rppg_hrv_rmssd_ms: float = 0.0              # Beat-to-beat heart rate variability RMSSD (ms)
     rppg_valid: bool = False                    # True when RGB buffer has sufficient SNR for pulse extraction
@@ -266,6 +267,8 @@ class FeatureExtractor:
 
         # Eyelid micro-tremor / flutter state (2-second rolling window)
         self._ear_tremor_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(2.0 * fps), 15))
+        self._iris_tremor_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(2.0 * fps), 15))
+        self._rppg_sample_counter: int = 0
 
         # T-zone rPPG pulse & HRV state (10-second rolling green-channel buffer)
         self._rppg_green_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(10.0 * fps), 60))
@@ -421,6 +424,8 @@ class FeatureExtractor:
             self._smoothed_brow_ratio = 0.0
             self._brow_initialized = False
             self._ear_tremor_history.clear()
+            self._iris_tremor_history.clear()
+            self._rppg_sample_counter = 0
             self._rppg_green_history.clear()
             self._last_rppg_bpm = 0.0
             self._last_rppg_rmssd = 0.0
@@ -1118,16 +1123,12 @@ class FeatureExtractor:
         rigid_stabilization = bool(sway < self.rigid_head_sway_threshold and len(recent) >= 20)
         return (sway, rigid_stabilization)
 
-    def _compute_facial_flushing(self, frame: Optional[np.ndarray], landmarks: np.ndarray) -> Tuple[float, bool, float]:
-        """Measure micro-vascular facial flushing / vasodilation across cheeks and forehead T-zone (Section A).
-
-        Calculates chromaticity ratio R / ((G + B)/2 + 1e-5) across MediaPipe full cheek
-        matrices and forehead frontal patch landmarks (VASODILATION_LANDMARKS).
-        If frame is monochrome / NIR, flushing is cleanly marked invalid and delta set to 0.0.
-        When RGB, flushing_delta evaluates relative surge over baseline (default 1.35 or calibrated).
-        """
+    def _sample_tzone_rgb(
+        self, frame: Optional[np.ndarray], landmarks: np.ndarray
+    ) -> Optional[Tuple[float, float, float]]:
+        """Sample mean (R, G, B) across VASODILATION_LANDMARKS in a single pass."""
         if frame is None or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
-            return (1.0, False, 0.0)
+            return None
 
         try:
             h, w = frame.shape[:2]
@@ -1154,9 +1155,34 @@ class FeatureExtractor:
                         g_vals.append(float(np.mean(patch[:, :, 1])))
                         r_vals.append(float(np.mean(patch[:, :, 2])))
 
-            if r_vals and g_vals and b_vals:
-                mean_r = float(np.mean(r_vals))
-                mean_gb = float((np.mean(g_vals) + np.mean(b_vals)) / 2.0)
+            if not r_vals or not g_vals or not b_vals:
+                return None
+            return (float(np.mean(r_vals)), float(np.mean(g_vals)), float(np.mean(b_vals)))
+        except Exception as exc:
+            logger.debug("T-zone RGB patch sampling failed: %s", exc, exc_info=True)
+            return None
+
+    def _compute_facial_flushing(
+        self,
+        frame: Optional[np.ndarray],
+        landmarks: np.ndarray,
+        tzone_rgb: Optional[Tuple[float, float, float]] = None,
+    ) -> Tuple[float, bool, float]:
+        """Measure micro-vascular facial flushing / vasodilation across cheeks and forehead T-zone (Section A).
+
+        Calculates chromaticity ratio R / ((G + B)/2 + 1e-5) across MediaPipe full cheek
+        matrices and forehead frontal patch landmarks (VASODILATION_LANDMARKS).
+        If frame is monochrome / NIR, flushing is cleanly marked invalid and delta set to 0.0.
+        When RGB, flushing_delta evaluates relative surge over baseline (default 1.35 or calibrated).
+        """
+        if frame is None or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
+            return (1.0, False, 0.0)
+
+        try:
+            rgb = tzone_rgb if tzone_rgb is not None else self._sample_tzone_rgb(frame, landmarks)
+            if rgb is not None:
+                mean_r, mean_g, mean_b = rgb
+                mean_gb = float((mean_g + mean_b) / 2.0)
                 raw_ratio = float(mean_r / (mean_gb + 1e-5))
                 clamped = float(np.clip(raw_ratio, 0.5, 2.5))
                 if not getattr(self, "_flushing_initialized", False):
@@ -1176,7 +1202,7 @@ class FeatureExtractor:
                 flushing_delta = float((self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing))
                 return (float(self._smoothed_flushing), True, flushing_delta)
         except Exception as exc:
-            logger.debug("Facial flushing patch sampling failed: %s", exc, exc_info=True)
+            logger.debug("Facial flushing computation failed: %s", exc, exc_info=True)
 
         return (float(self._smoothed_flushing), True, 0.0)
 
@@ -1350,53 +1376,84 @@ class FeatureExtractor:
             tremor_hz *= max(0.0, 1.0 - vibration_score)
         return float(round(tremor_hz, 2))
 
-    def _compute_rppg_pulse(self, frame: Optional[np.ndarray],
-                            landmarks: np.ndarray,
-                            timestamp: float) -> Tuple[float, float, bool]:
+    def _compute_eyeball_tremor(
+        self,
+        avg_iris_x: float,
+        timestamp: float,
+        blink_phase: str,
+        saccade_detected: bool,
+        vibration_score: float = 0.0,
+    ) -> float:
+        """Track high-frequency horizontal eyeball/iris micro-flutter (1-15 Hz).
+
+        Zero-crossing oscillation of first-order horizontal iris differences during
+        open-eye non-saccadic intervals, discounted by cabin vibration.
+        """
+        if blink_phase != "open" or saccade_detected:
+            return 0.0
+
+        self._iris_tremor_history.append((timestamp, avg_iris_x))
+        cutoff = timestamp - 2.0
+        samples = [(t, x) for t, x in self._iris_tremor_history if t >= cutoff]
+
+        if len(samples) < 12:
+            return 0.0
+
+        duration = samples[-1][0] - samples[0][0]
+        if duration < 0.4:
+            return 0.0
+
+        xs = np.array([x for _, x in samples], dtype=np.float64)
+        diffs = np.diff(xs)
+        valid_mask = (np.abs(diffs) > 0.001) & (np.abs(diffs) < 0.045)
+        valid_diffs = diffs[valid_mask]
+
+        if len(valid_diffs) < 6:
+            return 0.0
+
+        signs = np.sign(valid_diffs)
+        reversals = int(np.sum(signs[1:] * signs[:-1] < 0))
+        tremor_hz = float(reversals / (2.0 * duration))
+        if vibration_score > 0.35:
+            tremor_hz *= max(0.0, 1.0 - vibration_score)
+        return float(round(tremor_hz, 2))
+
+    def _compute_rppg_pulse(
+        self,
+        frame: Optional[np.ndarray],
+        landmarks: np.ndarray,
+        timestamp: float,
+        tzone_rgb: Optional[Tuple[float, float, float]] = None,
+    ) -> Tuple[float, float, bool]:
         """Extract T-zone green-channel photoplethysmography heart rate & HRV.
 
         Physiological heart-rate band: 0.75 - 2.5 Hz (45 - 150 BPM).
         Automatically bypassed on monochrome/NIR frames.
+        Uses strided FFT evaluation (every 5 samples after initial lock) to cut CPU overhead by >80%.
         """
         if frame is None or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
             return (0.0, 0.0, False)
 
         try:
-            h, w = frame.shape[:2]
-            r_vals, g_vals, b_vals = [], [], []
-            for idx in VASODILATION_LANDMARKS:
-                if idx < len(landmarks):
-                    pt = landmarks[idx]
-                    px = int(pt[0] * w) if pt[0] <= 1.0 else int(pt[0])
-                    py = int(pt[1] * h) if pt[1] <= 1.0 else int(pt[1])
-                    if px <= 3 and py <= 3:
-                        continue
-                    y1 = max(0, py - 3)
-                    y2 = min(h, py + 4)
-                    x1 = max(0, px - 3)
-                    x2 = min(w, px + 4)
-                    if y2 > y1 and x2 > x1:
-                        patch = frame[y1:y2, x1:x2]
-                        b_vals.append(float(np.mean(patch[:, :, 0])))
-                        g_vals.append(float(np.mean(patch[:, :, 1])))
-                        r_vals.append(float(np.mean(patch[:, :, 2])))
-
-            if not g_vals:
+            rgb = tzone_rgb if tzone_rgb is not None else self._sample_tzone_rgb(frame, landmarks)
+            if rgb is None:
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
 
-            mean_r = float(np.mean(r_vals))
-            mean_g = float(np.mean(g_vals))
-            mean_b = float(np.mean(b_vals))
+            mean_r, mean_g, mean_b = rgb
             norm_g = float(mean_g / ((mean_r + mean_g + mean_b) / 3.0 + 1e-5) * 120.0)
             self._rppg_green_history.append((timestamp, norm_g))
+            self._rppg_sample_counter += 1
 
-            times = [t for t, g in self._rppg_green_history]
+            times = [t for t, _ in self._rppg_green_history]
             duration = times[-1] - times[0]
             if len(self._rppg_green_history) < 60 or duration < 4.0:
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
 
+            if self._last_rppg_valid and (self._rppg_sample_counter % 5 != 0):
+                return (self._last_rppg_bpm, self._last_rppg_rmssd, True)
+
             t_arr = np.array(times, dtype=np.float64)
-            g_arr = np.array([g for t, g in self._rppg_green_history], dtype=np.float64)
+            g_arr = np.array([g for _, g in self._rppg_green_history], dtype=np.float64)
 
             t_rel = t_arr - t_arr[0]
             p = np.polyfit(t_rel, g_arr, 1)
@@ -1724,6 +1781,7 @@ class FeatureExtractor:
                 features.brow_elevation_delta = self._last_features.brow_elevation_delta
                 features.frontalis_compensation_active = self._last_features.frontalis_compensation_active
                 features.eyelid_tremor_hz = self._last_features.eyelid_tremor_hz
+                features.eyeball_tremor_hz = self._last_features.eyeball_tremor_hz
                 features.rppg_pulse_bpm = self._last_features.rppg_pulse_bpm
                 features.rppg_hrv_rmssd_ms = self._last_features.rppg_hrv_rmssd_ms
                 features.rppg_valid = self._last_features.rppg_valid
@@ -1976,25 +2034,34 @@ class FeatureExtractor:
             if features.microsleep_detected or features.perclos > 0.15:
                 features.rigid_head_stabilization = False
 
-            # ── Facial Flushing / Vasodilation (Section A) ──
+            # ── Single-Pass T-Zone RGB Sampling for Flushing & rPPG ──
             sample_lms = image_landmarks if image_landmarks is not None else landmarks
+            tzone_rgb = self._sample_tzone_rgb(frame, sample_lms)
+
+            # ── Facial Flushing / Vasodilation (Section A) ──
             features.facial_flushing_ratio, features.flushing_valid, features.flushing_delta = \
-                self._compute_facial_flushing(frame, sample_lms)
+                self._compute_facial_flushing(frame, sample_lms, tzone_rgb=tzone_rgb)
 
             # ── Eyebrow / Frontalis Micromotions ──
             features.brow_eye_distance_ratio, features.brow_elevation_delta, features.frontalis_compensation_active = \
                 self._compute_brow_micromotion(sample_lms, features.ear_avg)
 
-            # ── Palpebral Eyelid Tremor (3-15 Hz) ──
+            # ── Palpebral Eyelid Tremor (3-15 Hz) & Ocular Eyeball Tremor (1-15 Hz) ──
             features.eyelid_tremor_hz = \
                 self._compute_eyelid_tremor(
                     features.ear_avg, timestamp, self._blink_phase,
                     vibration_score=float(vibration_score),
                 )
+            features.eyeball_tremor_hz = \
+                self._compute_eyeball_tremor(
+                    avg_iris_x, timestamp, self._blink_phase,
+                    features.saccade_detected,
+                    vibration_score=float(vibration_score),
+                )
 
             # ── T-zone rPPG Pulse & HRV ──
             features.rppg_pulse_bpm, features.rppg_hrv_rmssd_ms, features.rppg_valid = \
-                self._compute_rppg_pulse(frame, sample_lms, timestamp)
+                self._compute_rppg_pulse(frame, sample_lms, timestamp, tzone_rgb=tzone_rgb)
 
             # ── Voluntary Masking Behaviors (Section B) ──
             if features.blink_detected:

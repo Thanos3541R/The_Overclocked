@@ -354,6 +354,7 @@ def extract_video_features(video_path: str,
                 'brow_elevation_delta': round(features.brow_elevation_delta, 4),
                 'frontalis_compensation_active': bool(features.frontalis_compensation_active),
                 'eyelid_tremor_hz': round(features.eyelid_tremor_hz, 2),
+                'eyeball_tremor_hz': round(features.eyeball_tremor_hz, 2),
                 'rppg_pulse_bpm': round(features.rppg_pulse_bpm, 1),
                 'rppg_hrv_rmssd_ms': round(features.rppg_hrv_rmssd_ms, 2),
                 'rppg_valid': bool(features.rppg_valid),
@@ -435,6 +436,7 @@ def extract_video_features(video_path: str,
     max_stare_duration = float(np.max([r['stare_fixation_duration_s'] for r in valid_records])) if valid_records else 0.0
 
     mean_eyelid_tremor_hz = float(np.mean([r['eyelid_tremor_hz'] for r in valid_records])) if valid_records else 0.0
+    mean_eyeball_tremor_hz = float(np.mean([r['eyeball_tremor_hz'] for r in valid_records])) if valid_records else 0.0
     frontalis_compensation_frames = sum(1 for r in valid_records if r.get('frontalis_compensation_active', False))
     rppg_records = [r for r in valid_records if r.get('rppg_valid', False)]
     mean_rppg_bpm = float(np.mean([r['rppg_pulse_bpm'] for r in rppg_records])) if rppg_records else 0.0
@@ -481,6 +483,7 @@ def extract_video_features(video_path: str,
             'mean_facial_flushing_ratio': round(mean_flushing, 3),
             'mean_ear': round(mean_ear, 4),
             'mean_eyelid_tremor_hz': round(mean_eyelid_tremor_hz, 2),
+            'mean_eyeball_tremor_hz': round(mean_eyeball_tremor_hz, 2),
             'mean_rppg_pulse_bpm': round(mean_rppg_bpm, 1),
             'mean_rppg_hrv_rmssd_ms': round(mean_rppg_hrv_rmssd_ms, 2),
         },
@@ -574,6 +577,8 @@ def _generate_text_report(summary: Dict[str, Any], records: List[Dict[str, Any]]
     lines.append(f"     * Diagnostic Significance   : Antagonistic levator/orbicularis conflict under subcortical sedation.")
     lines.append(f"  9. T-Zone Autonomic Pulse (rPPG): Mean BPM = {sa.get('mean_rppg_pulse_bpm', 0.0):.1f}, HRV RMSSD = {sa.get('mean_rppg_hrv_rmssd_ms', 0.0):.1f} ms")
     lines.append(f"     * Diagnostic Significance   : Non-contact camera photoplethysmography detecting autonomic cardiac tone.")
+    lines.append(f" 10. Ocular Eyeball Tremor      : Mean Oscillation = {sa.get('mean_eyeball_tremor_hz', 0.0):.1f} Hz  [Nystagmus/flutter: 3.5-12 Hz]")
+    lines.append(f"     * Diagnostic Significance   : High-frequency horizontal iris oscillation during fixation.")
     lines.append("")
 
     lines.append("SECTION B — VOLUNTARY & SEMI-VOLUNTARY BEHAVIORS (CORROBORATING / GAMING)")

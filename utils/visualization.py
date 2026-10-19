@@ -43,6 +43,7 @@ class Visualizer:
         mesh_style: Optional[str] = None,
         solid_alpha: float = 0.42,
         enabled_solid_parts: Optional[List[str]] = None,
+        show_roi_box: bool = False,
     ):
         """Initialize HUD visualizer.
 
@@ -54,6 +55,7 @@ class Visualizer:
             mesh_style: Legacy parameter; mapped to overlay_mode if provided.
             solid_alpha: Transparency alpha for solid color facial regions (default: 0.42).
             enabled_solid_parts: Optional list of part names to enable initially. If None, all parts enabled.
+            show_roi_box: If True, renders AdaptiveROITracker bounding box and KinematicStabilizer shift vector.
         """
         if mesh_style is not None:
             if mesh_style in ("off", "none"):
@@ -74,6 +76,7 @@ class Visualizer:
         self.show_iris = show_iris
         self.show_pose_axes = show_pose_axes
         self.solid_alpha = float(solid_alpha)
+        self.show_roi_box: bool = bool(show_roi_box)
 
         # Dictionary of individual solid facial part toggles
         if enabled_solid_parts is not None:
@@ -298,6 +301,9 @@ class Visualizer:
         elif key == ord('8'):
             self.toggle_solid_part('face')
             return True
+        elif key in (ord('r'), ord('R')):
+            self.show_roi_box = not self.show_roi_box
+            return True
         return False
 
     def draw(
@@ -307,6 +313,11 @@ class Visualizer:
         features=None,
         pnp_normalizer=None,
         pnp_success: Optional[bool] = None,
+        assessment=None,
+        bayesian_state=None,
+        calibration_progress: Optional[float] = None,
+        roi_bounds: Optional[Tuple[int, int, int, int]] = None,
+        shift_vector: Optional[Tuple[float, float]] = None,
     ) -> np.ndarray:
         """Draw all debug overlays on the frame.
 
@@ -319,6 +330,11 @@ class Visualizer:
             features: FrameFeatures dataclass, or None.
             pnp_normalizer: PnPNormalizer instance for pose axes, or None.
             pnp_success: Optional bool flag indicating whether PnP solved successfully this frame.
+            assessment: Optional ImpairmentAssessment for status banner.
+            bayesian_state: Optional BayesianState for ISO 26262 lockout status.
+            calibration_progress: Optional baseline calibration progress (0.0 to 1.0).
+            roi_bounds: Optional (x1, y1, x2, y2) bounding box of adaptive ROI crop.
+            shift_vector: Optional (dx, dy) frame shift from kinematic stabilizer.
 
         Returns:
             Annotated display frame.
@@ -394,6 +410,14 @@ class Visualizer:
         # ── Region Legend (Top-Right) ──
         if self.overlay_mode != "off":
             self._draw_legend(frame, is_gated=is_gated)
+
+        # ── Adaptive ROI & Kinematic Stabilizer Overlay (Hotkey [r]) ──
+        if self.show_roi_box and roi_bounds is not None:
+            self._draw_roi_and_shift(frame, roi_bounds, shift_vector)
+
+        # ── Top-Center Diagnostic Status Banner ──
+        if assessment is not None:
+            self._draw_status_banner(frame, assessment, bayesian_state, calibration_progress)
 
         # ── Text HUD Panel (Top-Left) ──
         self._draw_text_panel(frame, features)
@@ -568,6 +592,91 @@ class Visualizer:
             else:
                 cv2.arrowedLine(frame, origin, end, colors_solid[i], 2, cv2.LINE_AA)
 
+    def _draw_roi_and_shift(
+        self,
+        frame: np.ndarray,
+        roi_bounds: Tuple[int, int, int, int],
+        shift_vector: Optional[Tuple[float, float]] = None,
+    ) -> None:
+        """Draw AdaptiveROITracker bounding box and KinematicStabilizer shift vector."""
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = roi_bounds
+        x1 = max(0, min(w - 1, int(x1)))
+        y1 = max(0, min(h - 1, int(y1)))
+        x2 = max(0, min(w - 1, int(x2)))
+        y2 = max(0, min(h - 1, int(y2)))
+        if x2 <= x1 or y2 <= y1:
+            return
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 1, cv2.LINE_AA)
+        label = f"ROI [r] {x2 - x1}x{y2 - y1}"
+        if shift_vector is not None:
+            dx, dy = shift_vector
+            label += f" | shift:({dx:+.1f},{dy:+.1f})px"
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+            ex = int(np.clip(cx + dx * 4.0, 0, w - 1))
+            ey = int(np.clip(cy + dy * 4.0, 0, h - 1))
+            cv2.arrowedLine(frame, (cx, cy), (ex, ey), (0, 255, 255), 2, cv2.LINE_AA)
+
+        cv2.putText(
+            frame, label, (x1 + 4, max(16, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 0), 1, cv2.LINE_AA
+        )
+
+    def _draw_status_banner(
+        self,
+        frame: np.ndarray,
+        assessment,
+        bayesian_state=None,
+        calibration_progress: Optional[float] = None,
+    ) -> None:
+        """Draw top-center diagnostic classification and ISO 26262 Bayesian status banner."""
+        h, w = frame.shape[:2]
+        if w < 300 or h < 80:
+            return
+
+        banner_w = min(410, w - 20)
+        banner_h = 48
+        bx1 = max(10, (w - banner_w) // 2)
+        by1 = 10
+        bx2 = bx1 + banner_w
+        by2 = by1 + banner_h
+
+        state_str = getattr(assessment, "classification", "SOBER")
+        bar_color = {
+            "SOBER": (0, 180, 0),
+            "MILD_IMPAIRMENT": (0, 165, 255),
+            "HIGH_RISK_INTOXICATED": (0, 0, 220),
+        }.get(state_str, (80, 80, 80))
+
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (18, 18, 18), -1)
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by1 + 6), bar_color, -1)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), bar_color, 1)
+
+        risk = getattr(assessment, "risk_score", 0.0)
+        inv_risk = getattr(assessment, "involuntary_risk_score", 0.0)
+        line1 = f"{state_str} | Risk:{risk:.1f}% (Invol:{inv_risk:.1f}%)"
+        cv2.putText(
+            frame, line1, (bx1 + 10, by1 + 23),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA
+        )
+
+        if bayesian_state is not None:
+            post_p = getattr(bayesian_state, "posterior_probability", 0.0) * 100.0
+            sust_s = getattr(bayesian_state, "sustained_high_confidence_s", 0.0)
+            locked = getattr(bayesian_state, "lockout_confirmed", False)
+            cal_pct = (calibration_progress if calibration_progress is not None else 1.0) * 100.0
+            status_tag = "LOCKOUT ARMED" if locked else f"Calib:{cal_pct:.0f}%"
+            line2 = f"Bayes P:{post_p:.1f}% ({sust_s:.1f}s) | {status_tag}"
+            line2_color = (0, 100, 255) if locked else (200, 220, 200)
+            cv2.putText(
+                frame, line2, (bx1 + 10, by1 + 41),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, line2_color, 1, cv2.LINE_AA
+            )
+
     def _draw_text_panel(self, frame: np.ndarray, features) -> None:
         """Draw feature values and overlay timing as HUD text panel."""
         h, w = frame.shape[:2]
@@ -594,6 +703,8 @@ class Visualizer:
                 f"Saccade: {features.saccade_velocity:.1f} deg/s [dx:{getattr(features, 'raw_iris_dx', 0.0):.4f}] (lat: {features.saccade_latency_ms:.0f}ms)",
                 f"Blink Vel: dn {features.blink_closing_velocity:.2f} | up {features.blink_opening_velocity:.2f}",
                 f"Gaze Yaw Disp: {features.gaze_yaw_dispersion:.3f}",
+                f"Tremor: Lid {getattr(features, 'eyelid_tremor_hz', 0.0):.1f}Hz | Eye {getattr(features, 'eyeball_tremor_hz', 0.0):.1f}Hz | Brow:{getattr(features, 'brow_elevation_delta', 0.0)*100:+.0f}%",
+                f"rPPG: {getattr(features, 'rppg_pulse_bpm', 0.0):.0f}bpm (HRV:{getattr(features, 'rppg_hrv_rmssd_ms', 0.0):.0f}ms) | Vib:{getattr(features, 'vibration_score', 0.0):.2f} | M_mask:{getattr(features, 'masking_divergence_score', 0.0):.1f}%",
                 f"Valid: {features.face_valid}" + (f" ({features.gating_reason})" if features.gating_reason else ""),
             ])
 
@@ -607,6 +718,14 @@ class Visualizer:
                 lines.append("!!! MICRO-SLEEP !!!")
             if features.yawn_detected:
                 lines.append(">>> YAWN <<<")
+            if getattr(features, "eyeglass_glare_detected", False):
+                lines.append("[GUARD] EYEGLASS GLARE MONO-FALLBACK")
+            if getattr(features, "sunglasses_occluded", False):
+                lines.append("[GUARD] SUNGLASSES OCCLUDED")
+            if getattr(features, "speech_active", False):
+                lines.append("[GUARD] SPEECH / SINGING CADENCE")
+            if getattr(features, "highway_fixation_exempt", False):
+                lines.append("[GUARD] HIGHWAY FIXATION EXEMPT")
 
         for i, text in enumerate(lines):
             y = y_offset + i * 22

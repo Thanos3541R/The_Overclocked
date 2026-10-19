@@ -46,6 +46,8 @@ from pipeline.feature_extractor import FeatureExtractor, FrameFeatures
 from pipeline.calibration import PersonalBaselineCalibrator
 from pipeline.imu_gate import SoftwareIMUGate
 from pipeline.stabilizer import KinematicStabilizer
+from pipeline.classifier import ImpairmentClassifier
+from pipeline.bayesian_filter import BayesianEvidenceAccumulator
 from utils.visualization import Visualizer
 
 
@@ -205,6 +207,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         max_freeze_duty_cycle=config.max_freeze_duty_cycle,
     )
     stabilizer = KinematicStabilizer()
+    classifier = ImpairmentClassifier()
+    bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 
     # Filter bank (lazy-initialized on first valid frame)
     filter_bank: Optional[OneEuroFilterBank] = None
@@ -245,7 +249,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
           f"@ {capture.fps:.1f} fps (est.)")
     print(f"[DMS] Input type: {'Grayscale (NIR)' if capture.is_grayscale else 'BGR (RGB camera)'}")
     if not args.headless:
-        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'v' to cycle overlay (Regions -> Full -> Solid -> Off)")
+        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'v' to cycle overlay | 'r' to toggle ROI box")
         print("[DMS] Solid mode: [1] Forehead [2] Cheeks [3] Chin [4] Lips [5] Eyes [6] Nose [7] Brows [8] Face | [0] Toggle all")
 
     # ── Main loop ──
@@ -258,6 +262,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     last_features = None
     last_normalizer = None
     last_pnp_success = None
+    last_assessment = None
+    last_bayesian_state = None
+    last_roi_bounds = None
+    last_shift_vector = None
     missing_face_frames = 0
 
     try:
@@ -274,7 +282,18 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                             visualizer._mouse_clicked = False
                             if last_raw_frame is not None:
                                 viz_frame = last_raw_frame.copy() if len(last_raw_frame.shape) == 3 else cv2.cvtColor(last_raw_frame, cv2.COLOR_GRAY2BGR)
-                                visualizer.draw(viz_frame, last_smooth_landmarks, last_features, last_normalizer, pnp_success=last_pnp_success)
+                                visualizer.draw(
+                                    viz_frame,
+                                    last_smooth_landmarks,
+                                    last_features,
+                                    last_normalizer,
+                                    pnp_success=last_pnp_success,
+                                    assessment=last_assessment,
+                                    bayesian_state=last_bayesian_state,
+                                    calibration_progress=calibrator.progress,
+                                    roi_bounds=last_roi_bounds,
+                                    shift_vector=last_shift_vector,
+                                )
                                 cv2.imshow("Driver Monitor", viz_frame)
                     except cv2.error as exc:
                         print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
@@ -329,6 +348,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     frame=frame,
                     vibration_score=stabilizer.vibration_score,
                 )
+                assessment = classifier.evaluate_temporal_stream(features)
+                bayesian_state = bayesian_filter.update(assessment, timestamp)
                 if csv_logger is not None:
                     csv_logger.log(features)
 
@@ -337,11 +358,26 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 last_features = features
                 last_normalizer = None
                 last_pnp_success = False
+                last_assessment = assessment
+                last_bayesian_state = bayesian_state
+                last_roi_bounds = face_bbox
+                last_shift_vector = (dx_cam, dy_cam)
 
                 if not args.headless:
                     try:
                         viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                        visualizer.draw(viz_frame, None, features, None, pnp_success=False)
+                        visualizer.draw(
+                            viz_frame,
+                            None,
+                            features,
+                            None,
+                            pnp_success=False,
+                            assessment=assessment,
+                            bayesian_state=bayesian_state,
+                            calibration_progress=calibrator.progress,
+                            roi_bounds=face_bbox,
+                            shift_vector=(dx_cam, dy_cam),
+                        )
                         cv2.imshow("Driver Monitor", viz_frame)
                         key = cv2.waitKey(1) & 0xFF
                         if key in (ord('q'), ord('Q')):
@@ -425,23 +461,46 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             if features.face_valid and not features.imu_gated:
                 calibrator.update(features)
                 if calibrator.is_calibrated:
-                    calibrator.apply_to(extractor, pose_gate=pose_gate)
+                    calibrator.apply_to(extractor, classifier, pose_gate=pose_gate)
+
+            assessment = classifier.evaluate_temporal_stream(features)
+            bayesian_state = bayesian_filter.update(assessment, timestamp)
 
             # ── Output ──
             if csv_logger is not None:
                 csv_logger.log(features)
 
             # ── Visualization ──
+            current_roi_bounds = (
+                detector.roi_tracker.get_crop_bounds(frame.shape)
+                if detector.roi_tracker.is_tracking
+                else face_bbox
+            )
             last_raw_frame = frame
             last_smooth_landmarks = smooth_landmarks
             last_features = features
             last_normalizer = normalizer
             last_pnp_success = pnp_success
+            last_assessment = assessment
+            last_bayesian_state = bayesian_state
+            last_roi_bounds = current_roi_bounds
+            last_shift_vector = (dx_cam, dy_cam)
 
             if not args.headless:
                 try:
                     viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                    visualizer.draw(viz_frame, smooth_landmarks, features, normalizer, pnp_success=pnp_success)
+                    visualizer.draw(
+                        viz_frame,
+                        smooth_landmarks,
+                        features,
+                        normalizer,
+                        pnp_success=pnp_success,
+                        assessment=assessment,
+                        bayesian_state=bayesian_state,
+                        calibration_progress=calibrator.progress,
+                        roi_bounds=current_roi_bounds,
+                        shift_vector=(dx_cam, dy_cam),
+                    )
                     cv2.imshow("Driver Monitor", viz_frame)
                     key = cv2.waitKey(1) & 0xFF
                     if key in (ord('q'), ord('Q')):

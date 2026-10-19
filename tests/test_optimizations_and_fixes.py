@@ -30,6 +30,7 @@ from pipeline.training_buffer import TrainingBuffer
 from pipeline.head_pose_estimator import HeadPoseGate
 from pipeline.imu_gate import SoftwareIMUGate
 from pipeline.face_mesh_detector import FaceMeshDetector
+from utils.visualization import Visualizer
 from config import PipelineConfig
 from train_baseline import (
     compute_subject_invariant_delta_features,
@@ -1280,6 +1281,109 @@ class TestPhase11Enhancements:
         res = clf.evaluate_temporal_stream(feat)
         assert res.marker_scores["eyeball_tremor"] == 65.0
         assert any("eyeball micro-tremor" in ind for ind in res.primary_indicators)
+
+
+class TestPhase12Enhancements:
+    """Verification tests for Phase 12: Live HUD Diagnostic Banner, ROI overlay & Telemetry."""
+
+    def test_visualizer_roi_box_toggle_and_rendering(self):
+        """Test hotkey [r] toggle and ROI/shift overlay drawing."""
+        viz = Visualizer(show_roi_box=False)
+        assert viz.show_roi_box is False
+
+        # Toggle via hotkey
+        handled = viz.handle_key(ord('r'))
+        assert handled is True
+        assert viz.show_roi_box is True
+
+        handled_upper = viz.handle_key(ord('R'))
+        assert handled_upper is True
+        assert viz.show_roi_box is False
+
+        # Enable for drawing test
+        viz.show_roi_box = True
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        roi = (100, 100, 300, 300)
+        shift = (2.5, -1.0)
+
+        out = viz.draw(frame, landmarks=None, roi_bounds=roi, shift_vector=shift)
+        assert out is frame
+        # Check that non-zero pixels exist where ROI rectangle was drawn
+        assert np.any(frame[100, 100:300] == [255, 255, 0])
+
+    def test_visualizer_status_banner_and_bayesian_lockout(self):
+        """Test top-center diagnostic banner and ISO 26262 lockout status."""
+        from pipeline.classifier import ImpairmentAssessment
+        from pipeline.bayesian_filter import BayesianState
+
+        viz = Visualizer()
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        assessment = ImpairmentAssessment(
+            classification="HIGH_RISK_INTOXICATED",
+            confidence=0.92,
+            risk_score=78.5,
+            involuntary_risk_score=62.0,
+            voluntary_masking_score=40.0,
+            primary_indicators=["GEN sustained beat nystagmus"],
+            lockout_recommended=True,
+        )
+        b_state = BayesianState(
+            posterior_probability=0.96,
+            sustained_high_confidence_s=16.0,
+            lockout_confirmed=True,
+        )
+
+        out = viz.draw(
+            frame,
+            landmarks=None,
+            assessment=assessment,
+            bayesian_state=b_state,
+            calibration_progress=0.85,
+        )
+        assert out is frame
+        # Status banner should have drawn a colored bar at by1=10
+        # Red bar for HIGH_RISK_INTOXICATED: (0, 0, 220)
+        center_x = 320
+        assert np.array_equal(frame[12, center_x], [0, 0, 220])
+
+    def test_visualizer_micromotion_telemetry_and_guard_badges(self):
+        """Test text panel with micromotion telemetry and active guard badges."""
+        viz = Visualizer()
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        feat = FrameFeatures(
+            face_valid=True,
+            ear_left=0.29,
+            ear_right=0.29,
+            ear_avg=0.29,
+            mar=0.15,
+            perclos=0.04,
+            head_yaw=2.0,
+            head_pitch=-1.0,
+            head_roll=0.5,
+            saccade_velocity=45.0,
+            saccade_latency_ms=210.0,
+            blink_closing_velocity=2.5,
+            blink_opening_velocity=1.8,
+            gaze_yaw_dispersion=0.08,
+            eyelid_tremor_hz=4.2,
+            eyeball_tremor_hz=5.1,
+            brow_elevation_delta=0.12,
+            rppg_pulse_bpm=72.0,
+            rppg_hrv_rmssd_ms=45.0,
+            vibration_score=0.15,
+            masking_divergence_score=12.0,
+            eyeglass_glare_detected=True,
+            sunglasses_occluded=False,
+            speech_active=True,
+            highway_fixation_exempt=True,
+        )
+
+        out = viz.draw(frame, landmarks=None, features=feat)
+        assert out is frame
+        # Verify text panel background was drawn
+        assert np.any(frame != 0)
+
 
 
 

@@ -1034,6 +1034,182 @@ class TestPhase8Enhancements:
         assert feat.ear_avg == pytest.approx(0.30, abs=0.005)
 
 
+class TestPhase9Enhancements:
+    """Verification tests for Phase 9 driving task disambiguation, speech filter, and low-FPS compensation."""
+
+    @staticmethod
+    def _make_test_landmarks(ear_val: float = 0.30, iris_x_offset: float = 0.0,
+                             iris_y_offset: float = 0.0, mar_val: float = 0.15) -> np.ndarray:
+        """Create 478x3 synthetic landmarks for testing."""
+        from tests.test_alcohol_signals import make_full_landmarks
+        # Note: make_full_landmarks produces EAR = 2.0 * ear_input
+        lm = make_full_landmarks(ear_val=ear_val / 2.0, iris_x_offset=iris_x_offset, iris_y_offset=iris_y_offset)
+        # Adjust mouth height for MAR (width between 61 and 291 is 40.0 px, cy is 350.0):
+        # MAR = (6 * mouth_half_h) / (3 * 40.0) = mouth_half_h / 20.0 -> mouth_half_h = 20.0 * mar_val
+        mouth_half_h = 20.0 * mar_val
+        cy = 350.0
+        lm[13] = [300.0, cy - mouth_half_h, 0.0]
+        lm[14] = [300.0, cy + mouth_half_h, 0.0]
+        lm[81] = [290.0, cy - mouth_half_h, 0.0]
+        lm[178] = [290.0, cy + mouth_half_h, 0.0]
+        lm[311] = [310.0, cy - mouth_half_h, 0.0]
+        lm[402] = [310.0, cy + mouth_half_h, 0.0]
+        return lm
+
+    def test_downward_glance_threshold_compensation(self):
+        """Looking down at instrument cluster lowers blink threshold to avoid false eye closure."""
+        ext = FeatureExtractor(blink_threshold=0.20)
+        # Normal glance: EAR = 0.185, head_pitch = 0.0 -> eyes_closed = True (0.185 < 0.20)
+        lm_level = self._make_test_landmarks(ear_val=0.185)
+        feat_level = ext.compute(lm_level, timestamp=0.1, frame_id=1, face_valid=True,
+                                 head_pitch=0.0)
+        assert ext._consecutive_closed == 1
+
+        ext.reset()
+        # Downward glance: head pitch -18 deg and iris looking down (avg_iris_y = -0.40)
+        # down_pitch_deg = 10, down_gaze_unit = 0.20
+        # glance_scale = 1.0 - 0.12 - 0.03 = 0.85 -> eff_threshold = 0.170
+        lm_down = self._make_test_landmarks(ear_val=0.185, iris_y_offset=-8.0)
+        feat_down = ext.compute(lm_down, timestamp=0.1, frame_id=1, face_valid=True,
+                                head_pitch=-18.0)
+        # With compensation, 0.185 >= 0.170, so eyes are NOT considered closed!
+        assert ext._consecutive_closed == 0
+
+        # But a real blink during downward glance (EAR drops to 0.13 < 0.170) is detected
+        lm_blink = self._make_test_landmarks(ear_val=0.13, iris_y_offset=-8.0)
+        feat_blink = ext.compute(lm_blink, timestamp=0.2, frame_id=2, face_valid=True,
+                                 head_pitch=-18.0)
+        assert ext._consecutive_closed == 1
+
+    def test_highway_fixation_exemption(self):
+        """Alert driver forward gaze with subtle drift (0.15 <= sigma < 0.8) and healthy blink velocity
+        exempts driver from compensatory stare."""
+        ext = FeatureExtractor(fps=30.0)
+        ext._last_blink_opening_vel = 2.2  # healthy blink reopening
+
+        # 210 frames (7.0 seconds) with subtle physiological ocular drift (~0.4 deg)
+        for i in range(210):
+            t = i / 30.0
+            # Jitter produces ~0.4 deg drift
+            drift_x = 0.8 * np.sin(i * 0.3)
+            lm = self._make_test_landmarks(ear_val=0.30, iris_x_offset=drift_x)
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat.stare_fixation_duration_s >= 6.0
+        assert feat.compensatory_stare_active is False
+        assert feat.highway_fixation_exempt is True
+
+        # Sluggish blink (< 1.8 EAR/s) under same gaze triggers compensatory stare
+        ext_sluggish = FeatureExtractor(fps=30.0)
+        ext_sluggish._last_blink_opening_vel = 1.2  # sluggish blink reopening
+        for i in range(210):
+            t = i / 30.0
+            drift_x = 0.8 * np.sin(i * 0.3)
+            lm = self._make_test_landmarks(ear_val=0.30, iris_x_offset=drift_x)
+            feat_sluggish = ext_sluggish.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat_sluggish.stare_fixation_duration_s >= 6.0
+        assert feat_sluggish.compensatory_stare_active is True
+        assert feat_sluggish.highway_fixation_exempt is False
+
+    def test_okn_suppression_during_head_turns_and_vertical_flow(self):
+        """Head turns (>10 deg/s) or high vertical optic flow (>25 deg/s) suppress OKN from accumulating as GEN."""
+        ext = FeatureExtractor(fps=30.0)
+        dt = 0.033
+
+        # Simulate horizontal eccentric gaze with inward drift
+        # Frame 1: anchor
+        lm1 = self._make_test_landmarks(ear_val=0.30, iris_x_offset=8.0)  # eccentric
+        ext.compute(lm1, timestamp=1.0, frame_id=1, face_valid=True, head_yaw=0.0)
+
+        # Frame 2: inward drift but during an active head scan (head_total_vel = 15.0 deg/s)
+        lm2 = self._make_test_landmarks(ear_val=0.30, iris_x_offset=7.0)
+        feat2 = ext.compute(lm2, timestamp=1.0 + dt, frame_id=2, face_valid=True,
+                            head_yaw=15.0 * dt, head_pitch=0.0)
+
+        # GEN drift accumulation suppressed
+        assert ext._gen_drift_detected is False
+        assert feat2.gen_detected is False
+
+    def test_speech_cadence_detects_speech_and_suppresses_false_yawn(self):
+        """Rapid mouth cadence (speech/singing) sets speech_active and prevents false yawn detection."""
+        ext = FeatureExtractor(fps=30.0)
+        clf = ImpairmentClassifier()
+
+        # Simulate 2.0 seconds (60 frames) of talking: MAR oscillating between 0.20 and 0.45 at 2 Hz
+        feat = None
+        for i in range(60):
+            t = i / 30.0
+            mar_val = 0.30 + 0.12 * np.sin(2 * np.pi * 2.0 * t)
+            lm = self._make_test_landmarks(ear_val=0.30, mar_val=mar_val)
+            feat = ext.compute(lm, timestamp=t, frame_id=i, face_valid=True)
+
+        assert feat is not None
+        assert feat.speech_active is True
+
+        # Classifier jaw slackness suppressed during speech
+        dummy_frame = np.full((480, 640, 3), 120, dtype=np.uint8)
+        assess_speech = clf.evaluate_static_image(
+            frame=dummy_frame, landmarks=lm,
+            ear_left=0.30, ear_right=0.30,
+            mar=0.38, head_pitch=0.0, head_roll=0.0,
+            speech_active=True
+        )
+        assert assess_speech.marker_scores["jaw_slackness"] == 0.0
+
+        # Speaking driver opens mouth to 0.65 (< 0.70): consecutive yawn counter is NOT incremented
+        assert ext._consecutive_yawn == 0
+        lm_loud = self._make_test_landmarks(ear_val=0.30, mar_val=0.65)
+        feat_loud = ext.compute(lm_loud, timestamp=2.033, frame_id=61, face_valid=True)
+        assert ext._consecutive_yawn == 0
+        assert feat_loud.yawn_detected is False
+
+    def test_low_fps_thermal_throttling_blink_velocity_boost(self):
+        """CPU thermal throttling (15 FPS, dt = 0.066s) applies secant underestimation compensation factor."""
+        ext = FeatureExtractor(fps=30.0)  # nominal 30 fps
+
+        # Frame 1: open (EAR = 0.30)
+        lm_open = self._make_test_landmarks(ear_val=0.30)
+        ext.compute(lm_open, timestamp=0.000, frame_id=1, face_valid=True)
+
+        # Frame 2: closing to EAR = 0.18 with dt = 0.066s
+        # raw dEAR = 0.30 - 0.18 = 0.12 -> raw vel = 0.12 / 0.066 = 1.818
+        # fps_comp = min(1.65, 1.0 + 10.0 * (0.066 - 0.035)) = 1.31
+        lm_closing = self._make_test_landmarks(ear_val=0.18)
+        ext.compute(lm_closing, timestamp=0.066, frame_id=2, face_valid=True)
+
+        # Verify closing velocity was boosted
+        assert len(ext._closing_velocities) > 0
+        boosted_vel = ext._closing_velocities[-1]
+        raw_vel = (0.30 - 0.18) / 0.066
+        assert boosted_vel > raw_vel
+        assert boosted_vel == pytest.approx(raw_vel * 1.31, rel=1e-2)
+
+    def test_rppg_streetlight_strobe_rejection(self):
+        """Simultaneous proportional scaling of R, G, B channels cancels out in norm_g."""
+        ext = FeatureExtractor(fps=60.0)
+        from utils.landmarks import VASODILATION_LANDMARKS
+
+        lm = self._make_test_landmarks(ear_val=0.30)
+        for idx in VASODILATION_LANDMARKS:
+            lm[idx] = [320.0, 200.0, 0.0]
+
+        # Feed 65 frames with streetlights strobing global intensity between 80 and 160
+        for i in range(65):
+            t = i / 60.0
+            scale = 1.0 + 0.3 * np.sin(2 * np.pi * 1.0 * t)  # 1 Hz streetlight strobe
+            frame = np.full((480, 640, 3), int(100 * scale), dtype=np.uint8)
+            frame[:, :, 0] = int(80 * scale)   # B
+            frame[:, :, 1] = int(120 * scale)  # G
+            frame[:, :, 2] = int(100 * scale)  # R
+            ext.compute(lm, timestamp=t, frame_id=i, face_valid=True, frame=frame)
+
+        # norm_g history values should be virtually flat (~120.0) despite large luminance oscillations
+        norm_gs = [g for _, g in ext._rppg_green_history]
+        assert np.std(norm_gs) < 1.0
+
+
+
 
 
 

@@ -368,6 +368,10 @@ class FeatureExtractor:
         self._nose_ratio_samples: Deque[float] = deque(maxlen=30)
         self._raw_ear_var_history: Deque[float] = deque(maxlen=90)
 
+        # Phase 9: Highway fixation exemption and speech/yawn cadence tracking
+        self._highway_fixation_exempt: bool = False
+        self._mar_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(2.0 * fps), 15))
+
     def reset(self) -> None:
         """Clear rolling deques, histories, and previous-frame temporal tracking state.
 
@@ -432,6 +436,8 @@ class FeatureExtractor:
             self._baseline_nose_ratio = 0.0
             self._nose_ratio_samples.clear()
             self._raw_ear_var_history.clear()
+            self._highway_fixation_exempt = False
+            self._mar_history.clear()
 
     @staticmethod
     def compute_ear(landmarks: np.ndarray, indices: list) -> float:
@@ -828,6 +834,11 @@ class FeatureExtractor:
             d_ear = d_inst
             ear_velocity = float(abs(d_inst / dt))
 
+        # Low-FPS thermal throttling discretization compensation (Phase 9)
+        if 0.040 <= dt <= 0.120 and self._fps >= 25.0:
+            fps_comp = min(1.65, 1.0 + 10.0 * (dt - 0.035))
+            ear_velocity *= fps_comp
+
         # State machine: track blink phase transitions
         if self._blink_phase == "open":
             if (d_ear < -0.010 or d_inst < -0.010) and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
@@ -988,7 +999,9 @@ class FeatureExtractor:
 
         return float(self._smoothed_vor_gain)
 
-    def _compute_gen(self, avg_iris_x: float, timestamp: float) -> Tuple[bool, int, float]:
+    def _compute_gen(self, avg_iris_x: float, timestamp: float,
+                     head_vel_deg_s: float = 0.0,
+                     avg_iris_y: float = 0.0) -> Tuple[bool, int, float]:
         """Gaze-Evoked Nystagmus (GEN) Detector (Romano et al. 2017).
 
         Detects the signature 'leaky neural integrator' failure at eccentric gaze:
@@ -1008,7 +1021,13 @@ class FeatureExtractor:
         is_eccentric = abs(avg_iris_x) >= self.eccentric_gaze_threshold
         iris_vel = (avg_iris_x - self._prev_iris_x) * self.deg_per_iris_unit / dt  # deg/s
 
-        if is_eccentric:
+        prev_y = self._prev_iris_y if self._prev_iris_y is not None else avg_iris_y
+        vert_vel = abs(avg_iris_y - prev_y) / max(dt, 1e-4) * self.deg_per_iris_unit
+        # OKN vs Pathological GEN Guard:
+        # Suppress if driver is actively turning head (mirror/traffic scan) or large vertical flow
+        suppress_okn = bool(head_vel_deg_s > 10.0 or vert_vel > 25.0)
+
+        if not suppress_okn and is_eccentric:
             # Centripetal velocity points back toward 0:
             # If iris_x > 0 (nasal/right), inward drift is negative velocity (iris_vel < 0).
             # If iris_x < 0 (temporal/left), inward drift is positive velocity (iris_vel > 0).
@@ -1212,6 +1231,7 @@ class FeatureExtractor:
             self._stare_anchor_y = avg_iris_y
             self._stare_iris_samples.clear()
             self._stare_iris_samples.append((avg_iris_x, avg_iris_y))
+            self._highway_fixation_exempt = False
             return (0.0, False)
 
         drift_deg = np.sqrt(
@@ -1226,6 +1246,7 @@ class FeatureExtractor:
             self._stare_anchor_y = avg_iris_y
             self._stare_iris_samples.clear()
             self._stare_iris_samples.append((avg_iris_x, avg_iris_y))
+            self._highway_fixation_exempt = False
             return (0.0, False)
 
         self._stare_iris_samples.append((avg_iris_x, avg_iris_y))
@@ -1237,7 +1258,14 @@ class FeatureExtractor:
             xs = [x for x, _ in self._stare_iris_samples]
             ys = [y for _, y in self._stare_iris_samples]
             sigma_deg = float(np.sqrt(np.std(xs)**2 + np.std(ys)**2) * self.deg_per_iris_unit)
-            compensatory_stare = bool(sigma_deg < 0.8)
+            if 0.15 <= sigma_deg < 0.8 and self._last_blink_opening_vel >= 1.8:
+                compensatory_stare = False
+                self._highway_fixation_exempt = True
+            else:
+                compensatory_stare = bool(sigma_deg < 0.8)
+                self._highway_fixation_exempt = False
+        else:
+            self._highway_fixation_exempt = False
 
         return (duration, compensatory_stare)
 
@@ -1335,7 +1363,7 @@ class FeatureExtractor:
 
         try:
             h, w = frame.shape[:2]
-            g_vals = []
+            r_vals, g_vals, b_vals = [], [], []
             for idx in VASODILATION_LANDMARKS:
                 if idx < len(landmarks):
                     pt = landmarks[idx]
@@ -1349,13 +1377,18 @@ class FeatureExtractor:
                     x2 = min(w, px + 4)
                     if y2 > y1 and x2 > x1:
                         patch = frame[y1:y2, x1:x2]
+                        b_vals.append(float(np.mean(patch[:, :, 0])))
                         g_vals.append(float(np.mean(patch[:, :, 1])))
+                        r_vals.append(float(np.mean(patch[:, :, 2])))
 
             if not g_vals:
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
 
+            mean_r = float(np.mean(r_vals))
             mean_g = float(np.mean(g_vals))
-            self._rppg_green_history.append((timestamp, mean_g))
+            mean_b = float(np.mean(b_vals))
+            norm_g = float(mean_g / ((mean_r + mean_g + mean_b) / 3.0 + 1e-5) * 120.0)
+            self._rppg_green_history.append((timestamp, norm_g))
 
             times = [t for t, g in self._rppg_green_history]
             duration = times[-1] - times[0]
@@ -1751,11 +1784,43 @@ class FeatureExtractor:
 
             self._raw_ear_var_history.append(features.ear_avg)
 
-            # ── MAR ──
-            features.mar = self.compute_mar(landmarks)
+            # ── Iris gaze ──
+            iris_lms = image_landmarks if image_landmarks is not None else landmarks
+            # Left eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
+            features.left_iris_x, features.left_iris_y = self.compute_iris_position(
+                iris_lms, LEFT_IRIS_CENTER, 33, 133)
+            # Right eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
+            features.right_iris_x, features.right_iris_y = self.compute_iris_position(
+                iris_lms, RIGHT_IRIS_CENTER, 263, 362)
+
+            # ── Eyeglass Glare Detection & Monocular Fallback ──
+            glare_l, glare_r, any_glare, sunglasses_occluded = self._evaluate_eye_glare_and_occlusion(
+                frame, iris_lms, features.ear_left, features.ear_right
+            )
+            features.eyeglass_glare_detected = any_glare
+            features.sunglasses_occluded = sunglasses_occluded
+
+            if glare_l and not glare_r:
+                features.ear_avg = features.ear_right
+                features.left_iris_x = features.right_iris_x
+                features.left_iris_y = features.right_iris_y
+            elif glare_r and not glare_l:
+                features.ear_avg = features.ear_left
+                features.right_iris_x = features.left_iris_x
+                features.right_iris_y = features.left_iris_y
+
+            # ── Downward Glance Threshold Compensation (Instrument Cluster Glance Guard) ──
+            avg_iris_y = (features.left_iris_y + features.right_iris_y) / 2.0
+            down_pitch_deg = max(0.0, -head_pitch - 8.0)
+            down_gaze_unit = max(0.0, -avg_iris_y - 0.20)
+            if down_pitch_deg > 0.0 or down_gaze_unit > 0.0:
+                glance_scale = max(0.65, 1.0 - 0.012 * down_pitch_deg - 0.15 * down_gaze_unit)
+                eff_blink_threshold = self.blink_threshold * glance_scale
+            else:
+                eff_blink_threshold = self.blink_threshold
 
             # ── Blink / Micro-sleep detection ──
-            eyes_closed = features.ear_avg < self.blink_threshold
+            eyes_closed = features.ear_avg < eff_blink_threshold
             if eyes_closed:
                 self._consecutive_closed += 1
             else:
@@ -1766,9 +1831,30 @@ class FeatureExtractor:
             features.microsleep_detected = (
                 self._consecutive_closed >= self.microsleep_frames)
 
+            # ── MAR & Speech / Singing Cadence Filter ──
+            features.mar = self.compute_mar(landmarks)
+            self._mar_history.append((timestamp, features.mar))
+
+            recent_mar_samples = [(t, m) for t, m in self._mar_history if timestamp - t <= 2.0]
+            if len(recent_mar_samples) >= 12:
+                times_mar = np.array([t for t, _ in recent_mar_samples], dtype=np.float64)
+                mars = np.array([m for _, m in recent_mar_samples], dtype=np.float64)
+                mean_mar = float(np.mean(mars))
+                mar_std = float(np.std(mars))
+                devs = mars - mean_mar
+                zero_crossings = int(np.sum((devs[:-1] * devs[1:]) < 0))
+                dt_mar = float(max(times_mar[-1] - times_mar[0], 1e-4))
+                zc_rate = float(zero_crossings / dt_mar)
+                zc_freq = zc_rate / 2.0
+                if 0.15 <= mean_mar <= 0.55 and mar_std >= 0.04 and (zc_freq >= 1.5 or zc_rate >= 1.5):
+                    features.speech_active = True
+
             # ── Yawn detection ──
             if features.mar > self.mar_yawn_threshold:
-                self._consecutive_yawn += 1
+                if features.speech_active and features.mar < 0.70:
+                    pass  # Speech cadence guard: rapid speech/singing does not increment yawn counter
+                else:
+                    self._consecutive_yawn += 1
             else:
                 self._consecutive_yawn = 0
             features.yawn_detected = (
@@ -1796,31 +1882,6 @@ class FeatureExtractor:
             features.blink_closing_velocity, features.blink_opening_velocity = \
                 self._compute_blink_velocity(features.ear_avg, timestamp)
             features.blink_phase = self._blink_phase
-
-            # ── Iris gaze ──
-            iris_lms = image_landmarks if image_landmarks is not None else landmarks
-            # Left eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
-            features.left_iris_x, features.left_iris_y = self.compute_iris_position(
-                iris_lms, LEFT_IRIS_CENTER, 33, 133)
-            # Right eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
-            features.right_iris_x, features.right_iris_y = self.compute_iris_position(
-                iris_lms, RIGHT_IRIS_CENTER, 263, 362)
-
-            # ── Eyeglass Glare Detection & Monocular Fallback ──
-            glare_l, glare_r, any_glare, sunglasses_occluded = self._evaluate_eye_glare_and_occlusion(
-                frame, iris_lms, features.ear_left, features.ear_right
-            )
-            features.eyeglass_glare_detected = any_glare
-            features.sunglasses_occluded = sunglasses_occluded
-
-            if glare_l and not glare_r:
-                features.ear_avg = features.ear_right
-                features.left_iris_x = features.right_iris_x
-                features.left_iris_y = features.right_iris_y
-            elif glare_r and not glare_l:
-                features.ear_avg = features.ear_left
-                features.right_iris_x = features.left_iris_x
-                features.right_iris_y = features.left_iris_y
 
             # Compute head angular velocity & eye socket translation velocity for VOR / motion suppression
             head_total_vel = 0.0
@@ -1876,7 +1937,7 @@ class FeatureExtractor:
 
             # 3. Gaze-Evoked Nystagmus (GEN - Romano et al. 2017)
             features.gen_detected, features.gen_beat_count, features.gen_slow_phase_vel = \
-                self._compute_gen(avg_iris_x, timestamp)
+                self._compute_gen(avg_iris_x, timestamp, head_vel_deg_s=head_total_vel, avg_iris_y=avg_iris_y)
 
             # 4. Smooth Pursuit Fragmentation Ratio
             features.pursuit_fragmentation_ratio = \
@@ -1948,6 +2009,7 @@ class FeatureExtractor:
                 self._compute_deliberate_blink_suppression(features.blink_detected, features.ear_avg, timestamp)
             features.stare_fixation_duration_s, features.compensatory_stare_active = \
                 self._compute_fixation_stare(avg_iris_x, avg_iris_y, features.saccade_detected, features.blink_detected, timestamp)
+            features.highway_fixation_exempt = self._highway_fixation_exempt
 
             if features.sunglasses_occluded:
                 features.deliberate_blink_suppression = False

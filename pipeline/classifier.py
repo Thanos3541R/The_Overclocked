@@ -75,7 +75,8 @@ class ImpairmentClassifier:
                               ear_right: float,
                               mar: float,
                               head_pitch: float,
-                              head_roll: float) -> ImpairmentAssessment:
+                              head_roll: float,
+                              speech_active: bool = False) -> ImpairmentAssessment:
         """Evaluate intoxication indicators from a single static facial image.
 
         Args:
@@ -148,7 +149,9 @@ class ImpairmentClassifier:
 
         # ── 4. Jaw Slackness / Masseter Hypotonia ──
         # Normal resting closed mouth: MAR < 0.15. Resting slack jaw: 0.22 - 0.45.
-        if mar > 0.35:  # [PLACEHOLDER — pending calibration against real data]
+        if speech_active:
+            jaw_score = 0.0
+        elif mar > 0.35:  # [PLACEHOLDER — pending calibration against real data]
             jaw_score = 70.0
             indicators.append(f"Slack jaw / mouth agape (MAR={mar:.2f})")
         elif mar > 0.22:  # [PLACEHOLDER — pending calibration against real data]

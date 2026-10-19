@@ -344,6 +344,55 @@ def generate_synthetic_dataset(n_subjects: int = 10, windows_per_subject: int = 
     return X_3d, y, subjects, feature_names
 
 
+def augment_minority_windows_in_fold(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    random_state: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
+    """In-fold minority class oversampling with physiological Gaussian jitter.
+
+    Count n_pos = np.sum(y_train == 1) and n_neg = np.sum(y_train == 0).
+    If 0 < n_pos < n_neg: generate synthetic minority samples by sampling with replacement
+    from X_train[y_train == 1] until n_pos_total == n_neg, adding tiny zero-mean Gaussian
+    noise scaled to 0.02 * np.maximum(np.nanstd(X_train, axis=0), 1e-4) on continuous columns
+    (preserving binary/delta structure).
+    """
+    n_pos = int(np.sum(y_train == 1))
+    n_neg = int(np.sum(y_train == 0))
+
+    if n_pos == 0 or n_pos >= n_neg:
+        return X_train, y_train
+
+    n_to_add = n_neg - n_pos
+    rng = np.random.RandomState(random_state)
+
+    pos_indices = np.where(y_train == 1)[0]
+    sampled_indices = rng.choice(pos_indices, size=n_to_add, replace=True)
+    synthetic_X = X_train[sampled_indices].copy()
+
+    # Determine continuous feature mask (preserve binary 0/1 columns)
+    continuous_mask = np.ones(X_train.shape[1], dtype=bool)
+    for j in range(X_train.shape[1]):
+        col = X_train[:, j]
+        non_nan = col[~np.isnan(col)]
+        unique_vals = np.unique(non_nan)
+        if len(unique_vals) <= 2 and np.all(np.isin(unique_vals, [0.0, 1.0])):
+            continuous_mask[j] = False
+
+    feat_std = np.nanstd(X_train, axis=0)
+    scale = 0.02 * np.maximum(feat_std, 1e-4)
+
+    noise = rng.normal(0.0, 1.0, size=synthetic_X.shape)
+    synthetic_X[:, continuous_mask] += (noise * scale)[:, continuous_mask]
+
+    synthetic_y = np.ones(n_to_add, dtype=y_train.dtype)
+
+    X_augmented = np.vstack([X_train, synthetic_X])
+    y_augmented = np.concatenate([y_train, synthetic_y])
+
+    return X_augmented, y_augmented
+
+
 def train_and_evaluate(
     X: np.ndarray,
     y: np.ndarray,
@@ -383,13 +432,22 @@ def train_and_evaluate(
         X_val, y_val = X[val_idx], y[val_idx]
         val_subjects = np.unique(subjects[val_idx])
 
+        min_fold_samples = int(min(np.sum(y_train == 1), np.sum(y_train == 0)))
+
+        # In-fold minority oversampling strictly on training fold (never on validation)
+        X_train_aug, y_train_aug = augment_minority_windows_in_fold(
+            X_train, y_train, random_state=random_state + fold
+        )
+
+        fold_scale = 1.0 if (scale_pos_weight is None and len(y_train_aug) > len(y_train)) else computed_scale
+
         if _HAVE_XGB and use_xgboost:
             base_clf = XGBClassifier(
                 n_estimators=100,
                 max_depth=4,
                 learning_rate=0.05,
                 reg_lambda=1.0,
-                scale_pos_weight=computed_scale,
+                scale_pos_weight=fold_scale,
                 random_state=random_state,
                 eval_metric="logloss"
             )
@@ -404,8 +462,14 @@ def train_and_evaluate(
                 random_state=random_state
             )
 
-        clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv=3)
-        clf.fit(X_train, y_train)
+        # Adaptive CalibratedClassifierCV
+        if min_fold_samples < 4:
+            clf = base_clf
+        else:
+            calib_cv = min(3, max(2, int(min_fold_samples // 2)))
+            clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv=calib_cv)
+
+        clf.fit(X_train_aug, y_train_aug)
         models.append(clf)
 
         val_probs = clf.predict_proba(X_val)[:, 1]
@@ -432,7 +496,7 @@ def train_and_evaluate(
 
         print(f"Fold {fold+1}: Val Subjects={list(val_subjects)} | ROC-AUC={roc:.3f}, PR-AUC={pr_auc:.3f}, Sens={sens:.3f}, Spec={spec:.3f}")
 
-    # Aggregate Out-Of-Fold (OOF) Metrics
+    # Aggregate Out-Of-Fold (OOF) Metrics (Threshold = 0.50 default)
     overall_roc = float(roc_auc_score(y, oof_probs))
     overall_pr = float(average_precision_score(y, oof_probs))
     overall_sens = float(recall_score(y, oof_preds, zero_division=0))
@@ -442,6 +506,29 @@ def train_and_evaluate(
     overall_acc = float(accuracy_score(y, oof_preds))
     overall_bal_acc = float(balanced_accuracy_score(y, oof_preds))
 
+    # Optimal probability threshold calibration (maximizing F1 / Balanced Accuracy)
+    threshold_candidates = np.linspace(0.25, 0.75, 51)
+    best_thresh = 0.50
+    best_score = -1.0
+    best_f1 = 0.0
+    best_bal_acc = 0.0
+    best_sens = 0.0
+    best_spec = 0.0
+
+    for th in threshold_candidates:
+        th_preds = (oof_probs >= th).astype(int)
+        th_f1 = float(f1_score(y, th_preds, zero_division=0))
+        th_bal = float(balanced_accuracy_score(y, th_preds))
+        combined = th_f1 + th_bal
+        if combined > best_score:
+            best_score = combined
+            best_thresh = float(th)
+            best_f1 = th_f1
+            best_bal_acc = th_bal
+            best_sens = float(recall_score(y, th_preds, zero_division=0))
+            tn_th, fp_th, _, _ = confusion_matrix(y, th_preds, labels=[0, 1]).ravel()
+            best_spec = float(tn_th / max(1, tn_th + fp_th))
+
     # Feature Importance estimation
     top_features = []
     has_fi = False
@@ -450,17 +537,19 @@ def train_and_evaluate(
         if sub_ests and hasattr(sub_ests[0], "feature_importances_"):
             all_fi = []
             for m in models:
-                for c in m.calibrated_classifiers_:
-                    sub = c.estimator if hasattr(c, "estimator") else c.base_estimator
-                    all_fi.append(sub.feature_importances_)
-            mean_importances = np.mean(all_fi, axis=0)
-            sorted_indices = np.argsort(mean_importances)[::-1]
-            for idx in sorted_indices[:20]:
-                top_features.append({
-                    "feature": feature_names[idx],
-                    "importance": float(mean_importances[idx])
-                })
-            has_fi = True
+                if hasattr(m, "calibrated_classifiers_"):
+                    for c in m.calibrated_classifiers_:
+                        sub = c.estimator if hasattr(c, "estimator") else c.base_estimator
+                        all_fi.append(sub.feature_importances_)
+            if all_fi:
+                mean_importances = np.mean(all_fi, axis=0)
+                sorted_indices = np.argsort(mean_importances)[::-1]
+                for idx in sorted_indices[:20]:
+                    top_features.append({
+                        "feature": feature_names[idx],
+                        "importance": float(mean_importances[idx])
+                    })
+                has_fi = True
     elif hasattr(models[0], "feature_importances_"):
         mean_importances = np.mean([m.feature_importances_ for m in models], axis=0)
         sorted_indices = np.argsort(mean_importances)[::-1]
@@ -494,19 +583,32 @@ def train_and_evaluate(
             "f1_score": overall_f1,
             "accuracy": overall_acc,
             "balanced_accuracy": overall_bal_acc,
+            "optimal_threshold": {
+                "threshold": round(best_thresh, 3),
+                "f1_score": round(best_f1, 4),
+                "balanced_accuracy": round(best_bal_acc, 4),
+                "sensitivity": round(best_sens, 4),
+                "specificity": round(best_spec, 4),
+            },
         },
         "fold_metrics": fold_metrics,
         "top_features": top_features,
     }
 
     # Retrain final calibrated model on all data for deployment
+    min_dataset_samples = int(min(np.sum(y == 1), np.sum(y == 0)))
+    X_final_aug, y_final_aug = augment_minority_windows_in_fold(
+        X, y, random_state=random_state
+    )
+    final_scale = 1.0 if (scale_pos_weight is None and len(y_final_aug) > len(y)) else computed_scale
+
     if _HAVE_XGB and use_xgboost:
         base_final = XGBClassifier(
             n_estimators=120,
             max_depth=4,
             learning_rate=0.05,
             reg_lambda=1.0,
-            scale_pos_weight=computed_scale,
+            scale_pos_weight=final_scale,
             random_state=random_state,
             eval_metric="logloss"
         )
@@ -520,8 +622,14 @@ def train_and_evaluate(
             class_weight="balanced",
             random_state=random_state
         )
-    final_model = CalibratedClassifierCV(estimator=base_final, method="sigmoid", cv=3)
-    final_model.fit(X, y)
+
+    if min_dataset_samples < 4:
+        final_model = base_final
+    else:
+        final_calib_cv = min(3, max(2, int(min_dataset_samples // 2)))
+        final_model = CalibratedClassifierCV(estimator=base_final, method="sigmoid", cv=final_calib_cv)
+
+    final_model.fit(X_final_aug, y_final_aug)
 
     return results, final_model
 

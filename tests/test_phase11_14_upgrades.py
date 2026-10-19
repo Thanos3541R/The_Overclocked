@@ -173,3 +173,54 @@ def test_inspect_driver_video_cli_integration(monkeypatch, tmp_path):
     with open(summary_json, "r", encoding="utf-8") as f:
         data = json.load(f)
     assert "mean_eyeball_tremor_hz" in data["section_a_involuntary_biomarkers"]
+
+
+def test_infer_subject_id_groups_youtube_clips():
+    """Verify infer_subject_id correctly strips suffixes and groups YouTube clips."""
+    from ingest_and_audit_clips import infer_subject_id
+
+    id1 = infer_subject_id("Drunk/ drunk_driver_abc_clip01.mp4", "drunk")
+    id2 = infer_subject_id("Drunk/drunk_driver_abc_clip02.mp4", "drunk")
+    assert id1 == id2
+    assert id1 == "drunk_driver_abc"
+
+    # Verify part, segment, and nested folder variations
+    assert infer_subject_id("Sober/videoA_part1.mp4", "sober") == infer_subject_id(
+        "Sober/videoA_part2.mp4", "sober"
+    )
+    assert infer_subject_id("clips/yt_abc123_001.mp4", "drunk") == infer_subject_id(
+        "clips/yt_abc123_002.mp4", "drunk"
+    )
+    assert infer_subject_id("Sober/person_1/clip01.mp4", "sober") == infer_subject_id(
+        "Sober/person_1/clip02.mp4", "sober"
+    )
+
+
+def test_in_fold_minority_augmentation_balances_classes():
+    """Verify augment_minority_windows_in_fold balances a 20-sober / 5-drunk matrix to 20/20 without NaNs."""
+    from train_baseline import augment_minority_windows_in_fold
+
+    rng = np.random.RandomState(42)
+    # 20 sober (0), 5 drunk (1) with 10 features (8 continuous, 2 binary)
+    X_neg = rng.randn(20, 10).astype(np.float32)
+    X_pos = rng.randn(5, 10).astype(np.float32) + 2.0
+    # Set columns 8 and 9 as binary indicators (0 or 1)
+    X_neg[:, 8] = 0.0
+    X_neg[:, 9] = 1.0
+    X_pos[:, 8] = 1.0
+    X_pos[:, 9] = 0.0
+
+    X_train = np.vstack([X_neg, X_pos])
+    y_train = np.array([0] * 20 + [1] * 5, dtype=np.int32)
+
+    X_aug, y_aug = augment_minority_windows_in_fold(X_train, y_train, random_state=42)
+
+    assert len(y_aug) == 40
+    assert np.sum(y_aug == 0) == 20
+    assert np.sum(y_aug == 1) == 20
+    assert not np.isnan(X_aug).any()
+    assert X_aug.shape == (40, 10)
+    # Binary columns must strictly retain their 0.0 / 1.0 values without Gaussian jitter
+    assert np.all(np.isin(X_aug[:, 8], [0.0, 1.0]))
+    assert np.all(np.isin(X_aug[:, 9], [0.0, 1.0]))
+

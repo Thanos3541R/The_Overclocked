@@ -105,6 +105,7 @@ class PnPNormalizer:
         self.aligned_rvec: Optional[np.ndarray] = None
         self.aligned_rotation_matrix: Optional[np.ndarray] = None
         self._last_valid_euler: Optional[Tuple[float, float, float]] = None
+        self._prev_euler_delta: Optional[Tuple[float, float, float]] = None
         self._jump_reject_count = 0
         self._prev_extrinsic_rvec: Optional[np.ndarray] = None
         self._prev_extrinsic_tvec: Optional[np.ndarray] = None
@@ -122,6 +123,7 @@ class PnPNormalizer:
         self.aligned_rvec = None
         self.aligned_rotation_matrix = None
         self._last_valid_euler = None
+        self._prev_euler_delta = None
         self._jump_reject_count = 0
         self._prev_extrinsic_rvec = None
         self._prev_extrinsic_tvec = None
@@ -356,22 +358,55 @@ class PnPNormalizer:
         else:
             self._jump_reject_count = 0
 
+        # Step D: Apply EMA smoothing (alpha=0.4) on Euler angles during low-amplitude oscillation (< 4 deg sign reversal)
+        pitch_out, yaw_out, roll_out = cand_pitch, cand_yaw, cand_roll
+        if prev_euler is not None:
+            p_prev, y_prev, r_prev = prev_euler
+            dp_raw = cand_pitch - p_prev
+            dy_raw = cand_yaw - y_prev
+            dr_raw = cand_roll - r_prev
+
+            # Account for circular wrap if needed
+            if dp_raw > 180.0: dp_raw -= 360.0
+            elif dp_raw < -180.0: dp_raw += 360.0
+            if dy_raw > 180.0: dy_raw -= 360.0
+            elif dy_raw < -180.0: dy_raw += 360.0
+            if dr_raw > 180.0: dr_raw -= 360.0
+            elif dr_raw < -180.0: dr_raw += 360.0
+
+            if self._prev_euler_delta is not None:
+                p_prev_d, y_prev_d, r_prev_d = self._prev_euler_delta
+                alpha = 0.4
+                # Smooth when frame-to-frame delta is < 4.0 deg and changing sign
+                if abs(dp_raw) < 4.0 and (dp_raw * p_prev_d < 0):
+                    pitch_out = alpha * cand_pitch + (1.0 - alpha) * p_prev
+                if abs(dy_raw) < 4.0 and (dy_raw * y_prev_d < 0):
+                    yaw_out = alpha * cand_yaw + (1.0 - alpha) * y_prev
+                if abs(dr_raw) < 4.0 and (dr_raw * r_prev_d < 0):
+                    roll_out = alpha * cand_roll + (1.0 - alpha) * r_prev
+
+            eff_delta = (pitch_out - p_prev, yaw_out - y_prev, roll_out - r_prev)
+            self._prev_euler_delta = eff_delta
+        else:
+            self._prev_euler_delta = None
+
         self.rvec = rvec
         self.tvec = tvec
         self.rotation_matrix = cand_rot_matrix
         self.aligned_rotation_matrix = R_eval
         self.aligned_rvec = aligned_rvec
-        self._last_valid_euler = (cand_pitch, cand_yaw, cand_roll)
+        self._last_valid_euler = (float(pitch_out), float(yaw_out), float(roll_out))
         self._prev_extrinsic_rvec = rvec.copy()
         self._prev_extrinsic_tvec = tvec.copy()
         return True
 
     def normalize_landmarks(self, landmarks: np.ndarray) -> np.ndarray:
-        """Transform landmarks to face-aligned space while preserving pixel coordinates for visual sampling.
+        """Transform landmarks to face-aligned space via pure 2D in-plane roll de-rotation.
 
-        Removes vehicle bounce: translates coordinates relative to the face origin (nose tip) in pixel space,
-        applies canonical rotation alignment, and anchors back to pixel coordinates so downstream visual sampling
-        (e.g., cheek flushing patches and eye crops) remains perfectly registered on the image frame.
+        Eliminates 3D Z-projection jitter: out-of-plane pitch/yaw depth chatter is prevented
+        from warping 2D vertical eyelid coordinates (preserving EAR accuracy under vibration).
+        Coordinates are rotated in-plane by -theta_roll around the face origin (nose tip or
+        bi-canthal midpoint) while leaving depth (z) completely untouched.
 
         Args:
             landmarks: Full landmark array in pixel coords (e.g. 478×3 or 478×2).
@@ -394,21 +429,38 @@ class PnPNormalizer:
 
         # Anchor origin in pixel space (nose tip if present, otherwise centroid)
         if lms.shape[0] > NOSE_TIP:
-            origin = lms[NOSE_TIP].copy()
+            origin = lms[NOSE_TIP, :2].copy()
         else:
-            origin = np.mean(lms, axis=0)
+            origin = np.mean(lms[:, :2], axis=0)
 
-        n_dim = lms.shape[1]
+        # Compute 2D inter-canthal angle theta_roll = atan2(y263 - y33, x263 - x33)
+        if lms.shape[0] > max(33, 263):
+            eye_r = lms[33, :2]
+            eye_l = lms[263, :2]
+            dx = float(eye_l[0] - eye_r[0])
+            dy = float(eye_l[1] - eye_r[1])
+            if np.hypot(dx, dy) > 1e-3:
+                theta_roll = float(np.arctan2(dy, dx))
+            else:
+                theta_roll = 0.0
+        elif self._last_valid_euler is not None:
+            theta_roll = float(np.radians(self._last_valid_euler[2]))
+        else:
+            theta_roll = 0.0
+
+        cos_t = np.cos(theta_roll)
+        sin_t = np.sin(theta_roll)
+        # 2D rotation matrix R_2D(-theta_roll) = [[cos_t, sin_t], [-sin_t, cos_t]]
+        R_2d = np.array([
+            [cos_t, sin_t],
+            [-sin_t, cos_t]
+        ], dtype=np.float64)
+
         normalized = lms.copy()
-
-        if n_dim >= 3:
-            centered = lms[:, :3] - origin[:3]
-            rotated = (self.rotation_matrix.T @ centered.T).T
-            normalized[:, :3] = rotated + origin[:3]
-        elif n_dim == 2:
-            centered_3d = np.column_stack([lms[:, :2] - origin[:2], np.zeros(len(lms))])
-            rotated_3d = (self.rotation_matrix.T @ centered_3d.T).T
-            normalized[:, :2] = rotated_3d[:, :2] + origin[:2]
+        centered_2d = lms[:, :2] - origin[:2]
+        rotated_2d = centered_2d @ R_2d.T
+        normalized[:, :2] = rotated_2d + origin[:2]
+        # lms[:, 2] (relative depth) is left completely untouched
 
         return normalized
 

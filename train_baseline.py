@@ -216,8 +216,16 @@ def filter_involuntary_features(
     return X_2d[:, keep_indices], keep_names
 
 
-def load_dataset_from_npz(npz_paths: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
-    """Load and concatenate training windows from multiple .npz archives."""
+def load_dataset_from_npz(
+    npz_paths: List[str],
+    target_frames: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    """Load and concatenate training windows from multiple .npz archives.
+
+    Handles heterogeneous archives with:
+      - Channel dimension differences (29 core vs 48 extended features)
+      - Temporal window frame differences due to variable camera FPS (e.g. 71, 75, 89, 90 frames)
+    """
     raw_archives = []
     target_feature_names = []
 
@@ -240,6 +248,24 @@ def load_dataset_from_npz(npz_paths: List[str]) -> Tuple[np.ndarray, np.ndarray,
     if not raw_archives:
         raise ValueError("No valid .npz data files found to load.")
 
+    # Determine canonical window frame count along temporal axis 1
+    frame_counts = [
+        arc["features"].shape[1]
+        for arc in raw_archives
+        if arc["features"].ndim == 3 and arc["features"].shape[0] > 0
+    ]
+    if target_frames is None:
+        if not frame_counts:
+            target_frames = 90
+        elif len(set(frame_counts)) == 1:
+            target_frames = frame_counts[0]
+        else:
+            if 90 in frame_counts:
+                target_frames = 90
+            else:
+                from collections import Counter
+                target_frames = Counter(frame_counts).most_common(1)[0][0]
+
     all_features = []
     all_subjects = []
     all_labels = []
@@ -251,19 +277,47 @@ def load_dataset_from_npz(npz_paths: List[str]) -> Tuple[np.ndarray, np.ndarray,
         subs = arc["subject_ids"]
         labs = arc["labels"]
 
+        if feats.ndim != 3 or feats.shape[0] == 0:
+            continue
+
+        n_win, win_frames, _ = feats.shape
+
+        # 1. Feature channel alignment across schemas
         if fnames == target_feature_names:
             aligned_feats = feats
         else:
-            n_win, win_frames, _ = feats.shape
             aligned_feats = np.zeros((n_win, win_frames, n_target_features), dtype=np.float32)
             fname_to_idx = {fn: idx for idx, fn in enumerate(fnames)}
             for t_idx, t_name in enumerate(target_feature_names):
                 if t_name in fname_to_idx:
                     aligned_feats[:, :, t_idx] = feats[:, :, fname_to_idx[t_name]]
 
+        # 2. Temporal frame count alignment along axis 1 (if framerate differs)
+        if win_frames != target_frames:
+            if win_frames <= 1:
+                aligned_feats = np.repeat(aligned_feats, target_frames, axis=1)
+            else:
+                from scipy.interpolate import interp1d
+                x_orig = np.linspace(0.0, 1.0, win_frames)
+                x_target = np.linspace(0.0, 1.0, target_frames)
+                resampled = interp1d(
+                    x_orig, aligned_feats, axis=1, kind="linear", assume_sorted=True
+                )(x_target).astype(np.float32)
+
+                from pipeline.training_buffer import TrainingBuffer
+                bool_names = set(TrainingBuffer.CORE_BOOL_NAMES + TrainingBuffer.EXTENDED_BOOL_NAMES)
+                for t_idx, t_name in enumerate(target_feature_names):
+                    if t_name in bool_names:
+                        resampled[:, :, t_idx] = (resampled[:, :, t_idx] >= 0.5).astype(np.float32)
+
+                aligned_feats = resampled
+
         all_features.append(aligned_feats)
         all_subjects.append(subs)
         all_labels.append(labs)
+
+    if not all_features:
+        raise ValueError("No valid window samples found across all archives.")
 
     X_3d = np.concatenate(all_features, axis=0)
     subjects = np.concatenate(all_subjects, axis=0)
@@ -352,22 +406,23 @@ def augment_minority_windows_in_fold(
     """In-fold minority class oversampling with physiological Gaussian jitter.
 
     Count n_pos = np.sum(y_train == 1) and n_neg = np.sum(y_train == 0).
-    If 0 < n_pos < n_neg: generate synthetic minority samples by sampling with replacement
-    from X_train[y_train == 1] until n_pos_total == n_neg, adding tiny zero-mean Gaussian
-    noise scaled to 0.02 * np.maximum(np.nanstd(X_train, axis=0), 1e-4) on continuous columns
-    (preserving binary/delta structure).
+    If classes are imbalanced (0 < min(n_pos, n_neg) < max(n_pos, n_neg)), generates
+    synthetic minority samples by sampling with replacement from the minority class until
+    classes are balanced, adding subtle zero-mean Gaussian noise scaled to 2% standard
+    deviation on continuous columns (preserving binary/delta structure).
     """
     n_pos = int(np.sum(y_train == 1))
     n_neg = int(np.sum(y_train == 0))
 
-    if n_pos == 0 or n_pos >= n_neg:
+    if n_pos == 0 or n_neg == 0 or n_pos == n_neg:
         return X_train, y_train
 
-    n_to_add = n_neg - n_pos
+    minority_label = 1 if n_pos < n_neg else 0
+    n_to_add = abs(n_neg - n_pos)
     rng = np.random.RandomState(random_state)
 
-    pos_indices = np.where(y_train == 1)[0]
-    sampled_indices = rng.choice(pos_indices, size=n_to_add, replace=True)
+    minority_indices = np.where(y_train == minority_label)[0]
+    sampled_indices = rng.choice(minority_indices, size=n_to_add, replace=True)
     synthetic_X = X_train[sampled_indices].copy()
 
     # Determine continuous feature mask (preserve binary 0/1 columns)
@@ -385,7 +440,7 @@ def augment_minority_windows_in_fold(
     noise = rng.normal(0.0, 1.0, size=synthetic_X.shape)
     synthetic_X[:, continuous_mask] += (noise * scale)[:, continuous_mask]
 
-    synthetic_y = np.ones(n_to_add, dtype=y_train.dtype)
+    synthetic_y = np.full(n_to_add, minority_label, dtype=y_train.dtype)
 
     X_augmented = np.vstack([X_train, synthetic_X])
     y_augmented = np.concatenate([y_train, synthetic_y])

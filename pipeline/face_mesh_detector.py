@@ -59,6 +59,7 @@ class AdaptiveROITracker:
         self.is_tracking: bool = False
         self._last_crop_bounds: Optional[Tuple[int, int, int, int]] = None
         self._last_frame_shape: Optional[Tuple[int, int]] = None
+        self._shift_hint_active: bool = False
 
     def reset(self) -> None:
         """Reset tracking state."""
@@ -68,6 +69,7 @@ class AdaptiveROITracker:
         self.is_tracking = False
         self._last_crop_bounds = None
         self._last_frame_shape = None
+        self._shift_hint_active = False
 
     @staticmethod
     def compute_bbox(landmarks: np.ndarray) -> Tuple[float, float, float, float]:
@@ -176,9 +178,10 @@ class AdaptiveROITracker:
             dy: Vertical camera shift in pixels.
         """
         if self.is_tracking and self.cx is not None and self.cy is not None:
-            if abs(dx) > 2.0 or abs(dy) > 2.0:
+            if abs(dx) > 0.25 or abs(dy) > 0.25:
                 self.cx += float(dx)
                 self.cy += float(dy)
+                self._shift_hint_active = True
 
     def get_crop_bounds(self, frame_shape: Tuple[int, ...]) -> Tuple[int, int, int, int]:
         """Compute pixel bounds (x_crop_min, y_crop_min, x_crop_max, y_crop_max) for the ROI.
@@ -235,11 +238,13 @@ class AdaptiveROITracker:
         y2 = y1 + crop_size
 
         target_shape = (int(h_frame), int(w_frame))
-        if self._last_crop_bounds is not None and self._last_frame_shape == target_shape:
+        # Remove the <= 2 pixel hysteresis freeze when shift_hint is active
+        if not self._shift_hint_active and self._last_crop_bounds is not None and self._last_frame_shape == target_shape:
             px1, py1, px2, py2 = self._last_crop_bounds
             if max(abs(x1 - px1), abs(y1 - py1), abs(x2 - px2), abs(y2 - py2)) <= 2:
                 return self._last_crop_bounds
 
+        self._shift_hint_active = False
         self._last_crop_bounds = (x1, y1, x2, y2)
         self._last_frame_shape = target_shape
         return x1, y1, x2, y2

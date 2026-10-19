@@ -884,28 +884,53 @@ class TestTrackerRobustnessAndEdgeCases:
             assert (cv2.CAP_PROP_POS_FRAMES, 0) not in calls
 
     def test_apply_shift_hint_updates_tracker_center(self):
-        """apply_shift_hint shifts center when is_tracking is True and shift exceeds threshold."""
+        """apply_shift_hint shifts center when is_tracking is True and shift exceeds 0.25px threshold."""
         tracker = AdaptiveROITracker(alpha=0.35, margin=2.0)
         tracker.cx = 400.0
         tracker.cy = 300.0
         tracker.scale = 100.0
         tracker.is_tracking = True
 
-        # Shift below threshold (< 2.0px) is ignored to avoid noise
-        tracker.apply_shift_hint(1.0, -1.5)
+        # Shift below threshold (<= 0.25px) is ignored to avoid noise
+        tracker.apply_shift_hint(0.2, -0.15)
         assert tracker.cx == 400.0
         assert tracker.cy == 300.0
 
-        # Shift above threshold (> 2.0px) updates center immediately
+        # Sub-2px shift above threshold (> 0.25px, e.g. 1.0px) updates center immediately
+        tracker.apply_shift_hint(1.0, -1.5)
+        assert tracker.cx == 401.0
+        assert tracker.cy == 298.5
+
+        # Larger shifts (> 2.0px) also update center
         tracker.apply_shift_hint(5.0, -12.0)
-        assert tracker.cx == 405.0
-        assert tracker.cy == 288.0
+        assert tracker.cx == 406.0
+        assert tracker.cy == 286.5
 
         # When not tracking, shift_hint does nothing
         tracker.is_tracking = False
         tracker.apply_shift_hint(10.0, 10.0)
-        assert tracker.cx == 405.0
-        assert tracker.cy == 288.0
+        assert tracker.cx == 406.0
+        assert tracker.cy == 286.5
+
+    def test_shift_hint_bypasses_crop_bounds_hysteresis(self):
+        """get_crop_bounds removes the <= 2px hysteresis freeze when shift_hint is active."""
+        tracker = AdaptiveROITracker(alpha=0.35, margin=2.0)
+        tracker.cx = 400.0
+        tracker.cy = 300.0
+        tracker.scale = 100.0
+        tracker.is_tracking = True
+
+        bounds1 = tracker.get_crop_bounds((720, 1280))
+        assert bounds1 == (300, 200, 500, 400)
+
+        # Apply a 1px shift hint (which would otherwise be frozen by <= 2px hysteresis)
+        tracker.apply_shift_hint(1.0, 1.0)
+        assert tracker.cx == 401.0
+        assert tracker.cy == 301.0
+
+        # Crop bounds should update immediately to [301, 201, 501, 401]
+        bounds2 = tracker.get_crop_bounds((720, 1280))
+        assert bounds2 == (301, 201, 501, 401)
 
 
 

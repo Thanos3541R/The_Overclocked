@@ -289,7 +289,13 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             processed = preprocessor.process(frame)
 
             # ── Stage 2: Face Mesh Detection ──
-            dx_cam, dy_cam, is_bumpy = stabilizer.estimate_frame_shift(frame)
+            face_center = (detector.roi_tracker.cx, detector.roi_tracker.cy) if (detector.roi_tracker.is_tracking and detector.roi_tracker.cx is not None and detector.roi_tracker.cy is not None) else None
+            face_scale = detector.roi_tracker.scale if detector.roi_tracker.is_tracking else None
+            dx_cam, dy_cam, is_bumpy = stabilizer.estimate_frame_shift(
+                frame,
+                face_center=face_center,
+                face_scale=face_scale,
+            )
             landmarks = detector.detect(processed, shift_hint=(dx_cam, dy_cam))
 
             if landmarks is None:
@@ -306,6 +312,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     imu_gated=False,
                     gating_reason="no_face",
                     frame=frame,
+                    vibration_score=stabilizer.vibration_score,
                 )
                 if csv_logger is not None:
                     csv_logger.log(features)
@@ -390,6 +397,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 gating_reason=pose_state.gating_reason,
                 frame=frame,
                 image_landmarks=smooth_landmarks,
+                vibration_score=stabilizer.vibration_score,
             )
 
             # ── Online Personal Baseline Auto-Calibration ──

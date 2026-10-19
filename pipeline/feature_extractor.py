@@ -137,6 +137,7 @@ class FrameFeatures:
     # Gating info
     imu_gated: bool = False
     gating_reason: str = ""
+    vibration_score: float = 0.0
 
 
 def _dist(p1: np.ndarray, p2: np.ndarray) -> float:
@@ -1377,7 +1378,8 @@ class FeatureExtractor:
                 imu_gated: bool = False,
                 gating_reason: str = "",
                 frame: Optional[np.ndarray] = None,
-                image_landmarks: Optional[np.ndarray] = None) -> FrameFeatures:
+                image_landmarks: Optional[np.ndarray] = None,
+                vibration_score: float = 0.0) -> FrameFeatures:
         """Compute all features for a single frame.
 
         Args:
@@ -1390,6 +1392,7 @@ class FeatureExtractor:
             gating_reason: Human-readable gating reason.
             frame: Optional BGR frame array for color/vasodilation measurement.
             image_landmarks: Optional un-rotated raw landmarks for visual skin sampling.
+            vibration_score: Instantaneous chassis/cabin vibration score from KinematicStabilizer.
 
         Returns:
             FrameFeatures dataclass with all computed values.
@@ -1409,6 +1412,7 @@ class FeatureExtractor:
                 head_roll=head_roll,
                 imu_gated=imu_gated,
                 gating_reason=gating_reason,
+                vibration_score=float(vibration_score),
             )
 
             if imu_gated and not features.gating_reason:

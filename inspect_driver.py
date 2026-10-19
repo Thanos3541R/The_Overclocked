@@ -283,9 +283,24 @@ def main():
     elif args.capture:
         capture_from_webcam(args.output, args.headless, config=config)
     elif args.video:
-        print("[DMS Inspector] Video inspection mode. For full continuous stream, use:")
-        config_arg = f" --config \"{args.config}\"" if args.config else ""
-        print(f"  python main.py --source \"{args.video}\"{config_arg} --save-csv")
+        if not os.path.exists(args.video) and not args.video.isdigit():
+            print(f"[Error] Video file not found: {args.video}")
+            return
+        from extract_video_features import extract_video_features
+        out_dir = os.path.dirname(os.path.abspath(args.output)) or "."
+        csv_out = args.output if args.output.lower().endswith(".csv") else None
+        summary = extract_video_features(
+            video_path=args.video,
+            output_dir=out_dir,
+            headless=args.headless,
+            csv_path=csv_out,
+        )
+        v = summary["overall_verdict"]
+        print(
+            f"[DMS Inspector] Video Verdict: {v['final_classification']} | "
+            f"Mean Involuntary Risk: {v['mean_involuntary_risk_pct']}% | "
+            f"Bayesian Lockout: {v['bayesian_lockout_confirmed']}"
+        )
 
 
 if __name__ == "__main__":

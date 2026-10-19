@@ -1385,6 +1385,43 @@ class TestPhase12Enhancements:
         assert np.any(frame != 0)
 
 
+class TestPhase13Enhancements:
+    """Verification tests for Phase 13: inspect_driver.py --video forensic integration."""
+
+    def test_inspect_driver_missing_video(self, capsys):
+        """inspect_driver.py reports error on missing video file."""
+        import inspect_driver
+        with patch.object(sys, "argv", ["inspect_driver.py", "--video", "non_existent_file_12345.mp4"]):
+            inspect_driver.main()
+        captured = capsys.readouterr()
+        assert "[Error] Video file not found: non_existent_file_12345.mp4" in captured.out
+
+    def test_inspect_driver_video_execution(self, capsys):
+        """inspect_driver.py calls extract_video_features and prints overall verdict."""
+        import inspect_driver
+
+        fake_summary = {
+            "overall_verdict": {
+                "final_classification": "SOBER",
+                "mean_involuntary_risk_pct": 12.4,
+                "bayesian_lockout_confirmed": False,
+            }
+        }
+        with patch("os.path.exists", return_value=True):
+            with patch("extract_video_features.extract_video_features", return_value=fake_summary) as mock_extract:
+                with patch.object(sys, "argv", ["inspect_driver.py", "--video", "dummy_drive.mp4", "--output", "custom_dir/features.csv"]):
+                    inspect_driver.main()
+                    mock_extract.assert_called_once()
+                    assert mock_extract.call_args.kwargs["video_path"] == "dummy_drive.mp4"
+                    assert mock_extract.call_args.kwargs["csv_path"] == "custom_dir/features.csv"
+
+        captured = capsys.readouterr()
+        assert "[DMS Inspector] Video Verdict: SOBER" in captured.out
+        assert "Mean Involuntary Risk: 12.4%" in captured.out
+        assert "Bayesian Lockout: False" in captured.out
+
+
+
 
 
 

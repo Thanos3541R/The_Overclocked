@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 from utils.landmarks import (
     RIGHT_EYE_EAR_FLAT, LEFT_EYE_EAR_FLAT,
     RIGHT_IRIS_CENTER, LEFT_IRIS_CENTER,
+    RIGHT_IRIS_RING, LEFT_IRIS_RING,
     RIGHT_EYE_OUTER, LEFT_EYE_OUTER,
     RIGHT_EYE_EAR_INDICES, LEFT_EYE_EAR_INDICES,
     MAR_VERTICAL_PAIRS, MAR_HORIZONTAL,
@@ -298,6 +299,8 @@ class FeatureExtractor:
         self._last_blink_opening_vel: float = 0.0
         self._open_ear_baseline: float = 0.28        # dynamic baseline for ptosis/drowsiness adaptation
         self._phase_frames: int = 0                  # frame count in current blink phase (timeout guard)
+        self._ear_deriv_window: Deque[Tuple[float, float]] = deque(maxlen=3)
+        self._closing_glitch_count: int = 0
 
         # ── Gaze yaw dispersion (σ_yaw) ──
         dispersion_buffer_size = int(gaze_dispersion_window_sec * fps)
@@ -379,6 +382,8 @@ class FeatureExtractor:
             self._last_blink_opening_vel = 0.0
             self._open_ear_baseline = 0.28
             self._phase_frames = 0
+            self._ear_deriv_window.clear()
+            self._closing_glitch_count = 0
             self._gaze_yaw_history.clear()
             self._prev_head_yaw = None
             self._prev_head_pitch = None
@@ -463,20 +468,43 @@ class FeatureExtractor:
     def compute_iris_position(landmarks: np.ndarray,
                                iris_center_idx: int,
                                eye_outer_idx: int,
-                               eye_inner_idx: int) -> tuple:
+                               eye_inner_idx: int,
+                               ring_indices: Optional[List[int]] = None) -> tuple:
         """Compute normalized iris position relative to eye corners.
+
+        Averages the 5 iris landmarks (center + 4 ring points) when available
+        to compute the iris centroid, reducing sub-pixel jitter by sqrt(5) ~ 2.23x.
 
         Returns:
             (x, y) normalized to approximately [-1, 1].
             x: horizontal gaze along consistent conjugate axis (-1 = left, +1 = right in camera frame).
             y: vertical gaze (-1 = down, +1 = up).
         """
-        iris = landmarks[iris_center_idx]
+        if ring_indices is None:
+            if iris_center_idx == LEFT_IRIS_CENTER:
+                ring_indices = LEFT_IRIS_RING
+            elif iris_center_idx == RIGHT_IRIS_CENTER:
+                ring_indices = RIGHT_IRIS_RING
+
         outer = landmarks[eye_outer_idx]
         inner = landmarks[eye_inner_idx]
 
         eye_center = (outer + inner) / 2.0
-        eye_width = np.linalg.norm(outer - inner)
+        eye_width = float(np.linalg.norm(outer - inner))
+
+        if (ring_indices is not None and landmarks is not None and
+                landmarks.shape[0] > max(ring_indices)):
+            ring_pts = landmarks[ring_indices, :2]
+            center_pt = landmarks[iris_center_idx, :2]
+            dists = np.linalg.norm(ring_pts - center_pt, axis=1)
+            # Valid iris ring points must have non-zero radius and be within the eye orbit (< 0.6 * eye_width)
+            if np.all((dists > 0.2) & (dists < max(1.0, 0.6 * eye_width))):
+                all_iris_indices = [iris_center_idx] + list(ring_indices)
+                iris = np.mean(landmarks[all_iris_indices], axis=0)
+            else:
+                iris = landmarks[iris_center_idx]
+        else:
+            iris = landmarks[iris_center_idx]
 
         if eye_width < 1e-6:
             return (0.0, 0.0)
@@ -520,7 +548,8 @@ class FeatureExtractor:
                                    left_iris_x: Optional[float] = None,
                                    right_iris_x: Optional[float] = None,
                                    head_vel_deg_s: float = 0.0,
-                                   eye_socket_vel: float = 0.0) -> Tuple[float, bool, float, float]:
+                                   eye_socket_vel: float = 0.0,
+                                   vibration_score: float = 0.0) -> Tuple[float, bool, float, float]:
         """Compute saccadic velocity, detect saccades, measure latency, and raw displacement.
 
         Uses frame-to-frame angular velocity of the averaged iris position.
@@ -544,6 +573,7 @@ class FeatureExtractor:
             right_iris_x: Optional right eye horizontal iris position for conjugate validation.
             head_vel_deg_s: Head angular speed in deg/s for VOR suppression.
             eye_socket_vel: Normalized eye socket translation speed for motion suppression.
+            vibration_score: Instantaneous vehicle vibration score from KinematicStabilizer.
 
         Returns:
             (velocity_deg_s, is_saccade, latency_ms, raw_iris_dx)
@@ -644,15 +674,24 @@ class FeatureExtractor:
         # so stationary PnP Euler jitter never blocks real saccades!
         is_head_moving = (eye_socket_vel > self.eye_socket_vel_threshold) or (head_vel_deg_s > 30.0 and eye_socket_vel > 0.25)
 
+        # Dynamic deadzone scaling under cabin vibration
+        if vibration_score > 0.2:
+            scale = 1.0 + 1.2 * vibration_score
+            eff_saccade_deadzone_dx = self.saccade_subpixel_deadzone_dx * scale
+            eff_saccade_deadzone_hypot = self.saccade_subpixel_deadzone_hypot * scale
+        else:
+            eff_saccade_deadzone_dx = self.saccade_subpixel_deadzone_dx
+            eff_saccade_deadzone_hypot = self.saccade_subpixel_deadzone_hypot
+
         if is_head_moving:
-            if effective_dx < self.saccade_head_motion_dx:
+            if effective_dx < max(self.saccade_head_motion_dx, eff_saccade_deadzone_dx):
                 velocity = 0.0
             else:
                 dx_deg = effective_dx * self.saccade_deg_per_unit
                 velocity = max(0.0, (dx_deg / dt) - 0.5 * head_vel_deg_s)
         else:
-            # Sub-pixel deadzone: < self.saccade_subpixel_deadzone_dx or hypot < self.saccade_subpixel_deadzone_hypot is sensor noise
-            if effective_dx < self.saccade_subpixel_deadzone_dx or np.hypot(raw_dx, raw_dy * 0.5) < self.saccade_subpixel_deadzone_hypot:
+            # Sub-pixel deadzone: < eff_saccade_deadzone_dx or hypot < eff_saccade_deadzone_hypot is sensor/vibration noise
+            if effective_dx < eff_saccade_deadzone_dx or np.hypot(raw_dx, raw_dy * 0.5) < eff_saccade_deadzone_hypot:
                 velocity = 0.0
             else:
                 dx_deg = effective_dx * self.saccade_deg_per_unit
@@ -705,6 +744,8 @@ class FeatureExtractor:
         if self._prev_ear_avg is None or self._prev_ear_timestamp is None:
             self._prev_ear_avg = ear_avg
             self._prev_ear_timestamp = timestamp
+            self._ear_deriv_window.clear()
+            self._ear_deriv_window.append((timestamp, ear_avg))
             return (self._last_blink_closing_vel, self._last_blink_opening_vel)
 
         dt = timestamp - self._prev_ear_timestamp
@@ -714,6 +755,9 @@ class FeatureExtractor:
             # Gated freeze or frame drop exceeded 500ms — re-anchor without corrupting blink velocities
             self._prev_ear_avg = ear_avg
             self._prev_ear_timestamp = timestamp
+            self._ear_deriv_window.clear()
+            self._ear_deriv_window.append((timestamp, ear_avg))
+            self._closing_glitch_count = 0
             return (self._last_blink_closing_vel, self._last_blink_opening_vel)
 
         # Adapt baseline open EAR during sustained open eyes (not during blinks or ptosis droop)
@@ -733,16 +777,51 @@ class FeatureExtractor:
             elif self._blink_phase == "opening":
                 self._blink_phase = "open" if ear_avg >= self.blink_threshold else "closed"
             self._phase_frames = 0
+            self._closing_glitch_count = 0
 
-        d_ear = ear_avg - self._prev_ear_avg
-        ear_velocity = abs(d_ear / dt)   # EAR units / second
+        d_inst = float(ear_avg - self._prev_ear_avg)
+        self._ear_deriv_window.append((timestamp, ear_avg))
+        if len(self._ear_deriv_window) == 3:
+            t0, y0 = self._ear_deriv_window[0]
+            t1, y1 = self._ear_deriv_window[1]
+            t2, y2 = self._ear_deriv_window[2]
+            dt_span = t2 - t0
+            if dt_span > 1e-6:
+                t_mean = (t0 + t1 + t2) / 3.0
+                y_mean = (y0 + y1 + y2) / 3.0
+                dt0 = t0 - t_mean
+                dt1 = t1 - t_mean
+                dt2 = t2 - t_mean
+                denom = dt0 * dt0 + dt1 * dt1 + dt2 * dt2
+                if denom > 1e-12:
+                    num = dt0 * (y0 - y_mean) + dt1 * (y1 - y_mean) + dt2 * (y2 - y_mean)
+                    slope = num / denom
+                else:
+                    slope = (y2 - y0) / dt_span
+
+                if slope * d_inst > 0:
+                    d_ear = float(slope * dt)
+                    ear_velocity = float(max(abs(slope), abs(d_inst / dt)))
+                else:
+                    d_ear = d_inst
+                    ear_velocity = float(abs(d_inst / dt))
+            else:
+                d_ear = d_inst
+                ear_velocity = float(abs(d_inst / dt))
+        else:
+            d_ear = d_inst
+            ear_velocity = float(abs(d_inst / dt))
 
         # State machine: track blink phase transitions
         if self._blink_phase == "open":
-            if d_ear < -0.010 and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
+            if (d_ear < -0.010 or d_inst < -0.010) and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
                 # EAR dropping → entering closing phase
-                self._blink_phase = "closing"
+                if ear_avg < self.blink_threshold:
+                    self._blink_phase = "closed"
+                else:
+                    self._blink_phase = "closing"
                 self._phase_frames = 0
+                self._closing_glitch_count = 0
                 self._closing_velocities = [ear_velocity]
                 self._opening_velocities = []
 
@@ -751,23 +830,46 @@ class FeatureExtractor:
                 # Eyes fully closed → transition to closed
                 self._blink_phase = "closed"
                 self._phase_frames = 0
+                self._closing_glitch_count = 0
                 if ear_velocity > 0.02:
                     self._closing_velocities.append(ear_velocity)
             elif d_ear < 0:
                 # Still closing (omit zero derivative from frozen/gated frames)
+                self._closing_glitch_count = 0
                 if ear_velocity > 0.02:
                     self._closing_velocities.append(ear_velocity)
             else:
-                # Aborted blink (EAR went back up without closing fully)
-                self._blink_phase = "open"
-                self._phase_frames = 0
+                # Check for 1-frame vibration glitch tolerance
+                if self._closing_glitch_count < 1 and d_ear < 0.015:
+                    self._closing_glitch_count += 1
+                else:
+                    # Aborted blink (EAR went back up without closing fully)
+                    self._blink_phase = "open"
+                    self._phase_frames = 0
+                    self._closing_glitch_count = 0
 
         elif self._blink_phase == "closed":
             if d_ear > 0.005 and ear_avg > self.blink_threshold * 0.75:
                 # EAR rising → entering opening phase
-                self._blink_phase = "opening"
-                self._phase_frames = 0
-                self._opening_velocities = [ear_velocity]
+                reopen_thresh = min(0.22, self._open_ear_baseline * 0.85)
+                if ear_avg >= reopen_thresh:
+                    # Direct transition to open if eyes reopened above threshold in single frame
+                    self._blink_phase = "open"
+                    self._phase_frames = 0
+                    self._closing_glitch_count = 0
+                    if ear_velocity > 0.02:
+                        self._opening_velocities = [ear_velocity]
+                    if self._closing_velocities:
+                        self._last_blink_closing_vel = float(
+                            np.max(self._closing_velocities))
+                    if self._opening_velocities:
+                        self._last_blink_opening_vel = float(
+                            np.max(self._opening_velocities))
+                else:
+                    self._blink_phase = "opening"
+                    self._phase_frames = 0
+                    self._closing_glitch_count = 0
+                    self._opening_velocities = [ear_velocity]
 
         elif self._blink_phase == "opening":
             reopen_thresh = min(0.22, self._open_ear_baseline * 0.85)
@@ -786,10 +888,12 @@ class FeatureExtractor:
 
                 self._blink_phase = "open"
                 self._phase_frames = 0
+                self._closing_glitch_count = 0
             elif d_ear < -0.010 and ear_avg < self.blink_threshold:
                 # Re-closed during microsleep
                 self._blink_phase = "closed"
                 self._phase_frames = 0
+                self._closing_glitch_count = 0
             elif d_ear > 0:
                 # Still opening (omit zero derivative from frozen/gated frames)
                 if ear_velocity > 0.02:
@@ -930,7 +1034,7 @@ class FeatureExtractor:
         saccadic_samples = sum(1 for s in recent_samples if s)
         return float(saccadic_samples / len(recent_samples))
 
-    def _compute_postural_sway(self, head_pitch: float, head_roll: float, timestamp: float, head_angular_vel: float = 0.0) -> Tuple[float, bool]:
+    def _compute_postural_sway(self, head_pitch: float, head_roll: float, timestamp: float, head_angular_vel: float = 0.0, vibration_score: float = 0.0) -> Tuple[float, bool]:
         """Compute low-frequency involuntary head wobble/postural sway (Section A) and detect rigid head stabilization (Section B).
 
         NOTE: Seated postural sway is an experimental proxy of Romberg standing posturography;
@@ -938,6 +1042,12 @@ class FeatureExtractor:
         filtered out. We isolate 0.5 - 2.0 Hz tremor by applying high-pass linear detrending across
         the recent window to reject road grade/banking drift and evaluating residual variance.
         """
+        if vibration_score > 0.35:
+            # Road vibration present: pause head_postural_sway accumulation so road vibration
+            # is never misclassified as Romberg postural sway
+            sway_val = float(self._last_features.head_postural_sway) if hasattr(self, "_last_features") else 0.0
+            return (sway_val, False)
+
         if head_angular_vel > self.sway_yaw_gate_deg_s and len(self._head_pose_history) > 0:
             return (float(self._last_features.head_postural_sway), False)
 
@@ -1162,7 +1272,7 @@ class FeatureExtractor:
             logger.debug("Brow ratio computation failed: %s", exc, exc_info=True)
             return (0.0, 0.0, False)
 
-    def _compute_eyelid_tremor(self, ear_avg: float, timestamp: float, blink_phase: str) -> float:
+    def _compute_eyelid_tremor(self, ear_avg: float, timestamp: float, blink_phase: str, vibration_score: float = 0.0) -> float:
         """Track high-frequency palpebral micro-flutter (3-15 Hz).
 
         Zero-crossing oscillation of first-order EAR differences during open-eye fixation.
@@ -1192,6 +1302,8 @@ class FeatureExtractor:
         signs = np.sign(valid_diffs)
         reversals = int(np.sum(signs[1:] * signs[:-1] < 0))
         tremor_hz = float(reversals / (2.0 * duration))
+        if vibration_score > 0.35:
+            tremor_hz *= max(0.0, 1.0 - vibration_score)
         return float(round(tremor_hz, 2))
 
     def _compute_rppg_pulse(self, frame: Optional[np.ndarray],
@@ -1577,6 +1689,7 @@ class FeatureExtractor:
                     right_iris_x=features.right_iris_x,
                     head_vel_deg_s=head_total_vel,
                     eye_socket_vel=eye_socket_vel,
+                    vibration_score=float(vibration_score),
                 )
 
             # ── Gaze yaw dispersion (σ_yaw) ──
@@ -1622,13 +1735,21 @@ class FeatureExtractor:
                         d_roll = (head_roll - self._prev_head_roll + 180.0) % 360.0 - 180.0
                         pitch_roll_vel = float(np.hypot(d_pitch, d_roll) / dt_head)
 
-            if pitch_roll_vel > self.sway_nod_reset_deg_s:
+            if vibration_score > 0.35:
+                # Road vibration present: pause head_postural_sway accumulation so road vibration is not misclassified
+                features.head_postural_sway = float(self._last_features.head_postural_sway)
+                features.rigid_head_stabilization = False
+            elif pitch_roll_vel > self.sway_nod_reset_deg_s:
                 self._head_pose_history.clear()
                 features.head_postural_sway = float(self._last_features.head_postural_sway)
                 features.rigid_head_stabilization = False
             else:
                 features.head_postural_sway, features.rigid_head_stabilization = \
-                    self._compute_postural_sway(head_pitch, head_roll, timestamp, head_angular_vel=head_angular_vel)
+                    self._compute_postural_sway(
+                        head_pitch, head_roll, timestamp,
+                        head_angular_vel=head_angular_vel,
+                        vibration_score=float(vibration_score),
+                    )
 
             # Involuntary impairment override: drowsy drivers in microsleep or high PERCLOS cannot be masking with rigid head
             if features.microsleep_detected or features.perclos > 0.15:
@@ -1645,7 +1766,10 @@ class FeatureExtractor:
 
             # ── Palpebral Eyelid Tremor (3-15 Hz) ──
             features.eyelid_tremor_hz = \
-                self._compute_eyelid_tremor(features.ear_avg, timestamp, self._blink_phase)
+                self._compute_eyelid_tremor(
+                    features.ear_avg, timestamp, self._blink_phase,
+                    vibration_score=float(vibration_score),
+                )
 
             # ── T-zone rPPG Pulse & HRV ──
             features.rppg_pulse_bpm, features.rppg_hrv_rmssd_ms, features.rppg_valid = \

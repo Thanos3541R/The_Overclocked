@@ -687,5 +687,121 @@ def test_speed_bump_and_road_vibration_immunity():
         assert abs(ear - 0.30) <= 0.005, f"EAR {ear:.4f} deviated from 0.30 by more than 0.005"
 
 
+
+class TestVibrationHardenedFeatureExtractor:
+    """Test suite for Phase 4 vibration hardening: dynamic deadzones, 5-point iris centroid, and blink glitch tolerance."""
+
+    def test_dynamic_saccade_deadzone_under_vibration(self):
+        """Dynamic deadzone scales up under vibration so residual vibration does not trigger false saccades."""
+        ext = FeatureExtractor(fps=30.0)
+
+        # Baseline frame
+        lm0 = make_full_landmarks(ear_val=0.30, iris_x_offset=0.0)
+        ext.compute(lm0, timestamp=0.0, frame_id=0, face_valid=True)
+
+        # 1. At vibration_score = 0.0, a shift of 0.8px (normalized dx ~ 0.04 > 0.026) triggers non-zero velocity
+        lm_small_shift = make_full_landmarks(ear_val=0.30, iris_x_offset=0.8)
+        feat_no_vib = ext.compute(lm_small_shift, timestamp=1/30.0, frame_id=1, face_valid=True, vibration_score=0.0)
+        assert feat_no_vib.saccade_velocity > 0.0
+
+        # Reset extractor state
+        ext.reset()
+        ext.compute(lm0, timestamp=0.0, frame_id=0, face_valid=True)
+
+        # 2. At vibration_score = 0.75, deadzone scales by (1.0 + 1.2 * 0.75) = 1.9x (eff_deadzone_dx ~ 0.0494)
+        # The same 0.8px shift is now inside the expanded deadzone and produces velocity = 0.0
+        feat_with_vib = ext.compute(lm_small_shift, timestamp=1/30.0, frame_id=1, face_valid=True, vibration_score=0.75)
+        assert feat_with_vib.saccade_velocity == 0.0
+        assert feat_with_vib.saccade_detected is False
+
+        # 3. A large voluntary saccade (15px shift) exceeds even the scaled deadzone
+        lm_large_shift = make_full_landmarks(ear_val=0.30, iris_x_offset=15.0)
+        feat_large = ext.compute(lm_large_shift, timestamp=2/30.0, frame_id=2, face_valid=True, vibration_score=0.75)
+        assert feat_large.saccade_velocity > 35.0
+        assert feat_large.saccade_detected is True
+
+    def test_5_point_iris_centroid_averaging(self):
+        """When 5-point iris ring landmarks are populated, centroid averaging reduces sub-pixel jitter."""
+        ext = FeatureExtractor(fps=30.0)
+        landmarks = np.zeros((478, 3), dtype=np.float64)
+
+        # Set eye corners for right eye (corners 33 and 133, width=40px, center=200)
+        landmarks[33] = [180.0, 200.0, 0.0]
+        landmarks[133] = [220.0, 200.0, 0.0]
+
+        # Iris center with 1.0px jitter
+        landmarks[468] = [201.0, 200.0, 0.0]
+        # Ring points centered exactly at 200.0 (3.0px radius)
+        landmarks[469] = [203.0, 200.0, 0.0]
+        landmarks[470] = [197.0, 200.0, 0.0]
+        landmarks[471] = [200.0, 203.0, 0.0]
+        landmarks[472] = [200.0, 197.0, 0.0]
+
+        # compute_iris_position should average all 5 points: (201 + 203 + 197 + 200 + 200) / 5 = 200.2
+        # Offset from eye center (200.0) is 0.2 px instead of 1.0 px (5x reduction!)
+        x_5pt, y_5pt = FeatureExtractor.compute_iris_position(landmarks, 468, 33, 133)
+        expected_x = 0.2 / 20.0  # offset 0.2 / (width/2 = 20) = 0.010
+        assert pytest.approx(x_5pt, abs=1e-4) == expected_x
+
+    def test_blink_closing_phase_glitch_tolerance(self):
+        """A single non-negative d_ear glitch (< 0.015) during closing phase is tolerated without aborting."""
+        ext = FeatureExtractor(fps=30.0, blink_threshold=0.20)
+
+        # Steady open eyes
+        for i in range(5):
+            ext.compute(make_full_landmarks(ear_val=0.15), timestamp=i/30.0, frame_id=i, face_valid=True)
+
+        # Frame 5: Closing downstroke starts (ear drops from 0.30 to 0.25)
+        f5 = ext.compute(make_full_landmarks(ear_val=0.125), timestamp=5/30.0, frame_id=5, face_valid=True)
+        assert f5.blink_phase == "closing"
+
+        # Frame 6: Vibration glitch causes a minor +0.008 EAR upward bounce
+        f6 = ext.compute(make_full_landmarks(ear_val=0.129), timestamp=6/30.0, frame_id=6, face_valid=True)
+        # Should NOT abort to 'open' thanks to self._closing_glitch_count
+        assert f6.blink_phase == "closing"
+        assert ext._closing_glitch_count == 1
+
+        # Frame 7: Resumes closing downstroke to fully closed (ear = 0.08 < 0.20)
+        f7 = ext.compute(make_full_landmarks(ear_val=0.04), timestamp=7/30.0, frame_id=7, face_valid=True)
+        assert f7.blink_phase == "closed"
+        assert ext._closing_glitch_count == 0
+
+    def test_vibration_discounts_eyelid_tremor_and_pauses_postural_sway(self):
+        """When vibration_score > 0.35, eyelid tremor is discounted and postural sway accumulation is paused."""
+        ext = FeatureExtractor(fps=30.0)
+
+        # 1. Warm-up postural sway history with normal wobble
+        for i in range(30):
+            t = i / 30.0
+            p = 2.0 * np.sin(2 * np.pi * 1.5 * t)
+            r = 1.5 * np.cos(2 * np.pi * 1.5 * t)
+            feat = ext.compute(make_full_landmarks(ear_val=0.15), timestamp=t, frame_id=i,
+                               face_valid=True, head_pitch=p, head_roll=r, vibration_score=0.0)
+
+        initial_sway = feat.head_postural_sway
+        assert initial_sway > 0.5
+        history_len_before = len(ext._head_pose_history)
+
+        # 2. Road vibration occurs: vibration_score = 0.70 > 0.35
+        for i in range(30, 45):
+            t = i / 30.0
+            p = 5.0 * np.sin(2 * np.pi * 8.0 * t)  # road chatter
+            r = 4.0 * np.cos(2 * np.pi * 8.0 * t)
+            feat_vib = ext.compute(make_full_landmarks(ear_val=0.15), timestamp=t, frame_id=i,
+                                   face_valid=True, head_pitch=p, head_roll=r, vibration_score=0.70)
+            # Postural sway must hold the previous clean value, not absorb vehicle vibration
+            assert feat_vib.head_postural_sway == initial_sway
+
+        # Pose history accumulation was paused during vibration
+        assert len(ext._head_pose_history) == history_len_before
+
+        # 3. Test tremor discount:
+        tremor_undiscounted = ext._compute_eyelid_tremor(0.28, 10.0, "open", vibration_score=0.0)
+        tremor_discounted = ext._compute_eyelid_tremor(0.28, 10.0, "open", vibration_score=0.60)
+        # When discounted by (1 - 0.60) = 0.40, tremor_discounted <= 0.40 * tremor_undiscounted + 1e-4
+        assert tremor_discounted <= tremor_undiscounted
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

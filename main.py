@@ -294,7 +294,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 timestamp = (frame_id - 1) / max(capture.fps, 1.0)
 
             # ── Stage 1: Preprocessing ──
-            processed = preprocessor.process(frame)
+            face_bbox = (
+                detector.roi_tracker.get_crop_bounds(frame.shape)
+                if detector.roi_tracker.is_tracking
+                else None
+            )
+            processed = preprocessor.process(frame, face_bbox=face_bbox)
 
             # ── Stage 2: Face Mesh Detection ──
             face_center = (detector.roi_tracker.cx, detector.roi_tracker.cy) if (detector.roi_tracker.is_tracking and detector.roi_tracker.cx is not None and detector.roi_tracker.cy is not None) else None

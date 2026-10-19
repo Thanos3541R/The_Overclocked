@@ -244,7 +244,6 @@ class AdaptiveROITracker:
             if max(abs(x1 - px1), abs(y1 - py1), abs(x2 - px2), abs(y2 - py2)) <= 2:
                 return self._last_crop_bounds
 
-        self._shift_hint_active = False
         self._last_crop_bounds = (x1, y1, x2, y2)
         self._last_frame_shape = target_shape
         return x1, y1, x2, y2
@@ -262,6 +261,7 @@ class AdaptiveROITracker:
             return frame, (0, 0, 0, 0)
 
         bounds = self.get_crop_bounds(frame.shape)
+        self._shift_hint_active = False
         x1, y1, x2, y2 = bounds
         if x2 <= x1 or y2 <= y1:
             return frame, (0, 0, 0, 0)

@@ -774,6 +774,59 @@ class TestExternalReviewFixes:
         assert "T-Zone Autonomic Pulse (rPPG)" in report_text
         assert "Frontalis Brow Elevation" in report_text
 
+    def test_backlight_face_roi_evaluation(self):
+        """LightingNormalizer lifts dark face ROI despite bright windshield background."""
+        prep = LightingNormalizer(low_light_threshold=60.0)
+        # Create a 200x200 frame with bright background (240) and dark face ROI (25)
+        frame = np.full((200, 200, 3), 240, dtype=np.uint8)
+        face_bbox = (50, 50, 150, 150)
+        frame[50:150, 50:150] = 25
+
+        # Without face_bbox, full-frame mean lum is high (~186 > 95), so gamma lift is NOT triggered
+        out_no_bbox = prep.process(frame.copy(), face_bbox=None)
+        # With face_bbox, face ROI luminance (<60.0) is evaluated, triggering gamma lift on dark face
+        out_with_bbox = prep.process(frame.copy(), face_bbox=face_bbox)
+
+        # The face ROI in out_with_bbox must be brighter than in out_no_bbox due to gamma lift
+        face_no_bbox_mean = out_no_bbox[50:150, 50:150].mean()
+        face_with_bbox_mean = out_with_bbox[50:150, 50:150].mean()
+        assert face_with_bbox_mean > face_no_bbox_mean
+
+    def test_split_sunlight_bilateral_balancing(self):
+        """Bilateral split-sunlight balancing equalizes face when |lum_left - lum_right| > 45."""
+        prep = LightingNormalizer()
+        frame = np.full((120, 160, 3), 100, dtype=np.uint8)
+        # Face ROI from x=40 to 120, y=20 to 100
+        # Left half of face (x=40..80) is dark (20) in shadow; right half (x=80..120) is sunlit (180)
+        frame[20:100, 40:80] = 20
+        frame[20:100, 80:120] = 180
+        face_bbox = (40, 20, 120, 100)
+
+        # Process with split-sunlight balancing
+        out = prep.process(frame.copy(), face_bbox=face_bbox)
+
+        # Check that the dark left side was lifted
+        out_roi_left = out[20:100, 40:80].mean()
+        orig_roi_left = frame[20:100, 40:80].mean()
+        assert out_roi_left > orig_roi_left + 15.0
+
+    def test_lighting_normalizer_face_bbox_none_and_degenerate(self):
+        """LightingNormalizer preserves bit-for-bit invariance when face_bbox=None and handles degenerate bboxes."""
+        prep = LightingNormalizer()
+        bgr = np.random.randint(10, 240, (100, 100, 3), dtype=np.uint8)
+        gray = np.random.randint(10, 240, (100, 100), dtype=np.uint8)
+
+        # Exact bit-for-bit equality with face_bbox=None
+        np.testing.assert_array_equal(prep.process(bgr), prep.process(bgr, face_bbox=None))
+        np.testing.assert_array_equal(prep.process(gray), prep.process(gray, face_bbox=None))
+
+        # Degenerate bboxes: out of bounds, inverted, tiny (<16px)
+        for degen_bbox in [(-50, -50, -10, -10), (50, 50, 30, 30), (10, 10, 20, 20), (500, 500, 600, 600)]:
+            out_degen_bgr = prep.process(bgr, face_bbox=degen_bbox)
+            out_degen_gray = prep.process(gray, face_bbox=degen_bbox)
+            assert out_degen_bgr.shape == bgr.shape
+            assert out_degen_gray.shape == gray.shape
+
 
 
 

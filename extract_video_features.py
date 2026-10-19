@@ -192,7 +192,12 @@ def extract_video_features(video_path: str,
             timestamp = (processed_count - 1) / fps
 
             # 1. Illumination preprocessing
-            processed_frame = prep.process(frame)
+            face_bbox = (
+                detector.roi_tracker.get_crop_bounds(frame.shape)
+                if detector.roi_tracker.is_tracking
+                else None
+            )
+            processed_frame = prep.process(frame, face_bbox=face_bbox)
 
             # 2. 478 3D facial landmark detection with iris refinement
             face_center = (detector.roi_tracker.cx, detector.roi_tracker.cy) if (detector.roi_tracker.is_tracking and detector.roi_tracker.cx is not None and detector.roi_tracker.cy is not None) else None

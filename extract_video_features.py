@@ -126,6 +126,9 @@ def extract_video_features(video_path: str,
         accel_threshold=config.head_accel_threshold,
         freeze_duration_ms=config.imu_freeze_ms,
         window_size=config.imu_accel_window,
+        continuous_accel_min=config.continuous_vibration_accel_min,
+        continuous_duration_sec=config.continuous_vibration_duration_s,
+        max_freeze_duty_cycle=config.max_freeze_duty_cycle,
     )
     stabilizer = KinematicStabilizer()
     filter_bank: Optional[OneEuroFilterBank] = None
@@ -225,8 +228,9 @@ def extract_video_features(video_path: str,
                     )
                     smooth_landmarks = landmarks
                 else:
+                    eff_vibration = max(stabilizer.vibration_score, 1.0 if imu_gate.continuous_vibration_active else 0.0)
                     smooth_landmarks = filter_bank.filter_landmarks(
-                        timestamp, landmarks, vibration_score=stabilizer.vibration_score
+                        timestamp, landmarks, vibration_score=eff_vibration
                     )
 
                 # 4. PnP 3D Head Pose Estimation & Normalization
@@ -241,6 +245,7 @@ def extract_video_features(video_path: str,
                     tvec=pnp.tvec if pnp_success else None,
                     euler_angles=euler if pnp_success else None,
                 )
+                eff_vibration = max(stabilizer.vibration_score, 1.0 if imu_gate.continuous_vibration_active else 0.0)
 
                 # 6. Feature extraction
                 features = extractor.compute(
@@ -255,7 +260,7 @@ def extract_video_features(video_path: str,
                     gating_reason=pose_state.gating_reason,
                     frame=frame,
                     image_landmarks=smooth_landmarks,
-                    vibration_score=stabilizer.vibration_score,
+                    vibration_score=eff_vibration,
                 )
 
                 # Online Personal Baseline Auto-Calibration

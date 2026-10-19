@@ -22,14 +22,20 @@ class FrameCapture:
     """Polymorphic video capture abstraction with threaded async capture for live cameras."""
 
     def __init__(self, source: Union[int, str] = 0,
-                 width: int = 1280, height: int = 720):
+                 width: int = 1280, height: int = 720,
+                 target_fps: float = 60.0,
+                 anti_motion_blur: bool = False):
         """
         Args:
             source: Camera index (int) or video file path (str).
             width: Requested frame width.
             height: Requested frame height.
+            target_fps: Target camera capture framerate (default 60.0).
+            anti_motion_blur: Enable low-exposure / anti-motion blur capture settings.
         """
         self.source = source
+        self.target_fps = target_fps
+        self.anti_motion_blur = anti_motion_blur
 
         is_camera = isinstance(source, int)
         if isinstance(source, str) and source.strip().isdigit():
@@ -50,6 +56,13 @@ class FrameCapture:
                 self.cap = cv2.VideoCapture(source)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            self.cap.set(cv2.CAP_PROP_FPS, target_fps)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if anti_motion_blur:
+                try:
+                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+                except Exception:
+                    pass
         else:
             self.cap = cv2.VideoCapture(source)
 

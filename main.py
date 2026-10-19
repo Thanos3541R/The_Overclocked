@@ -125,8 +125,13 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         source = args.source  # video file path
 
     # ── Initialize all components ──
-    print(f"[DMS] Initializing pipeline (source={source})...")
-    capture = FrameCapture(source=source, width=args.width, height=args.height)
+    capture = FrameCapture(
+        source=source,
+        width=args.width,
+        height=args.height,
+        target_fps=config.target_fps,
+        anti_motion_blur=config.anti_motion_blur,
+    )
     preprocessor = LightingNormalizer(
         clip_limit=config.clahe_clip_limit,
         tile_grid_size=config.clahe_tile_grid,
@@ -195,6 +200,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         accel_threshold=config.head_accel_threshold,
         freeze_duration_ms=config.imu_freeze_ms,
         window_size=config.imu_accel_window,
+        continuous_accel_min=config.continuous_vibration_accel_min,
+        continuous_duration_sec=config.continuous_vibration_duration_s,
+        max_freeze_duty_cycle=config.max_freeze_duty_cycle,
     )
     stabilizer = KinematicStabilizer()
 
@@ -343,6 +351,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             # ── Stage 3: Split-Bandwidth 1-Euro Temporal Filtering ──
             # Filter raw 2D/3D landmarks FIRST to eliminate detector sub-pixel jitter
             # before non-linear PnP optimization, preventing pose chatter.
+            eff_vibration = max(stabilizer.vibration_score, 1.0 if imu_gate.continuous_vibration_active else 0.0)
             if filter_bank is None:
                 filter_bank = OneEuroFilterBank(
                     t0=timestamp,
@@ -364,7 +373,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 smooth_landmarks = landmarks
             else:
                 smooth_landmarks = filter_bank.filter_landmarks(
-                    timestamp, landmarks, vibration_score=stabilizer.vibration_score
+                    timestamp, landmarks, vibration_score=eff_vibration
                 )
 
             # ── Stage 4: PnP Pose Estimation on Smoothed Landmarks ──
@@ -384,6 +393,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 euler_angles=euler if pnp_success else None,
             )
 
+            # Recompute eff_vibration in case imu_gate updated continuous_vibration_active
+            eff_vibration = max(stabilizer.vibration_score, 1.0 if imu_gate.continuous_vibration_active else 0.0)
+
             # ── Stage 8: Feature Extraction (Pass raw frame + un-rotated image_landmarks) ──
             features = extractor.compute(
                 landmarks=norm_landmarks,
@@ -397,7 +409,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 gating_reason=pose_state.gating_reason,
                 frame=frame,
                 image_landmarks=smooth_landmarks,
-                vibration_score=stabilizer.vibration_score,
+                vibration_score=eff_vibration,
             )
 
             # ── Online Personal Baseline Auto-Calibration ──

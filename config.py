@@ -23,7 +23,8 @@ class PipelineConfig:
     # oculomotor velocity measurement (eyelid downstroke 50-100ms, saccades 20-50ms),
     # >= 60 fps (preferably 90-120 fps) global-shutter camera hardware is required
     # to eliminate derivative quantization noise.
-    target_fps: float = 30.0
+    target_fps: float = 60.0
+    anti_motion_blur: bool = False
 
     # ── Camera Intrinsics & Angular Scaling ──
     camera_calibration_path: Optional[str] = None  # Optional path to JSON/NPZ with camera_matrix & dist_coeffs
@@ -100,9 +101,12 @@ class PipelineConfig:
     pursuit_window_sec: float = 5.0           # rolling window for pursuit fragmentation ratio  # [PLACEHOLDER]
 
     # ── Software IMU Gate ──
-    head_accel_threshold: float = 2.5  # m/s^2  # [PLACEHOLDER]
+    head_accel_threshold: float = 4.0  # m/s^2  # [PLACEHOLDER]
     imu_freeze_ms: float = 150.0      # freeze window after shock  # [PLACEHOLDER]
     imu_accel_window: int = 5          # 5-frame Savitzky-Golay polynomial window
+    continuous_vibration_accel_min: float = 1.5   # m/s^2 min acceleration for continuous vibration  # [PLACEHOLDER]
+    continuous_vibration_duration_s: float = 0.5  # duration (s) to activate continuous vibration mode  # [PLACEHOLDER]
+    max_freeze_duty_cycle: float = 0.25           # maximum freeze duty cycle over rolling 2.0s window  # [PLACEHOLDER]
 
     # ── Output ──
     save_csv: bool = False

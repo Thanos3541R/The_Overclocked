@@ -33,24 +33,39 @@ class SoftwareIMUGate:
          vertical chassis translation without intentional head rotation.
     """
 
-    def __init__(self, accel_threshold: float = 2.5,
+    def __init__(self, accel_threshold: float = 4.0,
                  freeze_duration_ms: float = 150.0,
                  max_rot_vel_for_shock: float = 20.0,
                  alpha: float = 0.65,
-                 window_size: int = 5):
+                 window_size: int = 5,
+                 continuous_accel_min: float = 1.5,
+                 continuous_accel_max: float = 4.0,
+                 continuous_duration_sec: float = 0.5,
+                 max_freeze_duty_cycle: float = 0.25,
+                 duty_cycle_window_sec: float = 2.0):
         """
         Args:
-            accel_threshold: Acceleration threshold in m/s² to trigger freeze.
+            accel_threshold: Acceleration threshold in m/s² to trigger shock freeze (default 4.0).
             freeze_duration_ms: Duration to freeze features after shock (ms).
             max_rot_vel_for_shock: Max head rotation speed (deg/s) for road shock.
             alpha: Low-pass filter weight for translation vector smoothing (0..1).
             window_size: Number of frames for acceleration estimation (default 5).
+            continuous_accel_min: Min acceleration (m/s²) to accumulate continuous vibration (default 1.5).
+            continuous_accel_max: Max acceleration (m/s²) for continuous vibration band (default 4.0).
+            continuous_duration_sec: Duration (s) of sustained vibration required to activate continuous mode (default 0.5).
+            max_freeze_duty_cycle: Max freeze duty cycle over rolling window before capping freeze (default 0.25).
+            duty_cycle_window_sec: Rolling window size (s) for freeze duty cycle calculation (default 2.0).
         """
         self.accel_threshold = accel_threshold
         self.freeze_duration_sec = freeze_duration_ms / 1000.0
         self.max_rot_vel_for_shock = max_rot_vel_for_shock
         self.alpha = alpha
         self.window_size = window_size
+        self.continuous_accel_min = continuous_accel_min
+        self.continuous_accel_max = continuous_accel_max
+        self.continuous_duration_sec = continuous_duration_sec
+        self.max_freeze_duty_cycle = max_freeze_duty_cycle
+        self.duty_cycle_window_sec = duty_cycle_window_sec
 
         self.t_smooth_prev: Optional[np.ndarray] = None
         self.t_vel_prev: Optional[np.ndarray] = None
@@ -59,6 +74,15 @@ class SoftwareIMUGate:
         self._freeze_until: float = 0.0
         self._missing_frames: int = 0
         self._history: Deque[Tuple[float, np.ndarray]] = deque(maxlen=self.window_size)
+
+        # Duty cycle tracking over rolling window
+        self._freeze_intervals: Deque[Tuple[float, float]] = deque()
+        self._duty_cycle_exceeded: bool = False
+
+        # Continuous vibration tracking
+        self._vib_window_start: Optional[float] = None
+        self._last_vib_timestamp: Optional[float] = None
+        self._vib_detected_from_accel: bool = False
 
     @staticmethod
     def _wrap_angle_deg(delta: np.ndarray) -> np.ndarray:
@@ -118,6 +142,23 @@ class SoftwareIMUGate:
             logger.debug("Savitzky-Golay acceleration estimation failed: %s", exc, exc_info=True)
             return 0.0
 
+    def _compute_freeze_duty_cycle(self, timestamp: float) -> float:
+        """Compute the fraction of time frozen in the [timestamp - duty_cycle_window_sec, timestamp] window."""
+        if not self._freeze_intervals:
+            return 0.0
+
+        win_start = timestamp - self.duty_cycle_window_sec
+        while self._freeze_intervals and self._freeze_intervals[0][1] <= win_start:
+            self._freeze_intervals.popleft()
+
+        total_frozen = 0.0
+        for start_t, end_t in self._freeze_intervals:
+            overlap = min(end_t, timestamp) - max(start_t, win_start)
+            if overlap > 0.0:
+                total_frozen += overlap
+
+        return total_frozen / max(self.duty_cycle_window_sec, 1e-6)
+
     def update(self, timestamp: float,
                tvec: Optional[np.ndarray],
                euler_angles: Optional[Tuple[float, float, float]] = None) -> bool:
@@ -132,6 +173,17 @@ class SoftwareIMUGate:
             True if currently in freeze mode (shock detected),
             False if operating normally.
         """
+        # 0. Check freeze duty cycle cap over rolling window
+        duty_cycle = self._compute_freeze_duty_cycle(timestamp)
+        if duty_cycle >= self.max_freeze_duty_cycle:
+            self._duty_cycle_exceeded = True
+            if timestamp < self._freeze_until:
+                self._freeze_until = timestamp
+                if self._freeze_intervals:
+                    self._freeze_intervals[-1] = (self._freeze_intervals[-1][0], timestamp)
+        else:
+            self._duty_cycle_exceeded = False
+
         if tvec is None:
             self._missing_frames += 1
             if self._missing_frames > 2 or (self.last_timestamp is not None and (timestamp - self.last_timestamp) > 0.5):
@@ -140,7 +192,7 @@ class SoftwareIMUGate:
                 self.t_vel_prev = None
                 self.last_euler = None
                 self._history.clear()
-            return timestamp < self._freeze_until
+            return (timestamp < self._freeze_until) and (not self._duty_cycle_exceeded)
 
         pos = np.asarray(tvec, dtype=np.float64).flatten()[:3]
         self._missing_frames = 0
@@ -159,7 +211,7 @@ class SoftwareIMUGate:
             self._history.clear()
             self._history.append((timestamp, self.t_smooth_prev.copy()))
             self.last_timestamp = timestamp
-            return timestamp < self._freeze_until
+            return (timestamp < self._freeze_until) and (not self._duty_cycle_exceeded)
 
         dt = max(timestamp - self.last_timestamp, 1e-4)
 
@@ -179,28 +231,56 @@ class SoftwareIMUGate:
                 rot_vel = float(np.linalg.norm(euler_diff / dt))
             self.last_euler = curr_euler.copy()
 
-        # 4. Decoupled Shock Gate: Only trigger shock if linear acceleration is high
-        # AND rotational velocity is low (rules out intentional head turns).
-        # Only arm a new freeze if not already within an active freeze window.
-        is_pothole_shock = (linear_accel_m_s2 > self.accel_threshold) and (
-            euler_angles is None or rot_vel < self.max_rot_vel_for_shock
-        )
+        # 4. Continuous Cabin Vibration tracking:
+        # Sustained oscillatory acceleration (1.5 - 4.0 m/s²) for > 500ms
+        low_rot = (euler_angles is None or rot_vel < self.max_rot_vel_for_shock)
+        if low_rot and linear_accel_m_s2 >= self.continuous_accel_min:
+            if self._vib_window_start is None:
+                self._vib_window_start = timestamp
+            self._last_vib_timestamp = timestamp
+            if (timestamp - self._vib_window_start) >= self.continuous_duration_sec:
+                self._vib_detected_from_accel = True
+        elif self._last_vib_timestamp is not None:
+            if (timestamp - self._last_vib_timestamp) > 0.25:
+                self._vib_window_start = None
+            if (timestamp - self._last_vib_timestamp) > self.continuous_duration_sec:
+                self._vib_detected_from_accel = False
+                self._last_vib_timestamp = None
 
-        if is_pothole_shock and timestamp >= self._freeze_until:
-            self._freeze_until = timestamp + self.freeze_duration_sec
+        # 5. Decoupled Shock Gate: Only trigger shock if linear acceleration is high (> 4.0 m/s²)
+        # AND rotational velocity is low (rules out intentional head turns).
+        # Only arm a new freeze if not already within an active freeze window
+        # AND freeze duty cycle cap is not exceeded.
+        is_pothole_shock = (linear_accel_m_s2 > self.accel_threshold) and low_rot
+
+        if is_pothole_shock and timestamp >= self._freeze_until and not self._duty_cycle_exceeded:
+            freeze_end = timestamp + self.freeze_duration_sec
+            self._freeze_until = freeze_end
+            if self._freeze_intervals and timestamp <= self._freeze_intervals[-1][1]:
+                self._freeze_intervals[-1] = (
+                    self._freeze_intervals[-1][0],
+                    max(self._freeze_intervals[-1][1], freeze_end)
+                )
+            else:
+                self._freeze_intervals.append((timestamp, freeze_end))
 
         # Update state
         self.t_smooth_prev = t_smooth
         self.last_timestamp = timestamp
 
-        return timestamp < self._freeze_until
+        return (timestamp < self._freeze_until) and (not self._duty_cycle_exceeded)
 
     @property
     def is_frozen(self) -> bool:
         """Check if currently in freeze state using pipeline timestamp."""
         if self.last_timestamp is None:
             return False
-        return self.last_timestamp < self._freeze_until
+        return (self.last_timestamp < self._freeze_until) and (not self._duty_cycle_exceeded)
+
+    @property
+    def continuous_vibration_active(self) -> bool:
+        """True if sustained cabin vibration (1.5-4.0 m/s² for > 500ms) or duty cycle cap exceeded."""
+        return self._vib_detected_from_accel or self._duty_cycle_exceeded
 
     def reset(self):
         """Reset gate state."""
@@ -211,3 +291,8 @@ class SoftwareIMUGate:
         self._freeze_until = 0.0
         self._missing_frames = 0
         self._history.clear()
+        self._freeze_intervals.clear()
+        self._duty_cycle_exceeded = False
+        self._vib_window_start = None
+        self._last_vib_timestamp = None
+        self._vib_detected_from_accel = False

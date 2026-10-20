@@ -251,7 +251,7 @@ class TestClassifierAndBaselineDeltaEnhancements:
     def test_subject_invariant_delta_features(self):
         """Baseline delta features must normalize individual resting EAR differences."""
         X_3d, y, subjects, raw_feat_names = generate_synthetic_dataset(n_subjects=10, windows_per_subject=24)
-        X_2d, flat_names = compute_window_summary_features(X_3d, raw_feat_names, subjects=subjects)
+        X_2d, flat_names = compute_window_summary_features(X_3d, raw_feat_names, subjects=subjects, apply_subject_deltas=True)
 
         # Verify delta features were created
         has_delta = any("delta_base" in n for n in flat_names)

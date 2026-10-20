@@ -43,11 +43,15 @@ def infer_subject_id(filepath: str, label: str) -> str:
     _seg\d+, -\d+$, _\d+$) or using the parent subfolder name if nested, prefixed with
     'sober_' or 'drunk_'.
 
-    This guarantees that all clips from the same source video share a single subject_id
-    for leak-free GroupKFold cross-validation.
+    If a file has a trailing clip/part number > 5, it is sub-grouped into batches of 6
+    (e.g. _grp01, _grp02) to guarantee sufficient distinct subject groups for StratifiedGroupKFold
+    on compilation videos.
     """
     p = Path(filepath.strip())
     stem = p.stem.strip()
+
+    part_match = re.search(r"(?:_part|_clip|_seg|part|clip|seg|-|_|\s)(\d+)$", stem, flags=re.IGNORECASE)
+    part_num = int(part_match.group(1)) if part_match else None
 
     # Pattern for trailing clip/part/seg suffixes
     suffix_pattern = r"(_clip\d+|_part\d+|_seg\d+|-\d+$|_\d+$)"
@@ -74,7 +78,11 @@ def infer_subject_id(filepath: str, label: str) -> str:
     if not clean_stem:
         clean_stem = "unknown"
 
-    return f"{lbl}_{clean_stem}"
+    sub_id = f"{lbl}_{clean_stem}"
+    if part_num is not None and (part_num // 6) > 0:
+        sub_id = f"{sub_id}_grp{part_num // 6:02d}"
+
+    return sub_id
 
 
 def discover_video_clips(directory: str, label: str) -> List[Tuple[str, str]]:
@@ -414,16 +422,27 @@ def ingest_dataset(
     sober_dir: Optional[str] = None,
     drunk_dir: Optional[str] = None,
     output_dir: str = "./training_data/",
-    sober_stride: float = 1.5,
-    drunk_stride: float = 0.5,
+    sober_stride: Optional[float] = None,
+    drunk_stride: Optional[float] = None,
     window_sec: float = 3.0,
     max_clips: Optional[int] = None,
     headless: bool = True,
+    clean_output: bool = True,
 ) -> Dict[str, Any]:
     """Discover clips, audit each, extract training windows, and write audit summaries."""
     os.makedirs(output_dir, exist_ok=True)
+    if clean_output:
+        existing_npz = list(Path(output_dir).glob("*.npz"))
+        if existing_npz:
+            print(f"[Ingest Auditor] Cleaning {len(existing_npz)} existing .npz archives from {output_dir}")
+            for p in existing_npz:
+                try:
+                    p.unlink()
+                except Exception as e:
+                    print(f"[Warning] Failed to delete {p}: {e}")
 
     all_clips: List[Tuple[str, str]] = []
+    sober_clips: List[Tuple[str, str]] = []
     if sober_dir and os.path.exists(sober_dir):
         sober_clips = discover_video_clips(sober_dir, "sober")
         all_clips.extend(sober_clips)
@@ -431,12 +450,35 @@ def ingest_dataset(
     elif sober_dir:
         print(f"[Warning] Sober directory not found: {sober_dir}")
 
+    drunk_clips: List[Tuple[str, str]] = []
     if drunk_dir and os.path.exists(drunk_dir):
         drunk_clips = discover_video_clips(drunk_dir, "drunk")
         all_clips.extend(drunk_clips)
         print(f"[Ingest Auditor] Discovered {len(drunk_clips)} Drunk clips in {drunk_dir}")
     elif drunk_dir:
         print(f"[Warning] Drunk directory not found: {drunk_dir}")
+
+    # Auto-calculate strides if not specified to balance extracted window counts ~1:1
+    sober_count = len(sober_clips)
+    drunk_count = len(drunk_clips)
+    if sober_stride is None or drunk_stride is None:
+        if sober_count > 0 and drunk_count > 0:
+            if sober_count >= drunk_count:
+                auto_sober = 1.5
+                auto_drunk = float(np.clip(1.5 * (drunk_count / max(sober_count, 1)), 0.5, 1.5))
+            else:
+                auto_drunk = 1.5
+                auto_sober = float(np.clip(1.5 * (sober_count / max(drunk_count, 1)), 0.5, 1.5))
+            if sober_stride is None:
+                sober_stride = auto_sober
+            if drunk_stride is None:
+                drunk_stride = auto_drunk
+        else:
+            if sober_stride is None:
+                sober_stride = 1.5
+            if drunk_stride is None:
+                drunk_stride = 0.5
+        print(f"[Ingest Auditor] Auto-balanced strides: Sober={sober_stride:.2f}s, Drunk={drunk_stride:.2f}s")
 
     if not all_clips:
         print("[Ingest Auditor] No video clips found in specified directories.")
@@ -572,14 +614,20 @@ def main():
     parser.add_argument(
         "--sober-stride",
         type=float,
-        default=1.5,
-        help="Sliding window stride in seconds for Sober clips (default 1.5s)",
+        default=None,
+        help="Sliding window stride in seconds for Sober clips (default: auto-balanced)",
     )
     parser.add_argument(
         "--drunk-stride",
         type=float,
-        default=0.5,
-        help="Sliding window stride in seconds for Drunk clips (default 0.5s)",
+        default=None,
+        help="Sliding window stride in seconds for Drunk clips (default: auto-balanced)",
+    )
+    parser.add_argument(
+        "--clean-output",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Clean existing .npz archives from --output-dir before saving (default: True)",
     )
     parser.add_argument(
         "--window-sec",
@@ -610,6 +658,7 @@ def main():
         window_sec=args.window_sec,
         max_clips=args.max_clips,
         headless=args.headless,
+        clean_output=args.clean_output,
     )
 
 

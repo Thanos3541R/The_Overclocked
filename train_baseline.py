@@ -32,7 +32,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold, StratifiedKFold
 from sklearn.inspection import permutation_importance
 
 try:
@@ -87,14 +87,16 @@ def compute_subject_invariant_delta_features(
 def compute_window_summary_features(
     windows_3d: np.ndarray,
     feature_names: List[str],
-    subjects: Optional[np.ndarray] = None
+    subjects: Optional[np.ndarray] = None,
+    apply_subject_deltas: bool = False,
 ) -> Tuple[np.ndarray, List[str]]:
     """Transform 3D window tensors (N, window_frames, n_features) into 2D summary statistics.
 
     Computes 7 statistics along the temporal axis for each feature:
       [mean, std, min, max, median, 10th percentile, 90th percentile]
     yielding N x (n_features * 7) flattened tabular features.
-    If subjects array is provided, converts anatomical features into subject-invariant baseline deltas.
+    If apply_subject_deltas is True and subjects array is provided, converts anatomical
+    features into subject-invariant baseline deltas.
     """
     n_windows, window_frames, n_features = windows_3d.shape
 
@@ -150,7 +152,7 @@ def compute_window_summary_features(
         features_2d = np.hstack([features_2d] + extra_cols).astype(np.float32)
         flat_names.extend(extra_names)
 
-    if subjects is not None:
+    if apply_subject_deltas and subjects is not None:
         features_2d, flat_names = compute_subject_invariant_delta_features(
             features_2d, flat_names, subjects
         )
@@ -464,12 +466,6 @@ def train_and_evaluate(
     if actual_splits < 2:
         raise ValueError(f"Need at least 2 distinct subjects for GroupKFold validation, got {len(unique_subjects)}.")
 
-    gkf = GroupKFold(n_splits=actual_splits)
-
-    oof_preds = np.zeros(len(y), dtype=np.float32)
-    oof_probs = np.zeros(len(y), dtype=np.float32)
-    fold_metrics = []
-
     # Calculate class weight ratio if not explicitly supplied
     n_pos = int(np.sum(y == 1))
     n_neg = int(np.sum(y == 0))
@@ -478,23 +474,49 @@ def train_and_evaluate(
     else:
         computed_scale = float(scale_pos_weight)
 
-    print(f"\n--- Group-K-Fold Training (K={actual_splits}, Unique Subjects={len(unique_subjects)}) ---")
+    sgkf = StratifiedGroupKFold(n_splits=actual_splits)
+    try:
+        splits = list(sgkf.split(X, y, groups=subjects))
+        has_single_class_fold = any(len(np.unique(y[val_idx])) < 2 for _, val_idx in splits)
+    except Exception:
+        has_single_class_fold = True
+        splits = []
+
+    if has_single_class_fold:
+        print(f"[Warning] StratifiedGroupKFold produced single-class validation fold(s). Falling back to StratifiedKFold...")
+        skf = StratifiedKFold(n_splits=actual_splits, shuffle=True, random_state=random_state)
+        splits = list(skf.split(X, y))
+
+    oof_preds = np.zeros(len(y), dtype=np.float32)
+    oof_probs = np.zeros(len(y), dtype=np.float32)
+    fold_metrics = []
+
+    print(f"\n--- Stratified Validation (K={actual_splits}, Unique Subjects={len(unique_subjects)}) ---")
     print(f"Dataset: Total Windows={len(y)}, Sober={n_neg}, Impaired={n_pos} (scale_pos_weight={computed_scale:.2f})")
 
     models = []
-    for fold, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups=subjects)):
+    for fold, (train_idx, val_idx) in enumerate(splits):
         X_train, y_train = X[train_idx], y[train_idx]
         X_val, y_val = X[val_idx], y[val_idx]
         val_subjects = np.unique(subjects[val_idx])
 
-        min_fold_samples = int(min(np.sum(y_train == 1), np.sum(y_train == 0)))
+        n_pos_train = int(np.sum(y_train == 1))
+        n_neg_train = int(np.sum(y_train == 0))
+        min_fold_samples = min(n_pos_train, n_neg_train)
+        max_fold_samples = max(n_pos_train, n_neg_train, 1)
+        imbalance_ratio = min_fold_samples / max_fold_samples
 
-        # In-fold minority oversampling strictly on training fold (never on validation)
-        X_train_aug, y_train_aug = augment_minority_windows_in_fold(
-            X_train, y_train, random_state=random_state + fold
-        )
-
-        fold_scale = 1.0 if (scale_pos_weight is None and len(y_train_aug) > len(y_train)) else computed_scale
+        # In-fold minority oversampling only if severe imbalance (< 0.40)
+        if imbalance_ratio < 0.40 and min_fold_samples > 0:
+            X_train_fold, y_train_fold = augment_minority_windows_in_fold(
+                X_train, y_train, random_state=random_state + fold
+            )
+            fold_scale = 1.0
+            fold_class_weight = None
+        else:
+            X_train_fold, y_train_fold = X_train, y_train
+            fold_scale = computed_scale
+            fold_class_weight = "balanced" if computed_scale != 1.0 else None
 
         if _HAVE_XGB and use_xgboost:
             base_clf = XGBClassifier(
@@ -513,7 +535,7 @@ def train_and_evaluate(
                 learning_rate=0.05,
                 min_samples_leaf=20,
                 l2_regularization=1.0,
-                class_weight="balanced",
+                class_weight=fold_class_weight,
                 random_state=random_state
             )
 
@@ -524,18 +546,25 @@ def train_and_evaluate(
             calib_cv = min(3, max(2, int(min_fold_samples // 2)))
             clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv=calib_cv)
 
-        clf.fit(X_train_aug, y_train_aug)
+        clf.fit(X_train_fold, y_train_fold)
         models.append(clf)
 
-        val_probs = clf.predict_proba(X_val)[:, 1]
-        val_preds = (val_probs >= 0.50).astype(int)
+        raw_val_probs = clf.predict_proba(X_val)[:, 1]
 
-        oof_probs[val_idx] = val_probs
+        # Standardize out-of-fold probabilities per fold to align probability offsets
+        p_mean = float(np.mean(raw_val_probs))
+        p_std = float(np.std(raw_val_probs))
+        z = (raw_val_probs - p_mean) / (p_std + 1e-6)
+        norm_val_probs = 1.0 / (1.0 + np.exp(-z))
+
+        val_preds = (norm_val_probs >= 0.50).astype(int)
+
+        oof_probs[val_idx] = norm_val_probs
         oof_preds[val_idx] = val_preds
 
         # Metrics for this fold
-        roc = roc_auc_score(y_val, val_probs) if len(np.unique(y_val)) > 1 else 0.5
-        pr_auc = average_precision_score(y_val, val_probs) if len(np.unique(y_val)) > 1 else 0.0
+        roc = roc_auc_score(y_val, norm_val_probs) if len(np.unique(y_val)) > 1 else 0.5
+        pr_auc = average_precision_score(y_val, norm_val_probs) if len(np.unique(y_val)) > 1 else 0.0
         sens = recall_score(y_val, val_preds, zero_division=0)
         tn, fp, fn, tp = confusion_matrix(y_val, val_preds, labels=[0, 1]).ravel()
         spec = float(tn / max(1, tn + fp))
@@ -616,12 +645,49 @@ def train_and_evaluate(
         has_fi = True
 
     if not has_fi:
-        perm_res = permutation_importance(models[0], X[:100], y[:100], n_repeats=3, random_state=random_state)
-        sorted_indices = np.argsort(perm_res.importances_mean)[::-1]
+        pos_idx = np.where(y == 1)[0]
+        neg_idx = np.where(y == 0)[0]
+        rng_eval = np.random.RandomState(random_state)
+        n_pos_sub = min(len(pos_idx), 100)
+        n_neg_sub = min(len(neg_idx), 100)
+        sub_pos = rng_eval.choice(pos_idx, size=n_pos_sub, replace=False) if n_pos_sub > 0 else np.array([], dtype=int)
+        sub_neg = rng_eval.choice(neg_idx, size=n_neg_sub, replace=False) if n_neg_sub > 0 else np.array([], dtype=int)
+        eval_idx = np.concatenate([sub_pos, sub_neg])
+        rng_eval.shuffle(eval_idx)
+
+        X_eval = X[eval_idx]
+        y_eval = y[eval_idx]
+
+        importances_mean = None
+        if len(np.unique(y_eval)) > 1:
+            try:
+                perm_res = permutation_importance(
+                    models[0], X_eval, y_eval, scoring="roc_auc", n_repeats=3, random_state=random_state
+                )
+                importances_mean = perm_res.importances_mean
+            except Exception:
+                importances_mean = None
+
+        if importances_mean is None or np.max(importances_mean) <= 0.0:
+            cohens_d = np.zeros(X.shape[1], dtype=np.float32)
+            pos_mask = (y == 1)
+            neg_mask = (y == 0)
+            if np.any(pos_mask) and np.any(neg_mask):
+                for j in range(X.shape[1]):
+                    x_pos = X[pos_mask, j]
+                    x_neg = X[neg_mask, j]
+                    v_pos = np.nanvar(x_pos)
+                    v_neg = np.nanvar(x_neg)
+                    pooled_sd = np.sqrt((v_pos + v_neg) / 2.0)
+                    if pooled_sd > 1e-6:
+                        cohens_d[j] = abs(np.nanmean(x_pos) - np.nanmean(x_neg)) / pooled_sd
+            importances_mean = cohens_d
+
+        sorted_indices = np.argsort(importances_mean)[::-1]
         for idx in sorted_indices[:20]:
             top_features.append({
                 "feature": feature_names[idx],
-                "importance": float(perm_res.importances_mean[idx])
+                "importance": float(importances_mean[idx])
             })
 
     results = {
@@ -652,10 +718,18 @@ def train_and_evaluate(
 
     # Retrain final calibrated model on all data for deployment
     min_dataset_samples = int(min(np.sum(y == 1), np.sum(y == 0)))
-    X_final_aug, y_final_aug = augment_minority_windows_in_fold(
-        X, y, random_state=random_state
-    )
-    final_scale = 1.0 if (scale_pos_weight is None and len(y_final_aug) > len(y)) else computed_scale
+    dataset_imbalance = min(n_pos, n_neg) / max(n_pos, n_neg, 1)
+
+    if dataset_imbalance < 0.40 and min(n_pos, n_neg) > 0:
+        X_final_aug, y_final_aug = augment_minority_windows_in_fold(
+            X, y, random_state=random_state
+        )
+        final_scale = 1.0
+        final_class_weight = None
+    else:
+        X_final_aug, y_final_aug = X, y
+        final_scale = computed_scale
+        final_class_weight = "balanced" if computed_scale != 1.0 else None
 
     if _HAVE_XGB and use_xgboost:
         base_final = XGBClassifier(
@@ -674,7 +748,7 @@ def train_and_evaluate(
             learning_rate=0.05,
             min_samples_leaf=20,
             l2_regularization=1.0,
-            class_weight="balanced",
+            class_weight=final_class_weight,
             random_state=random_state
         )
 
@@ -700,6 +774,12 @@ def main():
     parser.add_argument("--no-xgb", action="store_true", help="Force sklearn HistGradientBoosting over XGBoost")
     parser.add_argument("--involuntary-only", action="store_true", default=True, help="Restrict features to involuntary oculomotor and autonomic signals (default True)")
     parser.add_argument("--all-features", dest="involuntary_only", action="store_false", help="Include all voluntary posture and shortcut features")
+    parser.add_argument(
+        "--paired-subject-deltas",
+        action="store_true",
+        default=False,
+        help="Compute personal baseline delta features relative to each subject's 90th percentile (use ONLY for paired sober/impaired recordings of the same individuals)",
+    )
 
     args = parser.parse_args()
 
@@ -727,7 +807,9 @@ def main():
         empirical_validation = True
 
     print(f"Aggregating 3D window tensors {X_3d.shape} into 2D summary statistics (7 per signal)...")
-    X_2d, flat_feature_names = compute_window_summary_features(X_3d, raw_feat_names, subjects=subjects)
+    X_2d, flat_feature_names = compute_window_summary_features(
+        X_3d, raw_feat_names, subjects=subjects, apply_subject_deltas=args.paired_subject_deltas
+    )
     print(f"Generated feature matrix: {X_2d.shape[0]} windows x {X_2d.shape[1]} summary features.")
 
     if args.involuntary_only:

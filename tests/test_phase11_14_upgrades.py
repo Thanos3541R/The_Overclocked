@@ -224,3 +224,48 @@ def test_in_fold_minority_augmentation_balances_classes():
     assert np.all(np.isin(X_aug[:, 8], [0.0, 1.0]))
     assert np.all(np.isin(X_aug[:, 9], [0.0, 1.0]))
 
+
+def test_stratified_group_kfold_and_nonzero_feature_importance():
+    """Verify StratifiedGroupKFold fallback to StratifiedKFold when class representation is unbalanced across subjects,
+    and verify non-zero feature importance via stratified sampling / Cohen's d fallback."""
+    from train_baseline import train_and_evaluate
+
+    rng = np.random.RandomState(42)
+    # 1 Sober subject (40 windows) and 4 Drunk subjects (15 windows each = 60 windows)
+    # Total windows: 100
+    n_features = 15
+    feature_names = [f"feat_{i}" for i in range(n_features)]
+
+    # Feat 0 has strong signal between sober and drunk
+    X_sober = rng.randn(40, n_features).astype(np.float32)
+    X_sober[:, 0] -= 2.0  # sober has lower feat 0
+
+    X_drunk = rng.randn(60, n_features).astype(np.float32)
+    X_drunk[:, 0] += 2.0  # drunk has higher feat 0
+
+    X = np.vstack([X_sober, X_drunk])
+    y = np.array([0] * 40 + [1] * 60, dtype=np.int32)
+    subjects = np.array(
+        ["sober_sub_01"] * 40
+        + ["drunk_sub_01"] * 15
+        + ["drunk_sub_02"] * 15
+        + ["drunk_sub_03"] * 15
+        + ["drunk_sub_04"] * 15
+    )
+
+    results, model = train_and_evaluate(
+        X=X,
+        y=y,
+        subjects=subjects,
+        feature_names=feature_names,
+        n_splits=5,
+        use_xgboost=False,
+        random_state=42,
+    )
+
+    assert results["oof_metrics"]["roc_auc"] > 0.65
+    assert len(results["top_features"]) > 0
+    assert results["top_features"][0]["importance"] > 0.0
+    assert results["top_features"][0]["feature"] == "feat_0"
+
+

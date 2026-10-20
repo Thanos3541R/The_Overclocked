@@ -269,3 +269,38 @@ def test_stratified_group_kfold_and_nonzero_feature_importance():
     assert results["top_features"][0]["feature"] == "feat_0"
 
 
+def test_filter_involuntary_features_excludes_static_flushing_ratio():
+    """Verify filter_involuntary_features excludes static facial_flushing_ratio_* while keeping
+    dynamic vasodilation changes: flushing_delta_* and facial_flushing_ratio_std."""
+    from train_baseline import filter_involuntary_features
+
+    feat_names = [
+        "head_yaw_mean",
+        "head_yaw_std",
+        "facial_flushing_ratio_mean",
+        "facial_flushing_ratio_median",
+        "facial_flushing_ratio_min",
+        "facial_flushing_ratio_max",
+        "facial_flushing_ratio_std",
+        "flushing_delta_mean",
+        "flushing_delta_std",
+        "ear_avg_mean",
+        "saccade_velocity_mean",
+    ]
+    X_dummy = np.zeros((10, len(feat_names)), dtype=np.float32)
+
+    X_filtered, kept_names = filter_involuntary_features(X_dummy, feat_names)
+
+    assert "facial_flushing_ratio_mean" not in kept_names
+    assert "facial_flushing_ratio_median" not in kept_names
+    assert "facial_flushing_ratio_min" not in kept_names
+    assert "facial_flushing_ratio_max" not in kept_names
+    assert "facial_flushing_ratio_std" in kept_names
+    assert "flushing_delta_mean" in kept_names
+    assert "flushing_delta_std" in kept_names
+    assert "head_yaw_std" in kept_names
+    assert "head_yaw_mean" not in kept_names
+    assert X_filtered.shape[1] == len(kept_names)
+
+
+

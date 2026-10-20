@@ -167,16 +167,17 @@ def filter_involuntary_features(
     """Filter 2D feature matrix to retain only involuntary micromotions and autonomic signals.
 
     Excludes raw voluntary/posture shortcut columns (head_yaw_*, head_pitch_*, head_roll_*,
-    mar_*, left_iris_x_*, left_iris_y_*, right_iris_x_*, right_iris_y_*, and imu_gated_*),
-    retaining only head tremor/instability (head_yaw_std, head_pitch_std, head_roll_std)
-    and all involuntary oculomotor/autonomic features.
+    mar_*, left_iris_x_*, left_iris_y_*, right_iris_x_*, right_iris_y_*, imu_gated_*, and
+    static room color temperature facial_flushing_ratio_*), retaining only head tremor/instability
+    (head_yaw_std, head_pitch_std, head_roll_std), vasodilation change (facial_flushing_ratio_std,
+    flushing_delta_*), and all involuntary oculomotor/autonomic features.
     """
     keep_indices = []
     keep_names = []
 
     for idx, name in enumerate(feature_names):
-        # Retain head instability/tremor standard deviation
-        if name in ("head_yaw_std", "head_pitch_std", "head_roll_std"):
+        # Retain head instability/tremor standard deviation and vasodilation fluctuation
+        if name in ("head_yaw_std", "head_pitch_std", "head_roll_std", "facial_flushing_ratio_std"):
             keep_indices.append(idx)
             keep_names.append(name)
             continue
@@ -195,6 +196,10 @@ def filter_involuntary_features(
 
         # Exclude gating mask shortcut
         if name.startswith("imu_gated_"):
+            continue
+
+        # Exclude static room color temperature (keeping facial_flushing_ratio_std and flushing_delta_*)
+        if name.startswith("facial_flushing_ratio_"):
             continue
 
         # Exclude Section B voluntary/gaming and validity-mask prefixes when involuntary-only is active

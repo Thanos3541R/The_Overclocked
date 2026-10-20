@@ -303,4 +303,74 @@ def test_filter_involuntary_features_excludes_static_flushing_ratio():
     assert X_filtered.shape[1] == len(kept_names)
 
 
+def test_load_dataset_from_npz_quarantines_contaminated_and_duplicates(tmp_path):
+    """Verify load_dataset_from_npz quarantines mislabeled drunk-in-sober and duplicate (1) archives."""
+    from train_baseline import load_dataset_from_npz
+
+    feat = np.ones((2, 90, 10), dtype=np.float32)
+    names = [f"feat_{i}" for i in range(10)]
+    files = {
+        "sober_clean_01.npz": ("sober", "sub_sober1"),
+        "sober_MY DRUNK GIRLFRIEND_part01.npz": ("sober", "sub_drunk_gf"),
+        "sober_Adults Get Drunk For The First Time_part02.npz": ("sober", "sub_adults"),
+        "sober_duplicate (1).npz": ("sober", "sub_dup"),
+        "drunk_clean_01.npz": ("drunk", "sub_drunk1"),
+    }
+    paths = []
+    for fname, (lbl, sub) in files.items():
+        p = tmp_path / fname
+        np.savez(
+            str(p),
+            features=feat,
+            feature_names=np.array(names),
+            labels=np.array([lbl, lbl]),
+            subject_ids=np.array([sub, sub]),
+            timestamps=np.zeros((2, 90)),
+        )
+        paths.append(str(p))
+
+    # With clean_contaminated=True (default), 3 contaminated/duplicate files must be excluded
+    X_clean, y_clean, subs_clean, _ = load_dataset_from_npz(paths, clean_contaminated=True)
+    assert len(X_clean) == 4  # 2 files * 2 windows
+    assert set(subs_clean) == {"sub_sober1", "sub_drunk1"}
+
+    # With clean_contaminated=False, all 5 files must be loaded
+    X_all, y_all, subs_all, _ = load_dataset_from_npz(paths, clean_contaminated=False)
+    assert len(X_all) == 10  # 5 files * 2 windows
+
+
+def test_downsample_majority_by_subject_and_youdens_j():
+    """Verify downsample_majority_by_subject bounds 5:1 imbalanced folds to 1.25x and Youden's J calibration."""
+    from train_baseline import downsample_majority_by_subject, train_and_evaluate
+
+    rng = np.random.RandomState(42)
+    n_pos = 40
+    n_neg = 240  # 6:1 ratio
+
+    X_neg = rng.randn(n_neg, 6).astype(np.float32)
+    X_pos = rng.randn(n_pos, 6).astype(np.float32) + 1.5
+
+    y_train = np.array([0] * n_neg + [1] * n_pos, dtype=np.int32)
+    train_subs = np.array([f"sober_sub_{i%8}" for i in range(n_neg)] + [f"drunk_sub_{i%4}" for i in range(n_pos)])
+    X_train = np.vstack([X_neg, X_pos])
+
+    X_down, y_down = downsample_majority_by_subject(
+        X_train, y_train, train_subjects=train_subs, target_ratio=1.25, random_state=42
+    )
+
+    # Downsampled negatives must equal 1.25 * n_pos = 50
+    assert np.sum(y_down == 1) == n_pos
+    assert np.sum(y_down == 0) == int(1.25 * n_pos)
+    assert len(y_down) == n_pos + int(1.25 * n_pos)
+
+    # Cross-validation training with Youden's J calibration
+    results, _ = train_and_evaluate(
+        X_train, y_train, train_subs, [f"f_{i}" for i in range(6)], n_splits=4, use_xgboost=False, random_state=42
+    )
+    opt = results["oof_metrics"]["optimal_threshold"]
+    assert 0.10 <= opt["threshold"] <= 0.85
+    assert opt["balanced_accuracy"] > 0.65
+
+
+
 

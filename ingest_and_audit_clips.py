@@ -8,6 +8,7 @@ saves valid .npz training archives, and outputs comprehensive audit summaries
 (dataset_audit_summary.csv and dataset_audit_summary.json).
 """
 import argparse
+import csv
 import json
 import os
 import re
@@ -546,26 +547,26 @@ def ingest_dataset(
         "windows_extracted",
         "archive_file",
     ]
-    with open(csv_path, "w", encoding="utf-8") as f:
-        f.write(",".join(csv_headers) + "\n")
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=csv_headers, quoting=csv.QUOTE_MINIMAL)
+        writer.writeheader()
         for r in audit_records:
-            row = [
-                str(r["clip_path"]),
-                str(r["subject_id"]),
-                str(r["label"]),
-                str(r["status"]),
-                str(r["total_frames"]),
-                str(r["fps"]),
-                str(r["duration_s"]),
-                str(r["face_detected_frames"]),
-                str(r["face_detection_rate_pct"]),
-                str(r["valid_ungated_frames"]),
-                str(r["valid_ungated_rate_pct"]),
-                str(r["scene_cut_count"]),
-                str(r["windows_extracted"]),
-                str(r["archive_file"]),
-            ]
-            f.write(",".join(row) + "\n")
+            writer.writerow({
+                "clip_path": str(r.get("clip_path", "")),
+                "subject_id": str(r.get("subject_id", "")),
+                "label": str(r.get("label", "")),
+                "status": str(r.get("status", "")),
+                "total_frames": r.get("total_frames", 0),
+                "fps": r.get("fps", 0.0),
+                "duration_s": r.get("duration_s", 0.0),
+                "face_detected_frames": r.get("face_detected_frames", 0),
+                "face_detection_rate_pct": r.get("face_detection_rate_pct", 0.0),
+                "valid_ungated_frames": r.get("valid_ungated_frames", 0),
+                "valid_ungated_rate_pct": r.get("valid_ungated_rate_pct", 0.0),
+                "scene_cut_count": r.get("scene_cut_count", 0),
+                "windows_extracted": r.get("windows_extracted", 0),
+                "archive_file": str(r.get("archive_file", "")),
+            })
 
     imbalance_ratio = round(sober_windows / max(1, drunk_windows), 2)
     summary_data = {

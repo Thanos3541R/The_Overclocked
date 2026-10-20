@@ -225,7 +225,8 @@ def filter_involuntary_features(
 
 def load_dataset_from_npz(
     npz_paths: List[str],
-    target_frames: Optional[int] = None
+    target_frames: Optional[int] = None,
+    clean_contaminated: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """Load and concatenate training windows from multiple .npz archives.
 
@@ -236,7 +237,31 @@ def load_dataset_from_npz(
     raw_archives = []
     target_feature_names = []
 
+    contaminated_terms = [
+        "MY DRUNK GIRLFRIEND",
+        "My Drunk Girlfriend",
+        "MY DRUNK BLOOPERS",
+        "Adults Get Drunk For The First Time",
+    ]
+    excluded_count = 0
+    clean_paths = []
+
     for path in npz_paths:
+        fname = os.path.basename(path)
+        if clean_contaminated and fname.startswith("sober_"):
+            is_contaminated = (
+                any(term.lower() in fname.lower() for term in contaminated_terms)
+                or ("(1)" in fname)
+            )
+            if is_contaminated:
+                excluded_count += 1
+                continue
+        clean_paths.append(path)
+
+    if clean_contaminated and excluded_count > 0:
+        print(f"[Dataset Quarantine] Excluded {excluded_count} contaminated ('Drunk-in-Sober') or duplicate '(1)' archives.")
+
+    for path in clean_paths:
         data = np.load(path, allow_pickle=True)
         feats = data["features"]  # (n_windows, window_frames, n_features)
         subs = data["subject_ids"]
@@ -455,6 +480,76 @@ def augment_minority_windows_in_fold(
     return X_augmented, y_augmented
 
 
+def downsample_majority_by_subject(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    train_subjects: np.ndarray,
+    target_ratio: float = 1.25,
+    random_state: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Downsample majority negative class using stratified sampling across majority subjects.
+
+    Prevents CalibratedClassifierCV posterior probability collapse on highly imbalanced
+    datasets (e.g. 5:1 Sober:Drunk) by matching majority count to target_ratio * n_pos_train
+    (default 1.25x), centering calibrated probabilities at 0.50 and restoring balanced sensitivity.
+    """
+    n_pos = int(np.sum(y_train == 1))
+    n_neg = int(np.sum(y_train == 0))
+    if n_neg <= int(1.5 * n_pos) or n_pos == 0:
+        return X_train, y_train
+
+    target_neg = int(target_ratio * n_pos)
+    neg_indices = np.where(y_train == 0)[0]
+    pos_indices = np.where(y_train == 1)[0]
+
+    neg_subs = train_subjects[neg_indices]
+    uniq_subs, counts = np.unique(neg_subs, return_counts=True)
+    rng = np.random.RandomState(random_state)
+
+    allocations = {}
+    total_allocated = 0
+    for sub, cnt in zip(uniq_subs, counts):
+        alloc = int(np.round(cnt / len(neg_indices) * target_neg))
+        alloc = max(1, min(alloc, cnt))
+        allocations[sub] = alloc
+        total_allocated += alloc
+
+    diff = target_neg - total_allocated
+    if diff != 0:
+        sorted_subs = sorted(uniq_subs, key=lambda s: counts[list(uniq_subs).index(s)], reverse=True)
+        idx_sub = 0
+        step = 0
+        while diff > 0 and step < len(sorted_subs) * 2:
+            sub = sorted_subs[idx_sub]
+            cnt = counts[list(uniq_subs).index(sub)]
+            if allocations[sub] < cnt:
+                allocations[sub] += 1
+                diff -= 1
+            idx_sub = (idx_sub + 1) % len(sorted_subs)
+            step += 1
+        idx_sub = 0
+        step = 0
+        while diff < 0 and step < len(sorted_subs) * 2:
+            sub = sorted_subs[idx_sub]
+            if allocations[sub] > 1:
+                allocations[sub] -= 1
+                diff += 1
+            idx_sub = (idx_sub + 1) % len(sorted_subs)
+            step += 1
+
+    selected_neg = []
+    for sub in uniq_subs:
+        sub_neg_idx = neg_indices[neg_subs == sub]
+        k = min(allocations[sub], len(sub_neg_idx))
+        chosen = rng.choice(sub_neg_idx, size=k, replace=False)
+        selected_neg.extend(chosen)
+
+    selected_indices = np.concatenate([pos_indices, selected_neg])
+    rng.shuffle(selected_indices)
+
+    return X_train[selected_indices], y_train[selected_indices]
+
+
 def train_and_evaluate(
     X: np.ndarray,
     y: np.ndarray,
@@ -507,21 +602,32 @@ def train_and_evaluate(
 
         n_pos_train = int(np.sum(y_train == 1))
         n_neg_train = int(np.sum(y_train == 0))
-        min_fold_samples = min(n_pos_train, n_neg_train)
-        max_fold_samples = max(n_pos_train, n_neg_train, 1)
-        imbalance_ratio = min_fold_samples / max_fold_samples
 
-        # In-fold minority oversampling only if severe imbalance (< 0.40)
-        if imbalance_ratio < 0.40 and min_fold_samples > 0:
-            X_train_fold, y_train_fold = augment_minority_windows_in_fold(
-                X_train, y_train, random_state=random_state + fold
+        # Check if majority downsampling is needed (when n_neg_train > 1.5 * n_pos_train)
+        if n_neg_train > 1.5 * n_pos_train and n_pos_train > 0:
+            X_train_fold, y_train_fold = downsample_majority_by_subject(
+                X_train, y_train, train_subjects=subjects[train_idx], target_ratio=1.25, random_state=random_state + fold
             )
             fold_scale = 1.0
-            fold_class_weight = None
+            fold_class_weight = "balanced"
         else:
-            X_train_fold, y_train_fold = X_train, y_train
-            fold_scale = computed_scale
-            fold_class_weight = "balanced" if computed_scale != 1.0 else None
+            min_fold_samples = min(n_pos_train, n_neg_train)
+            max_fold_samples = max(n_pos_train, n_neg_train, 1)
+            imbalance_ratio = min_fold_samples / max_fold_samples
+
+            # In-fold minority oversampling only if severe imbalance (< 0.40)
+            if imbalance_ratio < 0.40 and min_fold_samples > 0:
+                X_train_fold, y_train_fold = augment_minority_windows_in_fold(
+                    X_train, y_train, random_state=random_state + fold
+                )
+                fold_scale = 1.0
+                fold_class_weight = None
+            else:
+                X_train_fold, y_train_fold = X_train, y_train
+                fold_scale = computed_scale
+                fold_class_weight = "balanced" if computed_scale != 1.0 else None
+
+        min_fold_samples = min(int(np.sum(y_train_fold == 1)), int(np.sum(y_train_fold == 0)))
 
         if _HAVE_XGB and use_xgboost:
             base_clf = XGBClassifier(
@@ -595,10 +701,10 @@ def train_and_evaluate(
     overall_acc = float(accuracy_score(y, oof_preds))
     overall_bal_acc = float(balanced_accuracy_score(y, oof_preds))
 
-    # Optimal probability threshold calibration (maximizing F1 / Balanced Accuracy)
-    threshold_candidates = np.linspace(0.25, 0.75, 51)
+    # Optimal probability threshold calibration (maximizing Youden's J = sensitivity + specificity - 1.0)
+    threshold_candidates = np.linspace(0.10, 0.85, 76)
     best_thresh = 0.50
-    best_score = -1.0
+    best_j = -2.0
     best_f1 = 0.0
     best_bal_acc = 0.0
     best_sens = 0.0
@@ -606,17 +712,17 @@ def train_and_evaluate(
 
     for th in threshold_candidates:
         th_preds = (oof_probs >= th).astype(int)
-        th_f1 = float(f1_score(y, th_preds, zero_division=0))
-        th_bal = float(balanced_accuracy_score(y, th_preds))
-        combined = th_f1 + th_bal
-        if combined > best_score:
-            best_score = combined
+        sens = float(recall_score(y, th_preds, zero_division=0))
+        tn_th, fp_th, _, _ = confusion_matrix(y, th_preds, labels=[0, 1]).ravel()
+        spec = float(tn_th / max(1, tn_th + fp_th))
+        youden_j = sens + spec - 1.0
+        if youden_j > best_j:
+            best_j = youden_j
             best_thresh = float(th)
-            best_f1 = th_f1
-            best_bal_acc = th_bal
-            best_sens = float(recall_score(y, th_preds, zero_division=0))
-            tn_th, fp_th, _, _ = confusion_matrix(y, th_preds, labels=[0, 1]).ravel()
-            best_spec = float(tn_th / max(1, tn_th + fp_th))
+            best_f1 = float(f1_score(y, th_preds, zero_division=0))
+            best_bal_acc = float(balanced_accuracy_score(y, th_preds))
+            best_sens = sens
+            best_spec = spec
 
     # Feature Importance estimation
     top_features = []
@@ -722,10 +828,13 @@ def train_and_evaluate(
     }
 
     # Retrain final calibrated model on all data for deployment
-    min_dataset_samples = int(min(np.sum(y == 1), np.sum(y == 0)))
-    dataset_imbalance = min(n_pos, n_neg) / max(n_pos, n_neg, 1)
-
-    if dataset_imbalance < 0.40 and min(n_pos, n_neg) > 0:
+    if n_neg > 1.5 * n_pos and n_pos > 0:
+        X_final_aug, y_final_aug = downsample_majority_by_subject(
+            X, y, train_subjects=subjects, target_ratio=1.25, random_state=random_state
+        )
+        final_scale = 1.0
+        final_class_weight = "balanced"
+    elif min(n_pos, n_neg) / max(n_pos, n_neg, 1) < 0.40 and min(n_pos, n_neg) > 0:
         X_final_aug, y_final_aug = augment_minority_windows_in_fold(
             X, y, random_state=random_state
         )
@@ -735,6 +844,8 @@ def train_and_evaluate(
         X_final_aug, y_final_aug = X, y
         final_scale = computed_scale
         final_class_weight = "balanced" if computed_scale != 1.0 else None
+
+    min_final_samples = int(min(np.sum(y_final_aug == 1), np.sum(y_final_aug == 0)))
 
     if _HAVE_XGB and use_xgboost:
         base_final = XGBClassifier(
@@ -757,10 +868,10 @@ def train_and_evaluate(
             random_state=random_state
         )
 
-    if min_dataset_samples < 4:
+    if min_final_samples < 4:
         final_model = base_final
     else:
-        final_calib_cv = min(3, max(2, int(min_dataset_samples // 2)))
+        final_calib_cv = min(3, max(2, int(min_final_samples // 2)))
         final_model = CalibratedClassifierCV(estimator=base_final, method="sigmoid", cv=final_calib_cv)
 
     final_model.fit(X_final_aug, y_final_aug)
@@ -785,6 +896,13 @@ def main():
         default=False,
         help="Compute personal baseline delta features relative to each subject's 90th percentile (use ONLY for paired sober/impaired recordings of the same individuals)",
     )
+    parser.add_argument(
+        "--no-clean-contaminated",
+        dest="clean_contaminated",
+        action="store_false",
+        help="Disable automatic quarantine of contaminated/duplicate archives",
+    )
+    parser.set_defaults(clean_contaminated=True)
 
     args = parser.parse_args()
 
@@ -807,7 +925,9 @@ def main():
             print("Tip: Provide .npz feature archives via --data-dir, or use --test-synthetic to run the built-in self-test.")
             sys.exit(1)
         print(f"Found {len(npz_files)} feature archives. Loading...")
-        X_3d, y, subjects, raw_feat_names = load_dataset_from_npz(npz_files)
+        X_3d, y, subjects, raw_feat_names = load_dataset_from_npz(
+            npz_files, clean_contaminated=args.clean_contaminated
+        )
         benchmark_mode = "REAL_DATA_INGEST"
         empirical_validation = True
 

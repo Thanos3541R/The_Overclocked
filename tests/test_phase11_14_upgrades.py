@@ -427,3 +427,40 @@ def test_classifier_live_ml_model_integration(tmp_path):
     assert len(clf._ml_frame_buffer) == 0
     assert clf._last_ml_prob is None
 
+def test_desktop_stillness_and_warm_webcam_immunity():
+    """Verify that a sober user sitting still in front of a warm indoor webcam stays rock-solid on SOBER."""
+    clf = ImpairmentClassifier()
+    feats = FrameFeatures(
+        face_valid=True,
+        ear_avg=0.28,
+        perclos=0.02,
+        blink_opening_velocity=2.1,
+        gaze_yaw_dispersion=0.025,  # Staring at screen without other fatigue signs
+        rigid_head_stabilization=True,  # Sitting still at desk
+        head_postural_sway=0.08,
+        gen_detected=False,
+        lack_of_convergence=False,
+        pursuit_fragmentation_ratio=0.05,
+    )
+    assessment = clf.evaluate_temporal_stream(feats)
+
+    # 1. Gaze tunneling & rigid head stabilization must be gated/suppressed for alert user
+    assert assessment.marker_scores.get("gaze_tunneling") == 0.0
+    assert assessment.marker_scores.get("rigid_head_stabilization") == 0.0
+    assert assessment.classification == "SOBER"
+    assert assessment.risk_score < 15.0
+
+    # 2. Warm indoor webcam (ratio 1.45) baseline calibration
+    ext = FeatureExtractor(fps=20.0)
+    lm = make_full_landmarks(ear_val=0.30)
+    # Warm lighting: R=145, G=100, B=100 -> ratio = 145/100 = 1.45 (1.28 < 1.45 < 1.65)
+    for _ in range(16):
+        _, valid, delta = ext._compute_facial_flushing(
+            frame=np.full((100, 100, 3), [100, 100, 145], dtype=np.uint8),
+            landmarks=lm,
+            tzone_rgb=(145.0, 100.0, 100.0),
+        )
+    assert valid is True
+    assert ext.baseline_flushing == pytest.approx(1.45, abs=0.05)
+    assert abs(delta) < 0.05
+

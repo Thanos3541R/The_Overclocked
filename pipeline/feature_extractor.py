@@ -839,9 +839,9 @@ class FeatureExtractor:
             d_ear = d_inst
             ear_velocity = float(abs(d_inst / dt))
 
-        # Low-FPS thermal throttling discretization compensation (Phase 9)
-        if 0.040 <= dt <= 0.120 and self._fps >= 25.0:
-            fps_comp = min(1.65, 1.0 + 10.0 * (dt - 0.035))
+        # Low-FPS thermal throttling / webcam discretization compensation
+        if 0.040 <= dt <= 0.120:
+            fps_comp = min(1.65, 1.0 + 12.0 * (dt - 0.033)) if ear_avg >= 0.22 else min(1.65, 1.0 + 10.0 * (dt - 0.035))
             ear_velocity *= fps_comp
 
         # State machine: track blink phase transitions
@@ -1195,7 +1195,7 @@ class FeatureExtractor:
                     self._flushing_cal_samples.append(clamped)
                     if len(self._flushing_cal_samples) >= 15:
                         med = float(np.median(self._flushing_cal_samples))
-                        if med < 1.28:
+                        if med < 1.65:
                             self.baseline_flushing = med
                         self._flushing_cal_locked = True
 

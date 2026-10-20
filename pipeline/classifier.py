@@ -404,7 +404,15 @@ class ImpairmentClassifier:
         marker_scores["blink_velocity"] = blink_vel_score
 
         # 7. Gaze Yaw Dispersion (Tunneling)
-        if features.gaze_yaw_dispersion > 0:
+        tunnel_corroborated = (
+            features.blink_opening_velocity == 0.0
+            or features.perclos > 0.10
+            or features.ear_avg < self.sober_ear * 0.88
+            or features.gen_detected
+            or features.lack_of_convergence
+            or features.pursuit_fragmentation_ratio > 0.15
+        )
+        if features.gaze_yaw_dispersion > 0 and tunnel_corroborated:
             if features.gaze_yaw_dispersion < 0.03:  # [PLACEHOLDER — pending calibration against real data]
                 tunnel_score = 75.0
                 indicators.append(f"Gaze tunneling toward road center (σ_yaw={features.gaze_yaw_dispersion:.3f})")
@@ -492,7 +500,14 @@ class ImpairmentClassifier:
             marker_scores["compensatory_stare"] = 0.0
 
         # 14. Rigid Head Stabilization
-        if features.rigid_head_stabilization:
+        suppress_rigid = (
+            features.ear_avg >= self.sober_ear * 0.90
+            and (features.blink_opening_velocity == 0.0 or features.blink_opening_velocity >= 1.50)
+            and not features.gen_detected
+            and not features.lack_of_convergence
+            and features.perclos <= 0.10
+        )
+        if features.rigid_head_stabilization and not suppress_rigid:
             marker_scores["rigid_head_stabilization"] = 60.0
             indicators.append("Rigid head stabilization (unnatural neck tension suppressing sway)")
         else:
@@ -561,7 +576,8 @@ class ImpairmentClassifier:
             ml_prob_pct = round(ml_prob * 100.0, 1)
             ml_active = True
             marker_scores["ml_probability"] = ml_prob_pct
-            inv_risk = float(np.clip(0.60 * inv_risk + 0.40 * (ml_prob * 100.0), 0.0, 100.0))
+            ml_weight = 0.25 if (inv_risk < 15.0 and features.perclos < 0.10) else 0.40
+            inv_risk = float(np.clip((1.0 - ml_weight) * inv_risk + ml_weight * (ml_prob * 100.0), 0.0, 100.0))
             if ml_prob >= 0.50:
                 indicators.append(f"Trained ML Classifier Probability: {ml_prob * 100:.1f}%")
 
@@ -580,7 +596,7 @@ class ImpairmentClassifier:
             classification = "HIGH_RISK_INTOXICATED"
             lockout_recommended = True
             total_risk = max(inv_risk, masking_divergence)
-        elif inv_risk >= 25.0 or (vol_masking >= 40.0 and inv_risk >= 20.0):
+        elif inv_risk >= 25.0 or (vol_masking >= 50.0 and inv_risk >= 22.0 and features.perclos > 0.08):
             classification = "MILD_IMPAIRMENT"
             total_risk = max(inv_risk, 25.0)
         else:

@@ -371,6 +371,59 @@ def test_downsample_majority_by_subject_and_youdens_j():
     assert 0.10 <= opt["threshold"] <= 0.85
     assert opt["balanced_accuracy"] > 0.65
 
+def test_classifier_live_ml_model_integration(tmp_path):
+    """Verify ImpairmentClassifier loads a trained model, buffers frames, and blends probability."""
+    import joblib
+    from sklearn.linear_model import LogisticRegression
+    from train_baseline import compute_window_summary_features
+    from pipeline.training_buffer import TrainingBuffer
 
+    # 1. Create and fit a dummy model on synthetic summary features
+    dummy_win = np.random.randn(4, 30, 48).astype(np.float32)
+    feat_2d, summary_names = compute_window_summary_features(
+        dummy_win, TrainingBuffer.EXTENDED_FEATURE_NAMES, apply_subject_deltas=False
+    )
+    target_names = summary_names[:20]
+    X_train = feat_2d[:, :20]
+    y_train = np.array([0, 0, 1, 1], dtype=int)
 
+    model = LogisticRegression()
+    model.fit(X_train, y_train)
+
+    artifact_path = tmp_path / "test_model.joblib"
+    joblib.dump({"model": model, "feature_names": target_names}, str(artifact_path))
+
+    # 2. Instantiate ImpairmentClassifier with model_path
+    clf = ImpairmentClassifier(model_path=str(artifact_path))
+    assert clf._ml_model is not None
+    assert clf._ml_feature_names == target_names
+
+    # 3. Feed 35 valid FrameFeatures
+    assessment = None
+    for i in range(35):
+        ff = FrameFeatures(
+            face_valid=True,
+            timestamp=i / 30.0,
+            frame_id=i,
+            ear_left=0.28,
+            ear_right=0.28,
+            ear_avg=0.28,
+        )
+        assessment = clf.evaluate_temporal_stream(ff)
+
+    assert assessment is not None
+    assert assessment.ml_model_active is True
+    assert assessment.ml_probability is not None
+    assert 0.0 <= assessment.ml_probability <= 100.0
+
+    # 4. Verify Visualizer status banner renders ML badge
+    viz = Visualizer(overlay_mode="regions")
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    out = viz.draw(frame, landmarks=None, features=ff, assessment=assessment)
+    assert out.shape == (720, 1280, 3)
+
+    # 5. Reset clears the buffer and last probability
+    clf.reset()
+    assert len(clf._ml_frame_buffer) == 0
+    assert clf._last_ml_prob is None
 

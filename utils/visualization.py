@@ -636,7 +636,7 @@ class Visualizer:
         if w < 300 or h < 80:
             return
 
-        banner_w = min(410, w - 20)
+        banner_w = min(460, w - 20)
         banner_h = 48
         bx1 = max(10, (w - banner_w) // 2)
         by1 = 10
@@ -659,6 +659,8 @@ class Visualizer:
         risk = getattr(assessment, "risk_score", 0.0)
         inv_risk = getattr(assessment, "involuntary_risk_score", 0.0)
         line1 = f"{state_str} | Risk:{risk:.1f}% (Invol:{inv_risk:.1f}%)"
+        if getattr(assessment, "ml_model_active", False) and getattr(assessment, "ml_probability", None) is not None:
+            line1 += f" | ML:{assessment.ml_probability:.0f}%"
         cv2.putText(
             frame, line1, (bx1 + 10, by1 + 23),
             cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA

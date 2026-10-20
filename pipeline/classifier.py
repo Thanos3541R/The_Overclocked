@@ -17,8 +17,10 @@ Evaluates biological markers of alcohol intoxication and drowsiness:
      - Elevated PERCLOS & microsleep episodes
 """
 import logging
+import os
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
@@ -41,6 +43,8 @@ class ImpairmentAssessment:
     voluntary_masking_score: float = 0.0
     masking_divergence: float = 0.0
     lockout_recommended: bool = False
+    ml_probability: Optional[float] = None
+    ml_model_active: bool = False
 
 
 class ImpairmentClassifier:
@@ -50,7 +54,8 @@ class ImpairmentClassifier:
                  sober_ear_baseline: float = 0.28,  # [PLACEHOLDER — pending calibration against real data]
                  sober_saccade_baseline: float = 80.0,  # [PLACEHOLDER — pending calibration against real data]
                  sober_blink_up_baseline: float = 2.5,  # [PLACEHOLDER — pending calibration against real data]
-                 baseline_asymmetry: float = 0.0):  # [PLACEHOLDER — natural resting asymmetry offset]
+                 baseline_asymmetry: float = 0.0,  # [PLACEHOLDER — natural resting asymmetry offset]
+                 model_path: Optional[str] = None):
         """
         Args:
             sober_ear_baseline: Expected normal awake EAR for an alert driver.
@@ -58,6 +63,7 @@ class ImpairmentClassifier:
             sober_blink_up_baseline: Normal eyelid reopening velocity (EAR/s).
             baseline_asymmetry: Driver's natural resting eyelid asymmetry (|ΔEAR| offset)
                 subtracted from raw asymmetry to prevent false positive ptosis alerts.
+            model_path: Optional file path to trained .joblib ML classifier artifact.
         """
         self.sober_ear = sober_ear_baseline
         self.sober_saccade = sober_saccade_baseline
@@ -67,6 +73,91 @@ class ImpairmentClassifier:
         self.ingress_reason: str = ""
         self.pitch_baseline: float = 0.0
         self.roll_baseline: float = 0.0
+
+        # ML model attributes
+        self.model_path = model_path
+        self._ml_model = None
+        self._ml_feature_names: List[str] = []
+        self._ml_frame_buffer: Deque[np.ndarray] = deque(maxlen=90)
+        self._ml_infer_stride: int = 5
+        self._ml_eval_counter: int = 0
+        self._last_ml_prob: Optional[float] = None
+
+        if model_path is not None and os.path.exists(model_path):
+            try:
+                import joblib
+                data = joblib.load(model_path)
+                if isinstance(data, dict):
+                    self._ml_model = data.get("model", None)
+                    self._ml_feature_names = list(data.get("feature_names", []))
+                else:
+                    self._ml_model = data
+                    self._ml_feature_names = []
+                logger.info("[DMS Classifier] Loaded ML model from %s (%d features)", model_path, len(self._ml_feature_names))
+            except Exception as e:
+                logger.warning("[DMS Classifier] Failed to load ML model from %s: %s", model_path, e)
+
+    def reset(self):
+        """Reset temporal state and ML frame buffer."""
+        self.ingress_impairment_detected = False
+        self.ingress_reason = ""
+        self._ml_frame_buffer.clear()
+        self._ml_eval_counter = 0
+        self._last_ml_prob = None
+
+    def _predict_ml_probability(self, features: FrameFeatures) -> Optional[float]:
+        """Predict real-time impairment probability over rolling 3.0s window using trained ML model."""
+        if self._ml_model is None:
+            return None
+
+        if not features.face_valid or features.imu_gated:
+            return self._last_ml_prob
+
+        try:
+            from pipeline.training_buffer import TrainingBuffer
+            numeric = [float(getattr(features, name, 0.0)) for name in TrainingBuffer.EXTENDED_NUMERIC_NAMES]
+            bools = [float(bool(getattr(features, name, False))) for name in TrainingBuffer.EXTENDED_BOOL_NAMES]
+            vec = np.array(numeric + bools, dtype=np.float32)
+        except Exception as e:
+            logger.debug("[DMS Classifier] Vector extraction failed: %s", e)
+            return self._last_ml_prob
+
+        self._ml_frame_buffer.append(vec)
+        self._ml_eval_counter += 1
+
+        if len(self._ml_frame_buffer) >= 30 and (self._ml_eval_counter % self._ml_infer_stride == 0):
+            try:
+                from train_baseline import compute_window_summary_features
+                from pipeline.training_buffer import TrainingBuffer
+
+                win_3d = np.array(self._ml_frame_buffer, dtype=np.float32)[None, :, :]
+                feat_2d, summary_names = compute_window_summary_features(
+                    win_3d, TrainingBuffer.EXTENDED_FEATURE_NAMES, apply_subject_deltas=False
+                )
+
+                if self._ml_feature_names:
+                    feat_map = {fn: idx for idx, fn in enumerate(summary_names)}
+                    X_aligned = np.zeros((1, len(self._ml_feature_names)), dtype=np.float32)
+                    for j, target_fn in enumerate(self._ml_feature_names):
+                        if target_fn in feat_map:
+                            X_aligned[0, j] = feat_2d[0, feat_map[target_fn]]
+                else:
+                    X_aligned = feat_2d
+
+                if hasattr(self._ml_model, "predict_proba"):
+                    probs = self._ml_model.predict_proba(X_aligned)
+                    prob = float(probs[0, 1])
+                elif hasattr(self._ml_model, "predict"):
+                    prob = float(self._ml_model.predict(X_aligned)[0])
+                else:
+                    prob = None
+
+                if prob is not None:
+                    self._last_ml_prob = prob
+            except Exception as e:
+                logger.debug("[DMS Classifier] ML inference error: %s", e)
+
+        return self._last_ml_prob
 
     def evaluate_static_image(self,
                               frame: np.ndarray,
@@ -462,6 +553,18 @@ class ImpairmentClassifier:
 
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
+        # Real-time ML model fusion (rolling 3.0s window)
+        ml_prob = self._predict_ml_probability(features)
+        ml_prob_pct = None
+        ml_active = False
+        if ml_prob is not None:
+            ml_prob_pct = round(ml_prob * 100.0, 1)
+            ml_active = True
+            marker_scores["ml_probability"] = ml_prob_pct
+            inv_risk = float(np.clip(0.60 * inv_risk + 0.40 * (ml_prob * 100.0), 0.0, 100.0))
+            if ml_prob >= 0.50:
+                indicators.append(f"Trained ML Classifier Probability: {ml_prob * 100:.1f}%")
+
         # Voluntary masking magnitude
         vol_keys = ["voluntary_eye_widening", "deliberate_blink_suppression", "compensatory_stare", "rigid_head_stabilization", "frontalis_compensation"]
         vol_scores = [marker_scores[k] for k in vol_keys if marker_scores[k] > 0]
@@ -496,7 +599,9 @@ class ImpairmentClassifier:
             involuntary_risk_score=inv_risk,
             voluntary_masking_score=vol_masking,
             masking_divergence=masking_divergence,
-            lockout_recommended=lockout_recommended
+            lockout_recommended=lockout_recommended,
+            ml_probability=ml_prob_pct,
+            ml_model_active=ml_active
         )
 
     @staticmethod

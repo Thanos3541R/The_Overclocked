@@ -49,7 +49,8 @@ def extract_video_features(video_path: str,
                            output_dir: str = ".",
                            max_frames: Optional[int] = None,
                            headless: bool = True,
-                           csv_path: Optional[str] = None) -> Dict[str, Any]:
+                           csv_path: Optional[str] = None,
+                           model_path: Optional[str] = None) -> Dict[str, Any]:
     """Process a video file and extract voluntary, involuntary, and anti-masking features.
 
     Args:
@@ -164,7 +165,22 @@ def extract_video_features(video_path: str,
         sway_nod_reset_deg_s=config.sway_nod_reset_deg_s,
         rigid_head_sway_threshold=config.rigid_head_sway_threshold,
     )
-    classifier = ImpairmentClassifier()
+    if model_path is None:
+        candidates = [
+            "models/involuntary_model.joblib",
+            "models/baseline_impairment_model.joblib",
+            "models/all_features_model.joblib",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                model_path = c
+                break
+
+    if model_path and os.path.exists(model_path):
+        print(f"  Loaded ML Model    : {model_path}")
+        classifier = ImpairmentClassifier(model_path=model_path)
+    else:
+        classifier = ImpairmentClassifier()
     calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=fps)
     bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 

@@ -95,6 +95,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config", type=str, default=None,
         help="Optional JSON configuration file path")
+    parser.add_argument(
+        "--model-path", type=str, default=None,
+        help="Path to trained .joblib impairment model (default auto-discover)")
     return parser.parse_args()
 
 
@@ -207,7 +210,23 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         max_freeze_duty_cycle=config.max_freeze_duty_cycle,
     )
     stabilizer = KinematicStabilizer()
-    classifier = ImpairmentClassifier()
+    model_path = getattr(args, "model_path", None)
+    if model_path is None:
+        candidates = [
+            "models/involuntary_model.joblib",
+            "models/baseline_impairment_model.joblib",
+            "models/all_features_model.joblib",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                model_path = c
+                break
+
+    if model_path and os.path.exists(model_path):
+        print(f"[DMS] Loaded trained ML model: {model_path}")
+        classifier = ImpairmentClassifier(model_path=model_path)
+    else:
+        classifier = ImpairmentClassifier()
     bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 
     # Filter bank (lazy-initialized on first valid frame)

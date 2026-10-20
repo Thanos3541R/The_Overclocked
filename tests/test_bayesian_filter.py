@@ -1,6 +1,10 @@
 """Unit tests for sequential Bayesian evidence accumulation (pipeline/bayesian_filter.py)."""
+import os
+import sys
 import pytest
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.bayesian_filter import BayesianEvidenceAccumulator, BayesianState
 from pipeline.classifier import ImpairmentAssessment

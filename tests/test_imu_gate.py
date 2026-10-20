@@ -7,8 +7,13 @@ Tests verify:
   4. Freeze duration holds across consecutive frames.
   5. Reset clears state.
 """
+import os
+import sys
 import numpy as np
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pipeline.imu_gate import SoftwareIMUGate
 
 

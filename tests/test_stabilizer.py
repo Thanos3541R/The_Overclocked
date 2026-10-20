@@ -1,7 +1,12 @@
 """Unit tests for KinematicStabilizer: zero-blur road shock & vibration estimation."""
+import os
+import sys
 import cv2
 import numpy as np
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pipeline.stabilizer import KinematicStabilizer
 
 

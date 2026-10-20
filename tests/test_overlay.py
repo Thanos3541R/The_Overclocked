@@ -9,12 +9,16 @@ Verifies:
    (Ensures sclera redness, facial flushing, EAR, MAR are NEVER tainted by overlay pixels).
 6. Performance benchmarks reporting FPS and overlay latency in ms across all three modes.
 """
+import os
+import sys
 import time
 from typing import Dict, List, Tuple
 from unittest.mock import patch
 import cv2
 import numpy as np
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DEFAULT_CONFIG
 from pipeline.classifier import ImpairmentClassifier

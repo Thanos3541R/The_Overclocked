@@ -1,6 +1,10 @@
+import os
+import sys
 import pytest
 import numpy as np
-import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pipeline.training_buffer import TrainingBuffer, GatedFrameStrategy
 from pipeline.feature_extractor import FrameFeatures
 

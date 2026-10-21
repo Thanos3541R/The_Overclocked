@@ -19,8 +19,6 @@ inspection_result.jpg
 panel_*.jpg
 run_edits.py
 training_data/
-models/*.joblib
-models/training_report.json
 
 # OS generated files
 .DS_Store

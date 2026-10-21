@@ -1,0 +1,171 @@
+{
+  "n_samples": 380,
+  "n_features": 339,
+  "n_subjects": 17,
+  "model_type": "CalibratedClassifierCV(HistGradientBoostingClassifier)",
+  "scale_pos_weight": 1.0,
+  "oof_metrics": {
+    "roc_auc": 0.92404432132964,
+    "pr_auc": 0.9221622902115386,
+    "sensitivity": 0.8263157894736842,
+    "specificity": 0.9157894736842105,
+    "f1_score": 0.8650137741046832,
+    "accuracy": 0.8710526315789474,
+    "balanced_accuracy": 0.8710526315789473,
+    "optimal_threshold": {
+      "threshold": 0.44,
+      "f1_score": 0.8743,
+      "balanced_accuracy": 0.8737,
+      "sensitivity": 0.8789,
+      "specificity": 0.8684
+    }
+  },
+  "fold_metrics": [
+    {
+      "fold": 1,
+      "val_subjects": [
+        "drunk_Test Drunk_grp04",
+        "drunk_Test Drunk_grp07",
+        "sober_ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_grp04"
+      ],
+      "roc_auc": 0.9721428571428572,
+      "pr_auc": 0.972432569478718,
+      "sensitivity": 0.9,
+      "specificity": 0.9142857142857143
+    },
+    {
+      "fold": 2,
+      "val_subjects": [
+        "drunk_2part",
+        "drunk_Test Drunk_grp05",
+        "sober_ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_grp08"
+      ],
+      "roc_auc": 0.6456241032998565,
+      "pr_auc": 0.7807188954184784,
+      "sensitivity": 0.5609756097560976,
+      "specificity": 0.9117647058823529
+    },
+    {
+      "fold": 3,
+      "val_subjects": [
+        "drunk_3part_grp02",
+        "drunk_Test Drunk_grp06",
+        "sober_ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_grp03",
+        "sober_ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_grp06"
+      ],
+      "roc_auc": 0.9867109634551495,
+      "pr_auc": 0.9840545986222679,
+      "sensitivity": 0.9142857142857143,
+      "specificity": 0.9302325581395349
+    },
+    {
+      "fold": 4,
+      "val_subjects": [
+        "drunk_7part_grp08",
+        "drunk_Test Drunk_grp08",
+        "sober_ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_grp07"
+      ],
+      "roc_auc": 0.9326923076923077,
+      "pr_auc": 0.9567285088361206,
+      "sensitivity": 0.8205128205128205,
+      "specificity": 0.9375
+    },
+    {
+      "fold": 5,
+      "val_subjects": [
+        "drunk_3part_grp03",
+        "drunk_7part_grp09",
+        "sober_ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_grp05",
+        "sober_ADULTS REACT TO FUNNIEST NEWS BLOOPERS 2018 [720p] (1)_grp09"
+      ],
+      "roc_auc": 0.9751552795031055,
+      "pr_auc": 0.9676606860390061,
+      "sensitivity": 0.9714285714285714,
+      "specificity": 0.8913043478260869
+    }
+  ],
+  "top_features": [
+    {
+      "feature": "facial_flushing_ratio_min",
+      "importance": 0.005500000000000023
+    },
+    {
+      "feature": "facial_flushing_ratio_p10",
+      "importance": 0.0030000000000000027
+    },
+    {
+      "feature": "vergence_angle_deg_mean",
+      "importance": 0.0019333333333333054
+    },
+    {
+      "feature": "mar_max",
+      "importance": 0.0014000000000000308
+    },
+    {
+      "feature": "left_iris_x_min",
+      "importance": 0.0010000000000000009
+    },
+    {
+      "feature": "head_roll_min",
+      "importance": 0.0008999999999999379
+    },
+    {
+      "feature": "ear_right_max",
+      "importance": 0.0007333333333333636
+    },
+    {
+      "feature": "right_iris_y_max",
+      "importance": 0.0007000000000000339
+    },
+    {
+      "feature": "ear_right_p90",
+      "importance": 0.0006333333333333746
+    },
+    {
+      "feature": "facial_flushing_ratio_std",
+      "importance": 0.0004666666666667263
+    },
+    {
+      "feature": "gaze_yaw_dispersion_mean",
+      "importance": 0.0004333333333333596
+    },
+    {
+      "feature": "head_pitch_max",
+      "importance": 0.00043333333333332263
+    },
+    {
+      "feature": "head_pitch_p10",
+      "importance": 0.00040000000000002994
+    },
+    {
+      "feature": "head_yaw_std",
+      "importance": 0.0003666666666666633
+    },
+    {
+      "feature": "head_yaw_min",
+      "importance": 0.00033333333333333365
+    },
+    {
+      "feature": "left_iris_x_p90",
+      "importance": 0.000300000000000004
+    },
+    {
+      "feature": "ear_left_max",
+      "importance": 0.0002666666666667113
+    },
+    {
+      "feature": "left_iris_y_max",
+      "importance": 0.0002666666666666743
+    },
+    {
+      "feature": "head_postural_sway_mean",
+      "importance": 0.0002666666666666743
+    },
+    {
+      "feature": "left_iris_x_max",
+      "importance": 0.00023333333333334463
+    }
+  ],
+  "benchmark_mode": "REAL_DATA_INGEST",
+  "empirical_validation": true
+}

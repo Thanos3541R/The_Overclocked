@@ -457,7 +457,7 @@ class FeatureExtractor:
         Returns:
             EAR value (typically 0.25-0.35 open, <0.20 closed).
         """
-        p1, p2, p3, p4, p5, p6 = [landmarks[i] for i in indices]
+        p1, p2, p3, p4, p5, p6 = [landmarks[i, :2] for i in indices]
 
         vertical_1 = np.linalg.norm(p2 - p6)
         vertical_2 = np.linalg.norm(p3 - p5)
@@ -477,8 +477,8 @@ class FeatureExtractor:
         Returns:
             MAR value (typically <0.20 closed, >0.60 yawning).
         """
-        h_left = landmarks[MAR_HORIZONTAL[0]]
-        h_right = landmarks[MAR_HORIZONTAL[1]]
+        h_left = landmarks[MAR_HORIZONTAL[0], :2]
+        h_right = landmarks[MAR_HORIZONTAL[1], :2]
         horizontal = np.linalg.norm(h_left - h_right)
 
         if horizontal < 1e-6:
@@ -487,7 +487,7 @@ class FeatureExtractor:
         vertical_sum = 0.0
         for top_idx, bot_idx in MAR_VERTICAL_PAIRS:
             vertical_sum += np.linalg.norm(
-                landmarks[top_idx] - landmarks[bot_idx])
+                landmarks[top_idx, :2] - landmarks[bot_idx, :2])
 
         return float(vertical_sum / (3.0 * horizontal))
 

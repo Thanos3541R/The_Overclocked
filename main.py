@@ -99,6 +99,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path", type=str, default=None,
         help="Path to trained .joblib impairment model (default auto-discover)")
+    parser.add_argument(
+        "--stabilize-display", action="store_true",
+        help="Enable real-time visual video stabilization on the display window (toggle with 's')")
     return parser.parse_args()
 
 
@@ -250,6 +253,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         show_iris=not args.no_iris,
         show_pose_axes=not args.no_axes,
         enabled_solid_parts=enabled_parts,
+        stabilize_display=getattr(args, "stabilize_display", False),
     )
 
     if not args.headless:
@@ -269,7 +273,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
           f"@ {capture.fps:.1f} fps (est.)")
     print(f"[DMS] Input type: {'Grayscale (NIR)' if capture.is_grayscale else 'BGR (RGB camera)'}")
     if not args.headless:
-        print("[DMS] Controls: 'q' to quit | 'p' to pause/resume | 'v' to cycle overlay | 'r' to toggle ROI box")
+        print("[DMS] Controls: 'q' quit | 'p' pause | 'v' overlay | 'r' ROI box | 's' video stabilizer | 'u' unlatch/reset")
         print("[DMS] Solid mode: [1] Forehead [2] Cheeks [3] Chin [4] Lips [5] Eyes [6] Nose [7] Brows [8] Face | [0] Toggle all")
 
     # ── Main loop ──
@@ -298,6 +302,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                             paused = False
                         elif key in (ord('q'), ord('Q')):
                             break
+                        elif key in (ord('u'), ord('U')):
+                            bayesian_filter.unlatch(park_gear_confirmed=True)
+                            classifier.reset()
+                            print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
                         elif visualizer.handle_key(key) or getattr(visualizer, "_mouse_clicked", False):
                             visualizer._mouse_clicked = False
                             if last_raw_frame is not None:
@@ -404,6 +412,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                             break
                         elif key in (ord('p'), ord('P')):
                             paused = True
+                        elif key in (ord('u'), ord('U')):
+                            bayesian_filter.unlatch(park_gear_confirmed=True)
+                            classifier.reset()
+                            print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
                         else:
                             visualizer.handle_key(key)
                     except cv2.error as exc:
@@ -527,6 +539,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         break
                     elif key in (ord('p'), ord('P')):
                         paused = True
+                    elif key in (ord('u'), ord('U')):
+                        bayesian_filter.unlatch(park_gear_confirmed=True)
+                        classifier.reset()
+                        print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
                     else:
                         visualizer.handle_key(key)
                 except cv2.error as exc:

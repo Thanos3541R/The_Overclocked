@@ -464,3 +464,81 @@ def test_desktop_stillness_and_warm_webcam_immunity():
     assert ext.baseline_flushing == pytest.approx(1.45, abs=0.05)
     assert abs(delta) < 0.05
 
+
+
+def test_sober_webcam_does_not_lock_into_intoxicated_after_calibration():
+    """Simulate 600 frames of a sober webcam user through calibrator and classifier to verify no false lockout."""
+    from pipeline.calibration import PersonalBaselineCalibrator
+    from pipeline.classifier import ImpairmentClassifier
+
+    calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, min_samples=100, fps=16.7)
+    classifier = ImpairmentClassifier()
+
+    dt = 1.0 / 16.7
+    assessment = None
+    for i in range(600):
+        t = i * dt
+        # Sober user with wide alert eyes (ear_avg=0.29), low PERCLOS (0.04), and a held low-FPS blink velocity (1.20)
+        ff = FrameFeatures(
+            timestamp=t,
+            frame_id=i,
+            face_valid=True,
+            ear_left=0.29,
+            ear_right=0.29,
+            ear_avg=0.29,
+            mar=0.15,
+            perclos=0.04,
+            blink_detected=False,
+            microsleep_detected=False,
+            blink_opening_velocity=1.20,
+            blink_closing_velocity=1.50,
+            gaze_yaw_dispersion=0.08,
+            head_yaw=0.0,
+            head_pitch=0.0,
+            head_roll=0.0,
+            pursuit_fragmentation_ratio=0.05,
+            facial_flushing_ratio=1.35,
+            flushing_valid=True,
+            flushing_delta=0.0,
+        )
+        calibrator.update(ff)
+        if calibrator.is_calibrated:
+            calibrator.apply_to(None, classifier)
+
+        assessment = classifier.evaluate_temporal_stream(ff)
+
+    assert calibrator.is_calibrated is True
+    assert classifier.ingress_impairment_detected is False
+    assert assessment is not None
+    assert assessment.classification == "SOBER"
+    assert assessment.risk_score < 25.0
+
+
+def test_visualizer_display_stabilization_toggle():
+    """Verify Visualizer toggle [s] enables display gimbal stabilization without crashing or corrupting frames."""
+    import cv2
+    viz = Visualizer()
+    assert viz.stabilize_display is False
+
+    # Toggle with hotkey 's'
+    handled = viz.handle_key(ord('s'))
+    assert handled is True
+    assert viz.stabilize_display is True
+
+    # Create dummy shaking frames
+    frame = np.full((480, 640, 3), 120, dtype=np.uint8)
+    cv2.circle(frame, (320, 240), 30, (255, 255, 255), -1)
+
+    lm = make_full_landmarks(ear_val=0.30)
+    out1 = viz.draw(frame.copy(), landmarks=lm, shift_vector=(2.0, -1.5))
+    assert out1.shape == (480, 640, 3)
+
+    lm_shifted = lm.copy()
+    lm_shifted[:, 0] += 5.0
+    lm_shifted[:, 1] -= 3.0
+    out2 = viz.draw(frame.copy(), landmarks=lm_shifted, shift_vector=(5.0, -3.0))
+    assert out2.shape == (480, 640, 3)
+
+    # Toggle off
+    viz.handle_key(ord('S'))
+    assert viz.stabilize_display is False

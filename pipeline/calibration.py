@@ -123,9 +123,11 @@ class PersonalBaselineCalibrator:
         if 0.02 < features.mar < 0.40 and not features.yawn_detected:
             self._mar_samples.append(features.mar)
 
-        # Accumulate completed blink upstroke velocities
+        # Accumulate completed blink upstroke velocities (avoid duplicating held low-FPS values across non-blink frames)
         if features.blink_opening_velocity > 0.20:
-            self._blink_up_samples.append(features.blink_opening_velocity)
+            if features.blink_detected or not self._blink_up_samples or features.blink_opening_velocity >= PHYSIOLOGICAL_BLINK_UP_MIN:
+                if not self._blink_up_samples or features.blink_detected or len(self._blink_up_samples) < 30:
+                    self._blink_up_samples.append(features.blink_opening_velocity)
 
         # Accumulate valid RGB facial flushing ratios
         if features.flushing_valid and features.facial_flushing_ratio > 0.5:
@@ -168,7 +170,7 @@ class PersonalBaselineCalibrator:
             reasons.append(
                 f"Resting open EAR {raw_ear:.3f} < physiological sober minimum {PHYSIOLOGICAL_EAR_MIN:.2f} (severe ptosis)"
             )
-        if has_min_blink and raw_blink_up < PHYSIOLOGICAL_BLINK_UP_MIN:
+        if has_min_blink and raw_blink_up < PHYSIOLOGICAL_BLINK_UP_MIN and (not has_min_ear or raw_ear < PHYSIOLOGICAL_EAR_MIN):
             ingress_flag = True
             reasons.append(
                 f"Eyelid reopening velocity {raw_blink_up:.2f} EAR/s < physiological sober minimum {PHYSIOLOGICAL_BLINK_UP_MIN:.2f} EAR/s"

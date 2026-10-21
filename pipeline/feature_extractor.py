@@ -846,6 +846,10 @@ class FeatureExtractor:
 
         # State machine: track blink phase transitions
         if self._blink_phase == "open":
+            stare_dur = (timestamp - self._stare_start_time) if getattr(self, "_stare_start_time", None) is not None else 0.0
+            if ear_avg >= self.blink_threshold * 1.20 and stare_dur < 1.0:
+                if 0.0 < self._last_blink_opening_vel < self.sober_blink_up_baseline:
+                    self._last_blink_opening_vel = min(self.sober_blink_up_baseline, self._last_blink_opening_vel + 0.15 * dt)
             if (d_ear < -0.010 or d_inst < -0.010) and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
                 # EAR dropping → entering closing phase
                 if ear_avg < self.blink_threshold:
@@ -1198,6 +1202,10 @@ class FeatureExtractor:
                         if med < 1.65:
                             self.baseline_flushing = med
                         self._flushing_cal_locked = True
+
+                if getattr(self, "_flushing_cal_locked", False):
+                    if abs(self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing) < 0.18:
+                        self.baseline_flushing = 0.995 * self.baseline_flushing + 0.005 * self._smoothed_flushing
 
                 flushing_delta = float((self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing))
                 return (float(self._smoothed_flushing), True, flushing_delta)

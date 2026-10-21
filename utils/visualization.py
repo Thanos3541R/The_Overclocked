@@ -44,6 +44,7 @@ class Visualizer:
         solid_alpha: float = 0.42,
         enabled_solid_parts: Optional[List[str]] = None,
         show_roi_box: bool = False,
+        stabilize_display: bool = False,
     ):
         """Initialize HUD visualizer.
 
@@ -77,6 +78,12 @@ class Visualizer:
         self.show_pose_axes = show_pose_axes
         self.solid_alpha = float(solid_alpha)
         self.show_roi_box: bool = bool(show_roi_box)
+        self.stabilize_display: bool = bool(stabilize_display)
+        self._stab_anchor_x: Optional[float] = None
+        self._stab_anchor_y: Optional[float] = None
+        self._stab_cum_dx: float = 0.0
+        self._stab_cum_dy: float = 0.0
+        self._stab_zoom: float = 1.12
 
         # Dictionary of individual solid facial part toggles
         if enabled_solid_parts is not None:
@@ -304,6 +311,13 @@ class Visualizer:
         elif key in (ord('r'), ord('R')):
             self.show_roi_box = not self.show_roi_box
             return True
+        elif key in (ord('s'), ord('S')):
+            self.stabilize_display = not self.stabilize_display
+            self._stab_anchor_x = None
+            self._stab_anchor_y = None
+            self._stab_cum_dx = 0.0
+            self._stab_cum_dy = 0.0
+            return True
         return False
 
     def draw(
@@ -401,6 +415,14 @@ class Visualizer:
             if pose_ok:
                 self._draw_pose_axes(frame, pnp_normalizer, is_gated=is_gated)
 
+        # ── Adaptive ROI & Kinematic Stabilizer Overlay (Hotkey [r]) ──
+        if self.show_roi_box and roi_bounds is not None:
+            self._draw_roi_and_shift(frame, roi_bounds, shift_vector)
+
+        # ── Optional Demo Visual Display Stabilization (Hotkey [s]) ──
+        if self.stabilize_display:
+            self._apply_display_stabilization(frame, landmarks, shift_vector)
+
         # ── Gating Border: Red on gated frames, Green on valid ──
         if features is not None:
             border_color = (0, 0, 255) if is_gated else (0, 255, 0)
@@ -411,16 +433,12 @@ class Visualizer:
         if self.overlay_mode != "off":
             self._draw_legend(frame, is_gated=is_gated)
 
-        # ── Adaptive ROI & Kinematic Stabilizer Overlay (Hotkey [r]) ──
-        if self.show_roi_box and roi_bounds is not None:
-            self._draw_roi_and_shift(frame, roi_bounds, shift_vector)
-
-        # ── Top-Center Diagnostic Status Banner ──
-        if assessment is not None:
-            self._draw_status_banner(frame, assessment, bayesian_state, calibration_progress)
-
         # ── Text HUD Panel (Top-Left) ──
         self._draw_text_panel(frame, features)
+
+        # ── Top-Center Diagnostic Status Banner (Drawn on top of HUD to guarantee visibility) ──
+        if assessment is not None:
+            self._draw_status_banner(frame, assessment, bayesian_state, calibration_progress)
 
         return frame
 
@@ -592,6 +610,56 @@ class Visualizer:
             else:
                 cv2.arrowedLine(frame, origin, end, colors_solid[i], 2, cv2.LINE_AA)
 
+    def _apply_display_stabilization(
+        self,
+        frame: np.ndarray,
+        landmarks: Optional[np.ndarray],
+        shift_vector: Optional[Tuple[float, float]] = None,
+    ) -> None:
+        """Apply fast (<0.8ms) crop-and-resize gimbal stabilization to the display frame in-place."""
+        h, w = frame.shape[:2]
+        if h < 64 or w < 64:
+            return
+
+        zoom = self._stab_zoom
+        crop_w = max(32, int(round(w / zoom)))
+        crop_h = max(32, int(round(h / zoom)))
+        max_tx = (w - crop_w) / 2.0
+        max_ty = (h - crop_h) / 2.0
+
+        # Track rigid skull anchor center when landmarks are valid, else use phase-correlation shift_vector
+        if (landmarks is not None and getattr(landmarks, "ndim", 0) == 2 and
+                len(landmarks) > 263 and np.all(np.isfinite(landmarks[[4, 33, 263], :2]))):
+            fx = float(np.mean(landmarks[[4, 33, 263, 152], 0]))
+            fy = float(np.mean(landmarks[[4, 33, 263, 152], 1]))
+            if self._stab_anchor_x is None or self._stab_anchor_y is None:
+                self._stab_anchor_x = fx
+                self._stab_anchor_y = fy
+            else:
+                # Slow EMA (alpha=0.05) follows intentional posture shifts while rejecting 2-15 Hz camera shake
+                self._stab_anchor_x = 0.95 * self._stab_anchor_x + 0.05 * fx
+                self._stab_anchor_y = 0.95 * self._stab_anchor_y + 0.05 * fy
+            shake_x = fx - self._stab_anchor_x
+            shake_y = fy - self._stab_anchor_y
+        else:
+            if shift_vector is not None:
+                self._stab_cum_dx = 0.88 * (self._stab_cum_dx + float(shift_vector[0]))
+                self._stab_cum_dy = 0.88 * (self._stab_cum_dy + float(shift_vector[1]))
+            else:
+                self._stab_cum_dx *= 0.85
+                self._stab_cum_dy *= 0.85
+            shake_x = self._stab_cum_dx
+            shake_y = self._stab_cum_dy
+
+        tx = float(np.clip(shake_x, -max_tx, max_tx))
+        ty = float(np.clip(shake_y, -max_ty, max_ty))
+
+        x1 = int(np.clip(round((w - crop_w) / 2.0 + tx), 0, w - crop_w))
+        y1 = int(np.clip(round((h - crop_h) / 2.0 + ty), 0, h - crop_h))
+
+        cropped = frame[y1:y1 + crop_h, x1:x1 + crop_w].copy()
+        cv2.resize(cropped, (w, h), dst=frame, interpolation=cv2.INTER_LINEAR)
+
     def _draw_roi_and_shift(
         self,
         frame: np.ndarray,
@@ -692,8 +760,9 @@ class Visualizer:
 
         mode_label = self.overlay_mode.upper()
         timing_str = f"{self._last_overlay_ms:.2f}ms" if self.overlay_mode != "off" else "0.0ms"
+        stab_str = "ON" if getattr(self, "stabilize_display", False) else "OFF"
         lines = [
-            f"FPS: {self._fps:.1f} | Overlay [v]: {mode_label} ({timing_str})"
+            f"FPS: {self._fps:.1f} | Overlay [v]: {mode_label} ({timing_str}) | Stab [s]: {stab_str}"
         ]
 
         if features is not None:

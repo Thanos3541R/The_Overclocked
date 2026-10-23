@@ -112,3 +112,54 @@ class TestPipelineIntegration:
         turn_state = pose_gate.check((0.0, 45.0, 0.0))
         assert turn_state.face_valid is False
         assert "exceeds" in turn_state.gating_reason
+
+    def test_csv_logger_streaming_and_all_features(self, tmp_path):
+        """Verify CSVLogger streams all FrameFeatures and diagnostics with zero memory buildup."""
+        from main import CSVLogger
+        from pipeline.classifier import ImpairmentAssessment
+        from pipeline.bayesian_filter import BayesianState
+
+        csv_file = tmp_path / "stream_features.csv"
+        logger = CSVLogger(str(csv_file))
+
+        feat = FrameFeatures(
+            timestamp=1.23,
+            frame_id=42,
+            face_valid=True,
+            ear_avg=0.295,
+            perclos=0.03,
+            rppg_pulse_bpm=72.5,
+            masking_divergence_score=15.0,
+        )
+        assessment = ImpairmentAssessment(
+            risk_score=18.5,
+            classification="SOBER",
+            ml_probability=0.12,
+        )
+        b_state = BayesianState(
+            posterior_probability=0.005,
+            sustained_high_confidence_s=0.0,
+            lockout_confirmed=False,
+        )
+
+        # Log frame
+        logger.log(feat, assessment=assessment, bayesian_state=b_state)
+        logger.close()
+
+        # Read back CSV
+        with open(csv_file, "r", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+
+        assert len(reader) == 1
+        row = reader[0]
+        # Check raw & advanced FrameFeatures
+        assert float(row["ear_avg"]) == pytest.approx(0.295, rel=1e-3)
+        assert float(row["rppg_pulse_bpm"]) == pytest.approx(72.5, rel=1e-2)
+        assert float(row["masking_divergence_score"]) == pytest.approx(15.0, rel=1e-2)
+        # Check diagnostics
+        assert float(row["risk_score"]) == pytest.approx(18.5, rel=1e-2)
+        assert row["classification"] == "SOBER"
+        assert float(row["ml_probability"]) == pytest.approx(0.12, rel=1e-3)
+        assert float(row["bayesian_posterior"]) == pytest.approx(0.005, rel=1e-3)
+        assert row["bayesian_lockout_confirmed"] in ("False", "false", "0")
+

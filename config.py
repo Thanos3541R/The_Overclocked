@@ -110,7 +110,7 @@ class PipelineConfig:
     max_freeze_duty_cycle: float = 0.25           # maximum freeze duty cycle over rolling 2.0s window  # [PLACEHOLDER]
 
     # ── Output ──
-    save_csv: bool = False
+    save_csv: bool = True
     csv_output_path: str = "output_features.csv"
     headless: bool = False  # if True, skip OpenCV visualization window
     show_mesh: bool = True

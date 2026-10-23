@@ -70,8 +70,11 @@ def parse_args() -> argparse.Namespace:
         "--headless", action="store_true",
         help="Run without OpenCV display window")
     parser.add_argument(
-        "--save-csv", action="store_true", dest="save_csv",
-        help="Save features to CSV file")
+        "--save-csv", action="store_true", default=True, dest="save_csv",
+        help="Save features to CSV file (default: enabled)")
+    parser.add_argument(
+        "--no-csv", action="store_false", dest="save_csv",
+        help="Disable CSV feature logging")
     parser.add_argument(
         "--csv-path", type=str, default="output_features.csv",
         help="CSV output file path (default: output_features.csv)")
@@ -109,22 +112,71 @@ def parse_args() -> argparse.Namespace:
 
 
 class CSVLogger:
-    """Thread-safe CSV logger for FrameFeatures."""
+    """Thread-safe, streaming CSV logger for FrameFeatures and pipeline diagnostics.
+
+    Writes rows incrementally to disk with line buffering so memory consumption
+    remains strictly O(1) constant regardless of run duration.
+    """
 
     def __init__(self, filepath: str):
         self.filepath = filepath
         self._file = open(filepath, "w", newline="", buffering=1, encoding="utf-8")
-        self._field_names = [f.name for f in fields(FrameFeatures)]
+        self._feature_fields = [f.name for f in fields(FrameFeatures)]
+        self._assessment_fields = [
+            "risk_score",
+            "involuntary_risk_score",
+            "voluntary_masking_score",
+            "classification",
+            "lockout_recommended",
+            "ml_probability",
+            "bayesian_posterior",
+            "bayesian_sustained_s",
+            "bayesian_lockout_confirmed",
+        ]
+        self._field_names = self._feature_fields + self._assessment_fields
         self._writer = csv.DictWriter(self._file, fieldnames=self._field_names)
         self._writer.writeheader()
 
-    def log(self, features: FrameFeatures):
-        """Write a single frame's features to CSV."""
-        self._writer.writerow(asdict(features))
+    def log(
+        self,
+        features: FrameFeatures,
+        assessment: Optional[Any] = None,
+        bayesian_state: Optional[Any] = None,
+    ):
+        """Write a single frame's features and diagnostics to disk immediately (O(1) memory)."""
+        row = {f: getattr(features, f) for f in self._feature_fields}
+        if assessment is not None:
+            row["risk_score"] = round(getattr(assessment, "risk_score", 0.0), 2)
+            row["involuntary_risk_score"] = round(getattr(assessment, "involuntary_risk_score", 0.0), 2)
+            row["voluntary_masking_score"] = round(getattr(assessment, "voluntary_masking_score", 0.0), 2)
+            row["classification"] = getattr(assessment, "classification", "")
+            row["lockout_recommended"] = getattr(assessment, "lockout_recommended", False)
+            ml_prob = getattr(assessment, "ml_probability", None)
+            row["ml_probability"] = round(ml_prob, 4) if ml_prob is not None else ""
+        else:
+            row["risk_score"] = 0.0
+            row["involuntary_risk_score"] = 0.0
+            row["voluntary_masking_score"] = 0.0
+            row["classification"] = ""
+            row["lockout_recommended"] = False
+            row["ml_probability"] = ""
+
+        if bayesian_state is not None:
+            row["bayesian_posterior"] = round(getattr(bayesian_state, "posterior_probability", 0.0), 4)
+            row["bayesian_sustained_s"] = round(getattr(bayesian_state, "sustained_high_confidence_s", 0.0), 2)
+            row["bayesian_lockout_confirmed"] = getattr(bayesian_state, "lockout_confirmed", False)
+        else:
+            row["bayesian_posterior"] = 0.0
+            row["bayesian_sustained_s"] = 0.0
+            row["bayesian_lockout_confirmed"] = False
+
+        self._writer.writerow(row)
 
     def close(self):
         """Flush and close the file."""
-        self._file.close()
+        if not self._file.closed:
+            self._file.flush()
+            self._file.close()
 
 
 def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
@@ -271,9 +323,13 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
     # CSV logger
     csv_logger: Optional[CSVLogger] = None
-    if args.save_csv:
-        csv_logger = CSVLogger(args.csv_path)
-        print(f"[DMS] CSV logging to: {args.csv_path}")
+    save_csv = getattr(args, "save_csv", None)
+    if save_csv is None:
+        save_csv = getattr(config, "save_csv", True)
+    if save_csv:
+        csv_path = getattr(args, "csv_path", None) or getattr(config, "csv_output_path", "output_features.csv")
+        csv_logger = CSVLogger(csv_path)
+        print(f"[DMS] CSV logging active -> {csv_path}")
 
     print(f"[DMS] Pipeline ready — {capture.frame_width}x{capture.frame_height} "
           f"@ {capture.fps:.1f} fps (est.)")
@@ -386,7 +442,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 assessment = classifier.evaluate_temporal_stream(features)
                 bayesian_state = bayesian_filter.update(assessment, timestamp)
                 if csv_logger is not None:
-                    csv_logger.log(features)
+                    csv_logger.log(features, assessment=assessment, bayesian_state=bayesian_state)
 
                 last_raw_frame = frame
                 last_smooth_landmarks = None
@@ -507,7 +563,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
             # ── Output ──
             if csv_logger is not None:
-                csv_logger.log(features)
+                csv_logger.log(features, assessment=assessment, bayesian_state=bayesian_state)
 
             # ── Visualization ──
             current_roi_bounds = (

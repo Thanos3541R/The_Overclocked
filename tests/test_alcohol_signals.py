@@ -506,6 +506,52 @@ class TestBlinkVelocity:
         assert feat_done.blink_opening_velocity >= 2.0, \
             f"Expected peak opening vel >= 2.0 EAR/s, got {feat_done.blink_opening_velocity:.3f}"
 
+    def test_no_sawtooth_reset_in_open_phase(self):
+        """Eliminate the 9-frame sawtooth reset bug: open recovery climbs monotonically."""
+        ext = FeatureExtractor(fps=30.0, blink_threshold=0.20)
+
+        # Baseline open
+        for i in range(5):
+            ext.compute(make_full_landmarks(ear_val=0.15), timestamp=i/30.0, frame_id=i, face_valid=True)
+
+        # Perform a quick blink
+        ext.compute(make_full_landmarks(ear_val=0.04), timestamp=5/30.0, frame_id=5, face_valid=True)
+        ext.compute(make_full_landmarks(ear_val=0.04), timestamp=6/30.0, frame_id=6, face_valid=True)
+        ext.compute(make_full_landmarks(ear_val=0.10), timestamp=7/30.0, frame_id=7, face_valid=True)
+        ext.compute(make_full_landmarks(ear_val=0.15), timestamp=8/30.0, frame_id=8, face_valid=True)
+
+        # Now driver keeps eyes open for 30 frames (1.0 second)
+        vel_history = []
+        for i in range(30):
+            t = (9 + i) / 30.0
+            feat = ext.compute(make_full_landmarks(ear_val=0.15), timestamp=t, frame_id=9+i, face_valid=True)
+            vel_history.append(feat.blink_opening_velocity)
+
+        # Verify velocities never experience a sawtooth dip every 9 frames
+        for i in range(1, len(vel_history)):
+            assert vel_history[i] >= vel_history[i-1] - 1e-6, \
+                f"Sawtooth dip detected at frame {i}: {vel_history[i]:.4f} < {vel_history[i-1]:.4f}"
+
+    def test_post_blink_followthrough_capture(self):
+        """Follow-through frame after transitioning to 'open' captures active reopening upstroke."""
+        ext = FeatureExtractor(fps=30.0, blink_threshold=0.20)
+
+        # Baseline open (ear_avg=0.30)
+        for i in range(5):
+            ext.compute(make_full_landmarks(ear_val=0.15), timestamp=i/30.0, frame_id=i, face_valid=True)
+
+        # Close eyes
+        ext.compute(make_full_landmarks(ear_val=0.04), timestamp=5/30.0, frame_id=5, face_valid=True)
+        ext.compute(make_full_landmarks(ear_val=0.04), timestamp=6/30.0, frame_id=6, face_valid=True)
+
+        # Eyelid reopens to 0.26 (triggers transition to 'open')
+        f7 = ext.compute(make_full_landmarks(ear_val=0.13), timestamp=7/30.0, frame_id=7, face_valid=True)
+        assert f7.blink_phase == "open"
+
+        # Frame 8 has steep follow-through upstroke from 0.26 to 0.32 (jump of 0.06 in 1/30s)
+        f8 = ext.compute(make_full_landmarks(ear_val=0.16), timestamp=8/30.0, frame_id=8, face_valid=True)
+        assert f8.blink_opening_velocity >= 1.8
+
 
 class TestGazeYawDispersion:
     """Test rolling σ_yaw computation."""

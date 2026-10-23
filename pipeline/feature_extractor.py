@@ -317,6 +317,7 @@ class FeatureExtractor:
         self._phase_frames: int = 0                  # frame count in current blink phase (timeout guard)
         self._ear_deriv_window: Deque[Tuple[float, float]] = deque(maxlen=3)
         self._closing_glitch_count: int = 0
+        self._post_blink_followthrough_frames: int = 0
 
         # ── Gaze yaw dispersion (σ_yaw) ──
         dispersion_buffer_size = int(gaze_dispersion_window_sec * fps)
@@ -409,6 +410,7 @@ class FeatureExtractor:
             self._phase_frames = 0
             self._ear_deriv_window.clear()
             self._closing_glitch_count = 0
+            self._post_blink_followthrough_frames = 0
             self._gaze_yaw_history.clear()
             self._prev_head_yaw = None
             self._prev_head_pitch = None
@@ -801,20 +803,23 @@ class FeatureExtractor:
         if ear_avg > self.blink_threshold * 1.15:
             self._open_ear_baseline = 0.98 * self._open_ear_baseline + 0.02 * ear_avg
 
-        self._phase_frames += 1
-
-        # Phase timeout guard: if trapped in closing or opening for > self.blink_phase_timeout_frames frames
-        if self._phase_frames > self.blink_phase_timeout_frames:
-            if self._closing_velocities:
-                self._last_blink_closing_vel = float(np.max(self._closing_velocities))
-            if self._opening_velocities:
-                self._last_blink_opening_vel = float(np.max(self._opening_velocities))
-            if self._blink_phase == "closing":
-                self._blink_phase = "closed" if ear_avg < self.blink_threshold else "open"
-            elif self._blink_phase == "opening":
-                self._blink_phase = "open" if ear_avg >= self.blink_threshold else "closed"
+        # Phase timeout guard: only active when trapped in closing or opening
+        if self._blink_phase in ("closing", "opening"):
+            self._phase_frames += 1
+            if self._phase_frames > self.blink_phase_timeout_frames:
+                if self._closing_velocities:
+                    self._last_blink_closing_vel = float(np.max(self._closing_velocities))
+                if self._opening_velocities:
+                    self._last_blink_opening_vel = float(np.max(self._opening_velocities))
+                if self._blink_phase == "closing":
+                    self._blink_phase = "closed" if ear_avg < self.blink_threshold else "open"
+                elif self._blink_phase == "opening":
+                    self._blink_phase = "open" if ear_avg >= self.blink_threshold else "closed"
+                self._phase_frames = 0
+                self._closing_glitch_count = 0
+                self._post_blink_followthrough_frames = 0
+        else:
             self._phase_frames = 0
-            self._closing_glitch_count = 0
 
         d_inst = float(ear_avg - self._prev_ear_avg)
         self._ear_deriv_window.append((timestamp, ear_avg))
@@ -854,14 +859,27 @@ class FeatureExtractor:
             fps_comp = min(1.65, 1.0 + 12.0 * (dt - 0.033)) if ear_avg >= 0.22 else min(1.65, 1.0 + 10.0 * (dt - 0.035))
             ear_velocity *= fps_comp
 
+        open_thresh = max(
+            self.blink_threshold * 1.18,
+            min(0.26, self._open_ear_baseline * 0.84)
+        )
+
         # State machine: track blink phase transitions
         if self._blink_phase == "open":
+            if getattr(self, "_post_blink_followthrough_frames", 0) > 0:
+                self._post_blink_followthrough_frames -= 1
+                if d_ear > 0.010 and dt > 1e-4:
+                    inst_up = (d_ear / dt) * (1.0 + 12.0 * max(0.0, min(dt, 0.08) - 0.0167))
+                    if inst_up > self._last_blink_opening_vel:
+                        self._last_blink_opening_vel = float(min(inst_up, 6.0))
+
             stare_dur = (timestamp - self._stare_start_time) if getattr(self, "_stare_start_time", None) is not None else 0.0
             if ear_avg >= self.blink_threshold * 1.20 and stare_dur < 1.0:
                 if 0.0 < self._last_blink_opening_vel < self.sober_blink_up_baseline:
                     self._last_blink_opening_vel = min(self.sober_blink_up_baseline, self._last_blink_opening_vel + 0.15 * dt)
             if (d_ear < -0.010 or d_inst < -0.010) and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
                 # EAR dropping → entering closing phase
+                self._post_blink_followthrough_frames = 0
                 if ear_avg < self.blink_threshold:
                     self._blink_phase = "closed"
                 else:
@@ -893,18 +911,21 @@ class FeatureExtractor:
                     self._blink_phase = "open"
                     self._phase_frames = 0
                     self._closing_glitch_count = 0
+                    self._post_blink_followthrough_frames = 0
 
         elif self._blink_phase == "closed":
             if d_ear > 0.005 and ear_avg > self.blink_threshold * 0.75:
                 # EAR rising → entering opening phase
-                reopen_thresh = min(0.22, self._open_ear_baseline * 0.85)
-                if ear_avg >= reopen_thresh:
+                trans_up = (abs(d_ear) / dt) * (1.0 + 12.0 * max(0.0, dt - 0.0167)) if dt > 1e-6 else ear_velocity
+                trans_vel = max(ear_velocity, trans_up)
+                if ear_avg >= open_thresh:
                     # Direct transition to open if eyes reopened above threshold in single frame
                     self._blink_phase = "open"
                     self._phase_frames = 0
                     self._closing_glitch_count = 0
-                    if ear_velocity > 0.02:
-                        self._opening_velocities = [ear_velocity]
+                    self._post_blink_followthrough_frames = 2
+                    if trans_vel > 0.02:
+                        self._opening_velocities = [trans_vel]
                     if self._closing_velocities:
                         self._last_blink_closing_vel = float(
                             np.max(self._closing_velocities))
@@ -915,14 +936,18 @@ class FeatureExtractor:
                     self._blink_phase = "opening"
                     self._phase_frames = 0
                     self._closing_glitch_count = 0
-                    self._opening_velocities = [ear_velocity]
+                    if trans_vel > 0.02:
+                        self._opening_velocities = [trans_vel]
+                    else:
+                        self._opening_velocities = [ear_velocity]
 
         elif self._blink_phase == "opening":
-            reopen_thresh = min(0.22, self._open_ear_baseline * 0.85)
-            if ear_avg >= reopen_thresh:
+            trans_up = (abs(d_ear) / dt) * (1.0 + 12.0 * max(0.0, dt - 0.0167)) if dt > 1e-6 else ear_velocity
+            trans_vel = max(ear_velocity, trans_up)
+            if ear_avg >= open_thresh:
                 # Eyes reopened → blink complete, compute velocities
-                if ear_velocity > 0.02:
-                    self._opening_velocities.append(ear_velocity)
+                if trans_vel > 0.02:
+                    self._opening_velocities.append(trans_vel)
 
                 # Store completed blink peak velocities (robust against slow turnaround edge frames)
                 if self._closing_velocities:
@@ -935,15 +960,17 @@ class FeatureExtractor:
                 self._blink_phase = "open"
                 self._phase_frames = 0
                 self._closing_glitch_count = 0
+                self._post_blink_followthrough_frames = 2
             elif d_ear < -0.010 and ear_avg < self.blink_threshold:
                 # Re-closed during microsleep
                 self._blink_phase = "closed"
                 self._phase_frames = 0
                 self._closing_glitch_count = 0
+                self._post_blink_followthrough_frames = 0
             elif d_ear > 0:
                 # Still opening (omit zero derivative from frozen/gated frames)
-                if ear_velocity > 0.02:
-                    self._opening_velocities.append(ear_velocity)
+                if trans_vel > 0.02:
+                    self._opening_velocities.append(trans_vel)
             else:
                 # Double-dip or flicker — stay in opening
                 pass

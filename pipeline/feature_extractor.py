@@ -39,6 +39,8 @@ from utils.landmarks import (
     LEFT_EYE_CONTOUR, RIGHT_EYE_CONTOUR,
 )
 
+TZONE_FLUSHING_LANDMARKS = VASODILATION_LANDMARKS
+
 
 @dataclass
 class FrameFeatures:
@@ -271,7 +273,10 @@ class FeatureExtractor:
         self._rppg_sample_counter: int = 0
 
         # T-zone rPPG pulse & HRV state (10-second rolling green-channel buffer)
+        self._tzone_indices: np.ndarray = np.asarray(VASODILATION_LANDMARKS, dtype=np.intp)
         self._rppg_green_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(10.0 * fps), 60))
+        self._rppg_sample_counter: int = 0
+        self._rppg_fft_stride_counter: int = 0
         self._last_rppg_bpm: float = 0.0
         self._last_rppg_rmssd: float = 0.0
         self._last_rppg_valid: bool = False
@@ -426,6 +431,7 @@ class FeatureExtractor:
             self._ear_tremor_history.clear()
             self._iris_tremor_history.clear()
             self._rppg_sample_counter = 0
+            self._rppg_fft_stride_counter = 0
             self._rppg_green_history.clear()
             self._last_rppg_bpm = 0.0
             self._last_rppg_rmssd = 0.0
@@ -443,6 +449,10 @@ class FeatureExtractor:
             self._raw_ear_var_history.clear()
             self._highway_fixation_exempt = False
             self._mar_history.clear()
+
+    @property
+    def _last_rppg_hrv(self) -> float:
+        return self._last_rppg_rmssd
 
     @staticmethod
     def compute_ear(landmarks: np.ndarray, indices: list) -> float:
@@ -1130,38 +1140,56 @@ class FeatureExtractor:
     def _sample_tzone_rgb(
         self, frame: Optional[np.ndarray], landmarks: np.ndarray
     ) -> Optional[Tuple[float, float, float]]:
-        """Sample mean (R, G, B) across VASODILATION_LANDMARKS in a single pass."""
+        """Sample mean (R, G, B) across VASODILATION_LANDMARKS in a single vectorized pass."""
         if frame is None or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
             return None
 
         try:
             h, w = frame.shape[:2]
-            r_vals, g_vals, b_vals = [], [], []
-
-            for idx in VASODILATION_LANDMARKS:
-                if idx < len(landmarks):
-                    pt = landmarks[idx]
-                    px = int(pt[0] * w) if pt[0] <= 1.0 else int(pt[0])
-                    py = int(pt[1] * h) if pt[1] <= 1.0 else int(pt[1])
-
-                    # Skip uninitialized / origin points from synthetic test mocks
-                    if px <= 3 and py <= 3:
-                        continue
-
-                    y1 = max(0, py - 3)
-                    y2 = min(h, py + 4)
-                    x1 = max(0, px - 3)
-                    x2 = min(w, px + 4)
-
-                    if y2 > y1 and x2 > x1:
-                        patch = frame[y1:y2, x1:x2]
-                        b_vals.append(float(np.mean(patch[:, :, 0])))
-                        g_vals.append(float(np.mean(patch[:, :, 1])))
-                        r_vals.append(float(np.mean(patch[:, :, 2])))
-
-            if not r_vals or not g_vals or not b_vals:
+            valid_idx = self._tzone_indices[self._tzone_indices < len(landmarks)]
+            if len(valid_idx) == 0:
                 return None
-            return (float(np.mean(r_vals)), float(np.mean(g_vals)), float(np.mean(b_vals)))
+
+            pts = landmarks[valid_idx, :2]
+            # Convert normalized coordinates to pixel if in [0, 1]
+            xs_raw = np.where(pts[:, 0] <= 1.0, pts[:, 0] * w, pts[:, 0])
+            ys_raw = np.where(pts[:, 1] <= 1.0, pts[:, 1] * h, pts[:, 1])
+
+            # Filter uninitialized / origin points from synthetic test mocks (px <= 3 and py <= 3)
+            mask_init = (xs_raw > 3.0) | (ys_raw > 3.0)
+            if not np.any(mask_init):
+                return None
+
+            xs = np.clip(xs_raw[mask_init].astype(np.intp), 2, w - 3)
+            ys = np.clip(ys_raw[mask_init].astype(np.intp), 2, h - 3)
+
+            # Sample center + 4-connected neighbors (5-point cross per landmark) in one NumPy C-operation:
+            patches = (
+                frame[ys, xs].astype(np.float64)
+                + frame[ys - 1, xs].astype(np.float64)
+                + frame[ys + 1, xs].astype(np.float64)
+                + frame[ys, xs - 1].astype(np.float64)
+                + frame[ys, xs + 1].astype(np.float64)
+            ) * 0.2
+
+            b_vals = patches[:, 0]
+            g_vals = patches[:, 1]
+            r_vals = patches[:, 2]
+
+            lum = 0.299 * r_vals + 0.587 * g_vals + 0.114 * b_vals
+            valid_mask = (lum >= 25.0) & (lum <= 240.0)
+            if np.count_nonzero(valid_mask) >= 10:
+                mean_b = float(np.mean(b_vals[valid_mask]))
+                mean_g = float(np.mean(g_vals[valid_mask]))
+                mean_r = float(np.mean(r_vals[valid_mask]))
+            elif len(patches) > 0:
+                mean_b = float(np.mean(b_vals))
+                mean_g = float(np.mean(g_vals))
+                mean_r = float(np.mean(r_vals))
+            else:
+                return None
+
+            return (mean_r, mean_g, mean_b)
         except Exception as exc:
             logger.debug("T-zone RGB patch sampling failed: %s", exc, exc_info=True)
             return None
@@ -1451,13 +1479,14 @@ class FeatureExtractor:
             norm_g = float(mean_g / ((mean_r + mean_g + mean_b) / 3.0 + 1e-5) * 120.0)
             self._rppg_green_history.append((timestamp, norm_g))
             self._rppg_sample_counter += 1
+            self._rppg_fft_stride_counter += 1
 
             times = [t for t, _ in self._rppg_green_history]
             duration = times[-1] - times[0]
             if len(self._rppg_green_history) < 60 or duration < 4.0:
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
 
-            if self._last_rppg_valid and (self._rppg_sample_counter % 5 != 0):
+            if self._last_rppg_valid and (self._rppg_fft_stride_counter % 5 != 0):
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, True)
 
             t_arr = np.array(times, dtype=np.float64)

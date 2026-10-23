@@ -54,17 +54,23 @@ class FrameCapture:
                     self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             else:
                 self.cap = cv2.VideoCapture(source)
+            self._cap = self.cap
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, target_fps)
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if anti_motion_blur:
-                try:
-                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                except Exception:
-                    pass
+            # Prevent camera driver from dropping shutter speed below 1/30s in indoor lighting
+            try:
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            try:
+                # Disable DirectShow low-light compensation / auto-exposure rate dropping
+                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25 if anti_motion_blur else 0.75)
+            except Exception:
+                pass
         else:
             self.cap = cv2.VideoCapture(source)
+            self._cap = self.cap
 
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {source}")
@@ -82,6 +88,7 @@ class FrameCapture:
         self.frame_height = test_frame.shape[0]
         fps_val = self.cap.get(cv2.CAP_PROP_FPS)
         self.fps = float(fps_val) if (fps_val and fps_val > 0 and not np.isnan(fps_val)) else 30.0
+        self.actual_capture_fps = float(self.fps)
 
         # Log negotiated resolution
         print(f"[DMS Capture] Camera opened: {self.frame_width}x{self.frame_height} @ {self.fps} fps")
@@ -108,6 +115,8 @@ class FrameCapture:
 
     def _capture_worker(self):
         """Asynchronous background worker continuously polling live camera frames."""
+        t_prev = time.perf_counter()
+        fps_ema = float(self.fps)
         while self._running:
             try:
                 if not hasattr(self, "cap") or not self.cap.isOpened():
@@ -120,9 +129,15 @@ class FrameCapture:
             if not ret or frame is None:
                 time.sleep(0.005)
                 continue
+            t_now = time.perf_counter()
+            dt = t_now - t_prev
+            if dt > 1e-4:
+                fps_ema = 0.92 * fps_ema + 0.08 * (1.0 / dt)
+            t_prev = t_now
+            self.actual_capture_fps = fps_ema
             with self._condition:
                 self._latest_frame = frame
-                self._latest_frame_timestamp = time.perf_counter()
+                self._latest_frame_timestamp = t_now
                 self._raw_frame_seq += 1
                 self._condition.notify_all()
             time.sleep(0.001)

@@ -55,6 +55,16 @@ class LightingNormalizer:
         return table
 
     @staticmethod
+    def _compute_fast_mean(region: np.ndarray) -> float:
+        """Compute mean luminance using 4x strided subsampling for frames >= 32x32."""
+        if region is None or region.size == 0:
+            return 0.0
+        h, w = region.shape[:2]
+        if h >= 32 and w >= 32:
+            return float(region[::4, ::4].mean())
+        return float(region.mean())
+
+    @staticmethod
     def _get_eval_region(
         img_2d: np.ndarray,
         face_bbox: Optional[Tuple[int, int, int, int]],
@@ -90,8 +100,8 @@ class LightingNormalizer:
             return img_2d
 
         roi = img_2d[y1:y2, x1:x2]
-        lum_left = float(roi[:, :roi_w // 2].mean())
-        lum_right = float(roi[:, roi_w // 2:].mean())
+        lum_left = self._compute_fast_mean(roi[:, :roi_w // 2])
+        lum_right = self._compute_fast_mean(roi[:, roi_w // 2:])
 
         if abs(lum_left - lum_right) > 45.0:
             x_mid = (x1 + x2) // 2
@@ -151,7 +161,7 @@ class LightingNormalizer:
 
             gray_input = self._balance_split_sunlight(gray_input, face_bbox)
             enhanced = self.clahe.apply(gray_input)
-            mean_lum = float(self._get_eval_region(enhanced, face_bbox).mean())
+            mean_lum = self._compute_fast_mean(self._get_eval_region(enhanced, face_bbox))
             if mean_lum < self.low_light_threshold:
                 lut = self._lut_dark if mean_lum < 40.0 else self._lut_dim
                 enhanced = cv2.LUT(enhanced, lut)
@@ -171,14 +181,14 @@ class LightingNormalizer:
         raw_y = self._balance_split_sunlight(raw_y, face_bbox)
         yuv[:, :, 0] = raw_y
 
-        raw_lum = float(self._get_eval_region(raw_y, face_bbox).mean())
+        raw_lum = self._compute_fast_mean(self._get_eval_region(raw_y, face_bbox))
         clahe_y = self.clahe.apply(raw_y)
         if raw_lum >= 95.0:
             # Blend 35% CLAHE + 65% original Y in well-lit scenes to prevent eyeglass glare amplification
             yuv[:, :, 0] = cv2.addWeighted(clahe_y, 0.35, raw_y, 0.65, 0)
         else:
             yuv[:, :, 0] = clahe_y
-        mean_lum = float(self._get_eval_region(yuv[:, :, 0], face_bbox).mean())
+        mean_lum = self._compute_fast_mean(self._get_eval_region(yuv[:, :, 0], face_bbox))
 
         if mean_lum < self.low_light_threshold:
             lut = self._lut_dark if mean_lum < 40.0 else self._lut_dim
@@ -187,3 +197,12 @@ class LightingNormalizer:
         if return_rgb:
             return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB)
         return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+
+    def normalize(
+        self,
+        frame: np.ndarray,
+        return_rgb: bool = False,
+        face_bbox: Optional[Tuple[int, int, int, int]] = None,
+    ) -> np.ndarray:
+        """Alias for process()."""
+        return self.process(frame, return_rgb=return_rgb, face_bbox=face_bbox)

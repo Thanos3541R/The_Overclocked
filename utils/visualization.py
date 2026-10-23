@@ -332,6 +332,7 @@ class Visualizer:
         calibration_progress: Optional[float] = None,
         roi_bounds: Optional[Tuple[int, int, int, int]] = None,
         shift_vector: Optional[Tuple[float, float]] = None,
+        cam_fps: Optional[float] = None,
     ) -> np.ndarray:
         """Draw all debug overlays on the frame.
 
@@ -434,7 +435,7 @@ class Visualizer:
             self._draw_legend(frame, is_gated=is_gated)
 
         # ── Text HUD Panel (Top-Left) ──
-        self._draw_text_panel(frame, features)
+        self._draw_text_panel(frame, features, cam_fps=cam_fps)
 
         # ── Top-Center Diagnostic Status Banner (Drawn on top of HUD to guarantee visibility) ──
         if assessment is not None:
@@ -747,7 +748,7 @@ class Visualizer:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, line2_color, 1, cv2.LINE_AA
             )
 
-    def _draw_text_panel(self, frame: np.ndarray, features) -> None:
+    def _draw_text_panel(self, frame: np.ndarray, features, cam_fps: Optional[float] = None) -> None:
         """Draw feature values and overlay timing as HUD text panel."""
         h, w = frame.shape[:2]
         y_offset = 25
@@ -761,8 +762,9 @@ class Visualizer:
         mode_label = self.overlay_mode.upper()
         timing_str = f"{self._last_overlay_ms:.2f}ms" if self.overlay_mode != "off" else "0.0ms"
         stab_str = "ON" if getattr(self, "stabilize_display", False) else "OFF"
+        cam_str = f" [Cam:{cam_fps:.0f}]" if cam_fps is not None else ""
         lines = [
-            f"FPS: {self._fps:.1f} | Overlay [v]: {mode_label} ({timing_str}) | Stab [s]: {stab_str}"
+            f"FPS: {self._fps:.1f}{cam_str} | Overlay [v]: {mode_label} ({timing_str}) | Stab [s]: {stab_str}"
         ]
 
         if features is not None:

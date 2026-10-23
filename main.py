@@ -102,6 +102,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stabilize-display", action="store_true",
         help="Enable real-time visual video stabilization on the display window (toggle with 's')")
+    parser.add_argument(
+        "--fast-capture", action="store_true",
+        help="Fast camera capture mode (640x480 @ 60 FPS)")
     return parser.parse_args()
 
 
@@ -134,11 +137,14 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         source = args.source  # video file path
 
     # ── Initialize all components ──
+    req_width = 640 if getattr(args, "fast_capture", False) else args.width
+    req_height = 480 if getattr(args, "fast_capture", False) else args.height
+    req_fps = 60.0 if getattr(args, "fast_capture", False) else config.target_fps
     capture = FrameCapture(
         source=source,
-        width=args.width,
-        height=args.height,
-        target_fps=config.target_fps,
+        width=req_width,
+        height=req_height,
+        target_fps=req_fps,
         anti_motion_blur=config.anti_motion_blur,
     )
     preprocessor = LightingNormalizer(
@@ -280,6 +286,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     paused = False
     frame_id = 0
     t0 = time.perf_counter()
+    last_telemetry_time = t0
 
     last_raw_frame = None
     last_smooth_landmarks = None
@@ -518,6 +525,16 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             last_roi_bounds = current_roi_bounds
             last_shift_vector = (dx_cam, dy_cam)
 
+            # ── Periodic Telemetry Log (every 3.0 seconds) ──
+            now_t = time.perf_counter()
+            cam_fps = getattr(capture, "actual_capture_fps", capture.fps) if capture.is_camera else None
+            if now_t - last_telemetry_time >= 3.0:
+                cpu_fps = visualizer.fps
+                cpu_ms = (1000.0 / max(cpu_fps, 1.0)) if cpu_fps > 0 else 0.0
+                cam_label = f"Camera: {cam_fps:.1f} FPS | " if cam_fps is not None else ""
+                print(f"[DMS Telemetry] {cam_label}CPU Pipeline: {cpu_fps:.1f} FPS ({cpu_ms:.1f} ms/frame)")
+                last_telemetry_time = now_t
+
             if not args.headless:
                 try:
                     viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
@@ -532,6 +549,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         calibration_progress=calibrator.progress,
                         roi_bounds=current_roi_bounds,
                         shift_vector=(dx_cam, dy_cam),
+                        cam_fps=cam_fps,
                     )
                     cv2.imshow("Driver Monitor", viz_frame)
                     key = cv2.waitKey(1) & 0xFF

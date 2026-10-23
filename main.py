@@ -529,7 +529,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             now_t = time.perf_counter()
             cam_fps = getattr(capture, "actual_capture_fps", capture.fps) if capture.is_camera else None
             if now_t - last_telemetry_time >= 3.0:
-                cpu_fps = visualizer.fps
+                cpu_fps = getattr(visualizer, "fps", getattr(visualizer, "_fps", 0.0))
                 cpu_ms = (1000.0 / max(cpu_fps, 1.0)) if cpu_fps > 0 else 0.0
                 cam_label = f"Camera: {cam_fps:.1f} FPS | " if cam_fps is not None else ""
                 print(f"[DMS Telemetry] {cam_label}CPU Pipeline: {cpu_fps:.1f} FPS ({cpu_ms:.1f} ms/frame)")

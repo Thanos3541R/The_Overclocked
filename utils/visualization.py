@@ -107,6 +107,11 @@ class Visualizer:
         self._overlay_alpha = 0.15
 
     @property
+    def fps(self) -> float:
+        """Instantaneous/EMA rendering framerate."""
+        return self._fps
+
+    @property
     def show_mesh(self) -> bool:
         """Compatibility property: True if overlay is active."""
         return self.overlay_mode != "off"

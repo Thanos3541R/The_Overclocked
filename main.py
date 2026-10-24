@@ -31,7 +31,7 @@ if sys.version_info < (3, 9):
 
 from dataclasses import asdict, fields
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np

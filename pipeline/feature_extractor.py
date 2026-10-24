@@ -1188,11 +1188,13 @@ class FeatureExtractor:
             if len(valid_idx) == 0:
                 return None
 
-            pts = landmarks[valid_idx, :2]
-            finite_pts = pts[np.isfinite(pts)]
-            if finite_pts.size == 0:
+            pts = np.asarray(landmarks[valid_idx, :2], dtype=np.float64)
+            finite_row_mask = np.isfinite(pts).all(axis=1)
+            pts = pts[finite_row_mask]
+            if len(pts) == 0:
                 return None
-            is_normalized_coords = bool(np.all((finite_pts >= 0.0) & (finite_pts <= 1.0)))
+
+            is_normalized_coords = bool(np.all((pts >= 0.0) & (pts <= 1.0)))
             if is_normalized_coords:
                 xs_raw = pts[:, 0] * w
                 ys_raw = pts[:, 1] * h

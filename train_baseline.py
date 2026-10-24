@@ -328,11 +328,12 @@ def load_dataset_from_npz(
                 vm = vm & (feats[:, :, fv_idx] > 0.5)
             if "timestamps" in data:
                 ts = data["timestamps"]
-                if ts.shape == (n_w, n_f):
+                if ts.shape == (n_w, n_f) and np.any(ts > 0):
                     vm = vm & (ts > 0)
             elif "timestamp" in fnames:
                 ts_idx = fnames.index("timestamp")
-                vm = vm & (feats[:, :, ts_idx] > 0)
+                if np.any(feats[:, :, ts_idx] > 0):
+                    vm = vm & (feats[:, :, ts_idx] > 0)
 
         raw_archives.append({
             "features": feats,
@@ -419,6 +420,17 @@ def load_dataset_from_npz(
                 )(x_target) >= 0.5
         else:
             aligned_vm = vm
+
+        valid_win_mask = np.any(aligned_vm, axis=1)
+        if not np.all(valid_win_mask):
+            n_dropped = int(np.sum(~valid_win_mask))
+            print(f"[Dataset Quarantine] Dropped {n_dropped} completely invalid/all-gated windows.")
+            aligned_feats = aligned_feats[valid_win_mask]
+            aligned_vm = aligned_vm[valid_win_mask]
+            subs = subs[valid_win_mask]
+            labs = labs[valid_win_mask]
+        if len(aligned_feats) == 0:
+            continue
 
         all_features.append(aligned_feats)
         all_valid_masks.append(aligned_vm)
@@ -749,24 +761,23 @@ def train_and_evaluate(
                 random_state=random_state
             )
 
-        # Adaptive CalibratedClassifierCV with group-aware inner calibration
-        if min_fold_samples < 4:
-            clf = base_clf
-        else:
-            calib_cv = min(3, max(2, int(min_fold_samples // 2)))
-            calib_splitter = None
-            if train_fold_subjects is not None and len(np.unique(train_fold_subjects)) >= calib_cv:
-                try:
-                    inner_sgkf = StratifiedGroupKFold(n_splits=calib_cv)
-                    inner_splits = list(inner_sgkf.split(X_train_fold, y_train_fold, groups=train_fold_subjects))
-                    if (len(inner_splits) == calib_cv and 
-                        not any(len(np.unique(y_train_fold[v_idx])) < 2 or len(np.unique(y_train_fold[t_idx])) < 2 for t_idx, v_idx in inner_splits)):
-                        calib_splitter = inner_splits
-                except Exception:
-                    calib_splitter = None
-            if calib_splitter is None:
-                calib_splitter = calib_cv
+        # Adaptive CalibratedClassifierCV with strict group-aware inner calibration (no row-level fallback)
+        calib_splitter = None
+        if min_fold_samples >= 4 and train_fold_subjects is not None and len(np.unique(train_fold_subjects)) >= 2:
+            calib_cv = min(3, max(2, int(min_fold_samples // 2)), len(np.unique(train_fold_subjects)))
+            try:
+                inner_sgkf = StratifiedGroupKFold(n_splits=calib_cv)
+                inner_splits = list(inner_sgkf.split(X_train_fold, y_train_fold, groups=train_fold_subjects))
+                if (len(inner_splits) == calib_cv and
+                    not any(len(np.unique(y_train_fold[v_idx])) < 2 or len(np.unique(y_train_fold[t_idx])) < 2 for t_idx, v_idx in inner_splits)):
+                    calib_splitter = inner_splits
+            except Exception:
+                calib_splitter = None
+
+        if calib_splitter is not None:
             clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv=calib_splitter)
+        else:
+            clf = base_clf
 
         clf.fit(X_train_fold, y_train_fold)
         models.append(clf)
@@ -974,23 +985,22 @@ def train_and_evaluate(
             random_state=random_state
         )
 
-    if min_final_samples < 4:
-        final_model = base_final
-    else:
-        final_calib_cv = min(3, max(2, int(min_final_samples // 2)))
-        final_splitter = None
-        if final_subjects is not None and len(np.unique(final_subjects)) >= final_calib_cv:
-            try:
-                inner_sgkf = StratifiedGroupKFold(n_splits=final_calib_cv)
-                inner_splits = list(inner_sgkf.split(X_final_aug, y_final_aug, groups=final_subjects))
-                if (len(inner_splits) == final_calib_cv and
-                    not any(len(np.unique(y_final_aug[v_idx])) < 2 or len(np.unique(y_final_aug[t_idx])) < 2 for t_idx, v_idx in inner_splits)):
-                    final_splitter = inner_splits
-            except Exception:
-                final_splitter = None
-        if final_splitter is None:
-            final_splitter = final_calib_cv
+    final_splitter = None
+    if min_final_samples >= 4 and final_subjects is not None and len(np.unique(final_subjects)) >= 2:
+        final_calib_cv = min(3, max(2, int(min_final_samples // 2)), len(np.unique(final_subjects)))
+        try:
+            inner_sgkf = StratifiedGroupKFold(n_splits=final_calib_cv)
+            inner_splits = list(inner_sgkf.split(X_final_aug, y_final_aug, groups=final_subjects))
+            if (len(inner_splits) == final_calib_cv and
+                not any(len(np.unique(y_final_aug[v_idx])) < 2 or len(np.unique(y_final_aug[t_idx])) < 2 for t_idx, v_idx in inner_splits)):
+                final_splitter = inner_splits
+        except Exception:
+            final_splitter = None
+
+    if final_splitter is not None:
         final_model = CalibratedClassifierCV(estimator=base_final, method="sigmoid", cv=final_splitter)
+    else:
+        final_model = base_final
 
     final_model.fit(X_final_aug, y_final_aug)
 

@@ -94,7 +94,7 @@ class BayesianEvidenceAccumulator:
         self.log_odds = val
 
     def skip_unobserved(self, timestamp: float) -> BayesianState:
-        """Skip unobserved/gated frame without accumulating evidence or abruptly clearing state."""
+        """Skip unobserved/gated frame without accumulating evidence or decaying the posterior."""
         if self._last_timestamp is None:
             self._last_timestamp = timestamp
             dt = 0.033
@@ -103,8 +103,6 @@ class BayesianEvidenceAccumulator:
             self._last_timestamp = timestamp
 
         if not self._lockout_armed:
-            if self.log_odds > self.initial_log_odds:
-                self.log_odds = float(max(self.initial_log_odds, self.log_odds - 0.15 * dt))
             self._sustained_time_s = max(0.0, self._sustained_time_s - dt * 0.5)
 
         current_p = self.posterior

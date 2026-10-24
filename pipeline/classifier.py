@@ -339,15 +339,32 @@ class ImpairmentClassifier:
             confidence = float(np.clip(0.80 + (25.0 - total_risk) / 25.0 * 0.15, 0.80, 0.95))  # [PLACEHOLDER — pending calibration against real data]
 
         summary = f"Risk Score: {total_risk:.1f}% | Classification: {classification}"
-
+        lockout_rec = (classification == "HIGH_RISK_INTOXICATED")
+        reason_str = "; ".join(indicators) if indicators else "Normal static baseline"
         return ImpairmentAssessment(
             risk_score=total_risk,
             classification=classification,
             confidence=confidence,
             primary_indicators=indicators,
             marker_scores=marker_scores,
-            summary_text=summary
+            summary_text=summary,
+            involuntary_risk_score=total_risk,
+            lockout_recommended=lockout_rec,
+            involuntary_score=total_risk,
+            voluntary_score=0.0,
+            total_risk_score=total_risk,
+            starter_lockout=StarterLockout.LOCK if lockout_rec else StarterLockout.ALLOW,
+            throttle_state=ThrottleState.LIMITED if classification in ("MILD_IMPAIRMENT", "HIGH_RISK_INTOXICATED") else ThrottleState.NORMAL,
+            reason=reason_str,
         )
+
+    def evaluate(self, *args, **kwargs) -> ImpairmentAssessment:
+        """Convenience evaluation dispatcher supporting either FrameFeatures or static image arguments."""
+        if args and isinstance(args[0], FrameFeatures):
+            return self.evaluate_temporal_stream(args[0])
+        if "features" in kwargs and isinstance(kwargs["features"], FrameFeatures):
+            return self.evaluate_temporal_stream(kwargs["features"])
+        return self.evaluate_static_image(*args, **kwargs)
 
     def evaluate_temporal_stream(self, features: FrameFeatures) -> ImpairmentAssessment:
         """Evaluate full temporal stream including saccadic, nystagmus & VOR dynamics.
@@ -665,6 +682,7 @@ class ImpairmentClassifier:
 
         total_risk = float(np.clip(total_risk, 0.0, 100.0))
 
+        reason_str = "; ".join(indicators) if indicators else "No impairment indicators"
         return ImpairmentAssessment(
             risk_score=total_risk,
             classification=classification,
@@ -677,7 +695,13 @@ class ImpairmentClassifier:
             masking_divergence=masking_divergence,
             lockout_recommended=lockout_recommended,
             ml_probability=ml_prob_pct,
-            ml_model_active=ml_active
+            ml_model_active=ml_active,
+            involuntary_score=inv_risk,
+            voluntary_score=vol_masking,
+            total_risk_score=total_risk,
+            starter_lockout=StarterLockout.LOCK if lockout_recommended else StarterLockout.ALLOW,
+            throttle_state=ThrottleState.LIMITED if (lockout_recommended or classification in ("MILD_IMPAIRMENT", "HIGH_RISK_INTOXICATED")) else ThrottleState.NORMAL,
+            reason=reason_str,
         )
 
     @staticmethod

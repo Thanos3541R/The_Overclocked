@@ -36,10 +36,12 @@ jobs:
           pip install pytest pytest-github-actions-annotate-failures
 
       - name: Run test suite
+        shell: bash
         env:
           PYTHONPATH: .
           QT_QPA_PLATFORM: offscreen
         run: |
+          set -o pipefail
           python -m pytest tests/ -v --tb=short 2>&1 | tee pytest_output.log
 
       - name: Publish Test Summary

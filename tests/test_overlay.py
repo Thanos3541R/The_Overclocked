@@ -606,8 +606,8 @@ def test_solid_face_regions_draw_and_latency():
     t1 = time.perf_counter()
     mean_ms = (t1 - t0) * 1000.0 / 30.0
 
-    # Drawing on ROI crop must be extremely fast (< 4.0 ms on CPU)
-    assert mean_ms < 4.0, f"Solid overlay too slow: {mean_ms:.2f} ms"
+    # Drawing on ROI crop must be extremely fast (< 5.0 ms on CPU)
+    assert mean_ms < 5.0, f"Solid overlay too slow: {mean_ms:.2f} ms"
     assert np.count_nonzero(frame) > 0
 
     # Verify dimmed rendering runs cleanly

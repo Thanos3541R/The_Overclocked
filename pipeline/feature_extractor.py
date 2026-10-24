@@ -266,6 +266,8 @@ class FeatureExtractor:
         self.baseline_brow_ratio: float = 0.0
         self._brow_cal_samples: Deque[float] = deque(maxlen=max(int(2.0 * fps), 10))
         self._smoothed_brow_ratio: float = 0.0
+        self._brow_frame_count: int = 0
+        self._ear_warmup_frames: int = 0
 
         # Eyelid micro-tremor / flutter state (2-second rolling window)
         self._ear_tremor_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(2.0 * fps), 15))
@@ -430,6 +432,8 @@ class FeatureExtractor:
             self._brow_cal_samples.clear()
             self._smoothed_brow_ratio = 0.0
             self._brow_initialized = False
+            self._brow_frame_count = 0
+            self._ear_warmup_frames = 0
             self._ear_tremor_history.clear()
             self._iris_tremor_history.clear()
             self._rppg_sample_counter = 0
@@ -801,7 +805,10 @@ class FeatureExtractor:
 
         # Adapt baseline open EAR during sustained open eyes (not during blinks or ptosis droop)
         if ear_avg > self.blink_threshold * 1.15:
-            self._open_ear_baseline = 0.98 * self._open_ear_baseline + 0.02 * ear_avg
+            warmup_count = getattr(self, "_ear_warmup_frames", 0)
+            ear_alpha = 0.15 if warmup_count < 15 else 0.02
+            self._open_ear_baseline = float((1.0 - ear_alpha) * self._open_ear_baseline + ear_alpha * ear_avg)
+            self._ear_warmup_frames = warmup_count + 1
 
         # Phase timeout guard: only active when trapped in closing or opening
         if self._blink_phase in ("closing", "opening"):
@@ -1269,22 +1276,45 @@ class FeatureExtractor:
 
         return (float(self._smoothed_flushing), True, 0.0)
 
-    def _compute_voluntary_eye_widening(self, ear_avg: float, timestamp: float, frontalis_compensation_active: bool = False) -> bool:
+    def _compute_voluntary_eye_widening(
+        self,
+        ear_avg: float,
+        timestamp: float,
+        frontalis_compensation_active: bool = False,
+        head_yaw: float = 0.0,
+    ) -> bool:
         """Detect voluntary eye-widening spikes (Section B).
 
-        Frontalis/levator contraction spikes where EAR surges > 1.25x sober baseline
-        (>0.35 with baseline 0.28), often used to consciously fight ptosis droop.
+        Frontalis/levator contraction spikes where EAR surges > 1.22x open baseline
+        (>0.36), often used to consciously fight ptosis droop.
         """
         self._ear_time_history.append((timestamp, ear_avg))
         cutoff = timestamp - 3.5
         recent = [e for t, e in self._ear_time_history if t >= cutoff]
 
-        if ear_avg > 1.25 * self.sober_ear_baseline:
+        if abs(head_yaw) >= 20.0:
+            return False
+
+        widening_threshold = max(0.36, getattr(self, "_open_ear_baseline", self.sober_ear_baseline) * 1.22)
+        if ear_avg > widening_threshold:
             if recent and (min(recent) < 0.24 or (ear_avg - min(recent)) > 0.08):
                 return True
-        if frontalis_compensation_active and recent and min(recent) < 0.24:
-            return True
+            if frontalis_compensation_active and recent and min(recent) < 0.24:
+                return True
+
         return False
+
+    def _compute_anti_masking_signals(
+        self,
+        ear_avg: float,
+        timestamp: float,
+        frontalis_compensation_active: bool = False,
+        head_yaw: float = 0.0,
+    ) -> bool:
+        """Alias for voluntary eye-widening and anti-masking detection."""
+        return self._compute_voluntary_eye_widening(
+            ear_avg, timestamp, frontalis_compensation_active=frontalis_compensation_active, head_yaw=head_yaw
+        )
 
     def _compute_deliberate_blink_suppression(self, blink_detected: bool, ear_avg: float, timestamp: float) -> bool:
         """Detect deliberate blink suppression (Section B).
@@ -1358,7 +1388,12 @@ class FeatureExtractor:
 
         return (duration, compensatory_stare)
 
-    def _compute_brow_micromotion(self, landmarks: np.ndarray, ear_avg: float) -> Tuple[float, float, bool]:
+    def _compute_brow_micromotion(
+        self,
+        landmarks: np.ndarray,
+        ear_avg: float,
+        head_pitch: float = 0.0,
+    ) -> Tuple[float, float, bool]:
         """Compute vertical eyebrow-to-canthus ratio, delta, and frontalis activation.
 
         Normalized by horizontal inter-canthal width for 100% scale and distance invariance.
@@ -1385,6 +1420,11 @@ class FeatureExtractor:
             ratio_l = (eye_l_y - brow_l_y) / w_l
             raw_ratio = float(0.5 * (ratio_r + ratio_l))
 
+            # First-order pitch compensation: tilting head down (head_pitch > 0) or up (head_pitch < 0)
+            raw_ratio = float(raw_ratio * (1.0 + 0.006 * np.clip(head_pitch, -20.0, 20.0)))
+
+            self._brow_frame_count = getattr(self, "_brow_frame_count", 0) + 1
+
             if not getattr(self, "_brow_initialized", False) or self._smoothed_brow_ratio <= 0.0:
                 self._smoothed_brow_ratio = raw_ratio
                 self._brow_initialized = True
@@ -1397,6 +1437,12 @@ class FeatureExtractor:
                     self.baseline_brow_ratio = float(np.median(self._brow_cal_samples))
                 else:
                     return (float(self._smoothed_brow_ratio), 0.0, False)
+            elif ear_avg >= self.blink_threshold:
+                # Fast initial warmup during first 25 frames, then gentle ongoing drift tracking
+                brow_delta_temp = (raw_ratio - self.baseline_brow_ratio) / max(0.1, abs(self.baseline_brow_ratio))
+                if brow_delta_temp < 0.10:
+                    alpha = 0.15 if self._brow_frame_count <= 25 else 0.005
+                    self.baseline_brow_ratio = float((1.0 - alpha) * self.baseline_brow_ratio + alpha * raw_ratio)
 
             brow_delta = float((self._smoothed_brow_ratio - self.baseline_brow_ratio) / max(0.1, abs(self.baseline_brow_ratio)))
             frontalis_active = bool(brow_delta >= 0.12)
@@ -1404,6 +1450,8 @@ class FeatureExtractor:
         except Exception as exc:
             logger.debug("Brow ratio computation failed: %s", exc, exc_info=True)
             return (0.0, 0.0, False)
+
+    _compute_frontalis_compensation = _compute_brow_micromotion
 
     def _compute_eyelid_tremor(self, ear_avg: float, timestamp: float, blink_phase: str, vibration_score: float = 0.0) -> float:
         """Track high-frequency palpebral micro-flutter (3-15 Hz).
@@ -1551,10 +1599,26 @@ class FeatureExtractor:
 
             rmssd = 0.0
             if len(zc) >= 3:
-                ibis = np.diff(zc) * 1000.0  # ms
-                valid_ibis = [ibi for ibi in ibis if 300.0 <= ibi <= 1500.0]
-                if len(valid_ibis) >= 2:
-                    rmssd = float(round(np.sqrt(np.mean(np.diff(valid_ibis) ** 2)), 2))
+                ibis = np.diff(zc)  # in seconds
+                valid_ibis = ibis[(ibis >= 0.40) & (ibis <= 1.35)]
+                if len(valid_ibis) >= 3:
+                    med_ibi = float(np.median(valid_ibis))
+                    clean_ibis = valid_ibis[np.abs(valid_ibis - med_ibi) <= 0.22 * med_ibi]
+                    if len(clean_ibis) >= 3:
+                        succ_diffs = np.diff(clean_ibis)
+                        rmssd_ms = float(np.clip(np.sqrt(np.mean(succ_diffs ** 2)) * 1000.0, 10.0, 135.0))
+                        rmssd = float(round(rmssd_ms, 2))
+                    elif len(valid_ibis) >= 2:
+                        succ_diffs = np.diff(valid_ibis)
+                        rmssd_ms = float(np.clip(np.sqrt(np.mean(succ_diffs ** 2)) * 1000.0, 10.0, 135.0))
+                        rmssd = float(round(rmssd_ms, 2))
+                elif len(valid_ibis) >= 2:
+                    succ_diffs = np.diff(valid_ibis)
+                    rmssd_ms = float(np.clip(np.sqrt(np.mean(succ_diffs ** 2)) * 1000.0, 10.0, 135.0))
+                    rmssd = float(round(rmssd_ms, 2))
+
+            if rmssd == 0.0 and self._last_rppg_rmssd > 0.0:
+                rmssd = self._last_rppg_rmssd
 
             self._last_rppg_bpm = bpm
             self._last_rppg_rmssd = rmssd
@@ -1563,6 +1627,8 @@ class FeatureExtractor:
         except Exception as exc:
             logger.debug("rPPG pulse FFT/HRV computation failed: %s", exc, exc_info=True)
             return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
+
+    _compute_rppg = _compute_rppg_pulse
 
     def _compute_anti_masking_divergence(self, features: FrameFeatures, timestamp: float = 0.0) -> Tuple[float, bool]:
         """Compute Anti-Masking Divergence Metric (M_mask).
@@ -1932,9 +1998,25 @@ class FeatureExtractor:
                 features.right_iris_x = features.left_iris_x
                 features.right_iris_y = features.left_iris_y
 
+            # ── Pose-Compensated EAR (Real Video Frames: image_landmarks is not None) ──
+            if image_landmarks is not None:
+                if not (glare_l and not glare_r) and not (glare_r and not glare_l):
+                    raw_ear_avg = (features.ear_left + features.ear_right) / 2.0
+                    curr_ear_avg = raw_ear_avg
+                    if abs(head_yaw) > 12.0 and max(features.ear_left, features.ear_right) > 0.18:
+                        yaw_weight = min(0.35, (abs(head_yaw) - 12.0) / 40.0)
+                        curr_ear_avg = (0.5 + yaw_weight) * max(features.ear_left, features.ear_right) + (0.5 - yaw_weight) * min(features.ear_left, features.ear_right)
+                    if head_pitch > 6.0:
+                        pitch_comp = min(0.045, (head_pitch - 6.0) * 0.0025)
+                        curr_ear_avg = curr_ear_avg + pitch_comp
+                    features.ear_avg = curr_ear_avg
+                elif head_pitch > 6.0:
+                    pitch_comp = min(0.045, (head_pitch - 6.0) * 0.0025)
+                    features.ear_avg = features.ear_avg + pitch_comp
+
             # ── Downward Glance Threshold Compensation (Instrument Cluster Glance Guard) ──
             avg_iris_y = (features.left_iris_y + features.right_iris_y) / 2.0
-            down_pitch_deg = max(0.0, -head_pitch - 8.0)
+            down_pitch_deg = max(0.0, head_pitch - 6.0, -head_pitch - 8.0)
             down_gaze_unit = max(0.0, -avg_iris_y - 0.20)
             if down_pitch_deg > 0.0 or down_gaze_unit > 0.0:
                 glance_scale = max(0.65, 1.0 - 0.012 * down_pitch_deg - 0.15 * down_gaze_unit)
@@ -2109,7 +2191,7 @@ class FeatureExtractor:
 
             # ── Eyebrow / Frontalis Micromotions ──
             features.brow_eye_distance_ratio, features.brow_elevation_delta, features.frontalis_compensation_active = \
-                self._compute_brow_micromotion(sample_lms, features.ear_avg)
+                self._compute_brow_micromotion(sample_lms, features.ear_avg, head_pitch=head_pitch)
 
             # ── Palpebral Eyelid Tremor (3-15 Hz) & Ocular Eyeball Tremor (1-15 Hz) ──
             features.eyelid_tremor_hz = \
@@ -2136,6 +2218,7 @@ class FeatureExtractor:
                 self._compute_voluntary_eye_widening(
                     features.ear_avg, timestamp,
                     frontalis_compensation_active=features.frontalis_compensation_active,
+                    head_yaw=head_yaw,
                 )
             features.deliberate_blink_suppression = \
                 self._compute_deliberate_blink_suppression(features.blink_detected, features.ear_avg, timestamp)

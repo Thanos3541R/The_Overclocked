@@ -184,15 +184,16 @@ class LightingNormalizer:
         raw_lum = self._compute_fast_mean(self._get_eval_region(raw_y, face_bbox))
         clahe_y = self.clahe.apply(raw_y)
         if raw_lum >= 95.0:
-            # Blend 35% CLAHE + 65% original Y in well-lit scenes to prevent eyeglass glare amplification
-            yuv[:, :, 0] = cv2.addWeighted(clahe_y, 0.35, raw_y, 0.65, 0)
-        else:
-            yuv[:, :, 0] = clahe_y
-        mean_lum = self._compute_fast_mean(self._get_eval_region(yuv[:, :, 0], face_bbox))
+            # Blend 35% CLAHE + 65% original Y in-place into clahe_y to prevent temporary array allocations
+            cv2.addWeighted(clahe_y, 0.35, raw_y, 0.65, 0, dst=clahe_y)
+
+        mean_lum = self._compute_fast_mean(self._get_eval_region(clahe_y, face_bbox))
 
         if mean_lum < self.low_light_threshold:
             lut = self._lut_dark if mean_lum < 40.0 else self._lut_dim
-            yuv[:, :, 0] = cv2.LUT(yuv[:, :, 0], lut)
+            cv2.LUT(clahe_y, lut, dst=clahe_y)
+
+        yuv[:, :, 0] = clahe_y
 
         if return_rgb:
             return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB)

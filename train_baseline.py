@@ -144,9 +144,10 @@ def compute_window_summary_features(
         stds = np.nanstd(clean_3d, axis=1)
         mins = np.nanmin(clean_3d, axis=1)
         maxs = np.nanmax(clean_3d, axis=1)
-        medians = np.nanmedian(clean_3d, axis=1)
-        p10s = np.nanpercentile(clean_3d, 10, axis=1)
-        p90s = np.nanpercentile(clean_3d, 90, axis=1)
+        q10_50_90 = np.nanpercentile(clean_3d, [10.0, 50.0, 90.0], axis=1)
+        p10s = q10_50_90[0]
+        medians = q10_50_90[1]
+        p90s = q10_50_90[2]
 
     means = np.nan_to_num(means, nan=0.0)
     stds = np.nan_to_num(stds, nan=0.0)

@@ -101,37 +101,33 @@ def test_vergence_nasal_convergence_and_temporal_divergence():
 
 def test_tzone_coordinates_pixel_x1_not_misclassified_as_normalized():
     """(d) T-zone coordinates at pixel x=1 are not misclassified as normalized."""
+    from utils.landmarks import VASODILATION_LANDMARKS
     ext = FeatureExtractor()
 
-    # Spatially split image: left side x < 50 has R=200, G=50, B=50; right side x >= 50 has R=30, G=50, B=200
-    # Note: OpenCV image layout is BGR
+    # Spatially varying frame: left-edge columns frame[:, :50] have BGR (40, 80, 200) (R=200, B=40)
+    # and right-side columns frame[:, 50:] have BGR (200, 80, 40) (R=40, B=200)
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    frame[:, :50, 0] = 50   # B
-    frame[:, :50, 1] = 50   # G
-    frame[:, :50, 2] = 200  # R
+    frame[:, :50] = (40, 80, 200)
+    frame[:, 50:] = (200, 80, 40)
 
-    frame[:, 50:, 0] = 200  # B
-    frame[:, 50:, 1] = 50   # G
-    frame[:, 50:, 2] = 30   # R
-
-    # Pixel landmarks: place one landmark at x=120, y=100 so array is in pixel coords
+    # Pixel landmarks: place all VASODILATION_LANDMARKS at [1.0, 100.0, 0.0]
+    # except one landmark at [20.0, 100.0, 0.0] so the array is in pixel space.
     lms_pixel = np.zeros((478, 3), dtype=np.float64)
-    lms_pixel[0] = [120.0, 100.0, 0.0]
-
-    # Place all T-zone landmarks at x=1.0, y=100.0 (left red edge)
-    for idx in ext._tzone_indices:
+    for idx in VASODILATION_LANDMARKS:
         if idx < 478:
             lms_pixel[idx] = [1.0, 100.0, 0.0]
+    if VASODILATION_LANDMARKS:
+        lms_pixel[VASODILATION_LANDMARKS[0]] = [20.0, 100.0, 0.0]
 
     # Sample T-zone RGB
     res = ext._sample_tzone_rgb(frame, lms_pixel)
     assert res is not None
     r, g, b = res
 
-    # If correctly treated as pixel coordinates, it samples the red left edge (r > 150, b < 80).
-    # If misclassified as normalized, x=1.0 would scale to 640, sampling the blue right edge (b=200, r=30).
-    assert r > 150, f"Expected red left edge (r > 150), got r={r:.1f}"
-    assert b < 80, f"Expected low blue on left edge (b < 80), got b={b:.1f}"
+    # If correctly treated as pixel coordinates, it samples the red left edge (r > 180, b < 60).
+    # If misclassified as normalized, x=1.0 would scale to 640, sampling the blue right edge (b=200, r=40).
+    assert r > 180, f"Expected red left edge (r > 180), got r={r:.1f}"
+    assert b < 60, f"Expected low blue on left edge (b < 60), got b={b:.1f}"
 
 
 def test_invalid_rgb_frames_return_flushing_and_rppg_invalid():

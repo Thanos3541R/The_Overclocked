@@ -71,13 +71,11 @@ class KinematicStabilizer:
         if h < 32 or w < 32:
             return 0.0, 0.0, False
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-
         # Check if valid face ROI is available
         use_face_roi = False
         rx1, ry1 = 0, 0
         roi_w, roi_h = w, h
-        target_patch = gray
+        target_patch = frame
 
         if face_center is not None and face_scale is not None:
             fc_x, fc_y = face_center
@@ -90,7 +88,7 @@ class KinematicStabilizer:
                 ry1 = max(0, min(h - roi_size, int(round(float(fc_y) - roi_size / 2.0))))
                 rx2 = rx1 + roi_size
                 ry2 = ry1 + roi_size
-                target_patch = gray[ry1:ry2, rx1:rx2]
+                target_patch = frame[ry1:ry2, rx1:rx2]
                 roi_w = rx2 - rx1
                 roi_h = ry2 - ry1
                 use_face_roi = True
@@ -104,7 +102,13 @@ class KinematicStabilizer:
             small_w = max(32, w // 4)
             small_h = max(32, h // 4)
 
-        small = cv2.resize(target_patch, (small_w, small_h), interpolation=cv2.INTER_AREA).astype(np.float32)
+        # Crop & resize first, then convert tiny patch to grayscale to minimize memory bandwidth
+        small_resized = cv2.resize(target_patch, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        if small_resized.ndim == 3:
+            small_gray = cv2.cvtColor(small_resized, cv2.COLOR_BGR2GRAY)
+        else:
+            small_gray = small_resized
+        small = small_gray.astype(np.float32)
 
         if self._prev_gray_small is None or self._prev_gray_small.shape != small.shape:
             self._prev_gray_small = small

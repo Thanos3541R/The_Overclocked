@@ -724,9 +724,9 @@ class Visualizer:
             "HIGH_RISK_INTOXICATED": (0, 0, 220),
         }.get(state_str, (80, 80, 80))
 
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (18, 18, 18), -1)
-        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+        banner_roi = frame[by1:by2, bx1:bx2]
+        dark_bg = np.full_like(banner_roi, 18)
+        cv2.addWeighted(dark_bg, 0.85, banner_roi, 0.15, 0, dst=banner_roi)
         cv2.rectangle(frame, (bx1, by1), (bx2, by1 + 6), bar_color, -1)
         cv2.rectangle(frame, (bx1, by1), (bx2, by2), bar_color, 1)
 
@@ -805,8 +805,15 @@ class Visualizer:
             if getattr(features, "highway_fixation_exempt", False):
                 lines.append("[GUARD] HIGHWAY FIXATION EXEMPT")
 
-        for i, text in enumerate(lines):
-            y = y_offset + i * 22
-            (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
-            cv2.rectangle(frame, (x - 2, y - th - 4), (x + tw + 2, y + 4), bg_color, -1)
-            cv2.putText(frame, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)
+        if lines:
+            line_height = 22
+            max_tw = max(cv2.getTextSize(text, font, scale, thickness)[0][0] for text in lines)
+            box_x1 = max(0, x - 4)
+            box_y1 = max(0, y_offset - 16)
+            box_x2 = min(frame.shape[1], x + max_tw + 6)
+            box_y2 = min(frame.shape[0], y_offset + (len(lines) - 1) * line_height + 6)
+            cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), bg_color, -1)
+
+            for i, text in enumerate(lines):
+                y = y_offset + i * line_height
+                cv2.putText(frame, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)

@@ -501,7 +501,7 @@ class FaceMeshDetector:
                 logger.warning("[DMS] Failed initializing FaceLandmarker RunningMode.VIDEO (%s); falling back to IMAGE mode", exc)
                 self._landmarker_video = None
 
-    def _detect_video_raw(self, frame: np.ndarray) -> Optional[np.ndarray]:
+    def _detect_video_raw(self, frame: np.ndarray, timestamp_s: Optional[float] = None) -> Optional[np.ndarray]:
         """Run MediaPipe in temporal VIDEO mode with strictly monotonic timestamps."""
         if getattr(self, "_landmarker_video", None) is None:
             return None
@@ -537,10 +537,12 @@ class FaceMeshDetector:
         rgb = np.ascontiguousarray(rgb)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-        if self._last_video_ts_ms < 0:
-            now_ms = 0
+        if timestamp_s is not None and np.isfinite(timestamp_s) and timestamp_s >= 0.0:
+            candidate_ms = int(round(timestamp_s * 1000.0))
+            now_ms = candidate_ms if self._last_video_ts_ms < 0 else max(self._last_video_ts_ms + 1, candidate_ms)
         else:
-            now_ms = self._last_video_ts_ms + 33
+            step_ms = max(1, int(round(1000.0 / max(getattr(self, "_fps", 30.0), 1.0))))
+            now_ms = 0 if self._last_video_ts_ms < 0 else self._last_video_ts_ms + step_ms
         self._last_video_ts_ms = now_ms
 
         result = self._landmarker_video.detect_for_video(mp_image, now_ms)
@@ -636,12 +638,18 @@ class FaceMeshDetector:
             )
             return landmarks
 
-    def detect(self, frame: np.ndarray, shift_hint: Optional[Tuple[float, float]] = None) -> Optional[np.ndarray]:
+    def detect(
+        self,
+        frame: np.ndarray,
+        shift_hint: Optional[Tuple[float, float]] = None,
+        timestamp_s: Optional[float] = None,
+    ) -> Optional[np.ndarray]:
         """Detect face and extract landmarks with adaptive ROI tracking and multi-scale acquisition.
 
         Args:
             frame: Input frame in BGR (color) or grayscale format.
             shift_hint: Optional (dx, dy) feed-forward camera translation shift from kinematic stabilizer.
+            timestamp_s: Optional timestamp in seconds for monotonic temporal tracking.
 
         Returns:
             Landmarks as numpy array of shape (478, 3) in pixel coordinates
@@ -665,7 +673,7 @@ class FaceMeshDetector:
 
         # 0. Temporal VIDEO mode detection (cuts inference time ~50% via C++ temporal tracking)
         if not is_raw_mocked and getattr(self, "_landmarker_video", None) is not None and w <= 1280:
-            video_lms = self._detect_video_raw(frame)
+            video_lms = self._detect_video_raw(frame, timestamp_s=timestamp_s)
             if video_lms is not None and self._validate_face_geometry(video_lms, w, h):
                 self.roi_tracker.update(video_lms, w, h)
                 self._consecutive_losses = 0

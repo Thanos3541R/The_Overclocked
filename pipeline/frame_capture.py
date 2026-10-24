@@ -103,7 +103,15 @@ class FrameCapture:
         self._raw_frame_seq: int = 1
         self._consumed_frame_seq: int = 0
         self._latest_frame_timestamp: float = time.perf_counter()
-        self.last_frame_timestamp: float = self._latest_frame_timestamp
+        if self.is_camera:
+            self.last_frame_timestamp: float = self._latest_frame_timestamp
+            self._last_video_timestamp: float = -1.0
+        else:
+            pos_msec = self.cap.get(cv2.CAP_PROP_POS_MSEC)
+            init_ts = (pos_msec / 1000.0) if (pos_msec is not None and pos_msec > 0) else (1.0 / max(self.fps, 1.0))
+            self.last_frame_timestamp: float = init_ts
+            self._last_video_timestamp: float = init_ts
+        self.last_frame_is_new: bool = False
         self._running = False
         self._latest_frame: Optional[np.ndarray] = test_frame.copy()
         self._thread: Optional[threading.Thread] = None
@@ -152,20 +160,33 @@ class FrameCapture:
         if not self.is_camera:
             ret, frame = self.cap.read()
             if not ret or frame is None:
+                self.last_frame_is_new = False
                 return None
             if self.is_grayscale and len(frame.shape) == 3:
                 frame = frame[:, :, 0]
-            self.last_frame_timestamp = time.perf_counter()
+            pos_msec = self.cap.get(cv2.CAP_PROP_POS_MSEC)
+            if pos_msec is not None and pos_msec > 0 and (pos_msec / 1000.0) >= self._last_video_timestamp:
+                self.last_frame_timestamp = pos_msec / 1000.0
+                self._last_video_timestamp = self.last_frame_timestamp
+            else:
+                self.last_frame_timestamp = max(
+                    self._last_video_timestamp + (1.0 / max(self.fps, 1.0)),
+                    self._frame_count / max(self.fps, 1.0)
+                )
+                self._last_video_timestamp = self.last_frame_timestamp
+            self.last_frame_is_new = True
             self._frame_count += 1
             return frame
 
         with self._condition:
+            prev_consumed = self._consumed_frame_seq
             if self._raw_frame_seq == self._consumed_frame_seq and self._running:
                 # Wait up to one frame interval (max 50ms) for a fresh hardware frame
                 wait_timeout = min(0.05, 1.5 / max(self.fps, 15.0))
                 self._condition.wait(timeout=wait_timeout)
             frame = self._latest_frame.copy() if self._latest_frame is not None else None
             self.last_frame_timestamp = self._latest_frame_timestamp
+            self.last_frame_is_new = (self._raw_frame_seq != prev_consumed) and (frame is not None)
             self._consumed_frame_seq = self._raw_frame_seq
 
         if frame is None:

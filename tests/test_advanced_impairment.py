@@ -34,8 +34,8 @@ class TestAdvancedOculomotorSignals:
         # Right eye: outer is 33 (temporal, left), inner is 133 (nasal, right)
         # Left eye: inner is 362 (nasal, left), outer is 263 (temporal, right)
         lm_divergent = make_full_landmarks(ear_val=0.30)
-        lm_divergent[473][0] -= 10.0  # right iris temporal (abducted, towards right ear)
-        lm_divergent[468][0] += 10.0  # left iris temporal (abducted, towards left ear)
+        lm_divergent[468][0] -= 10.0  # right eye iris temporal (towards viewer left)
+        lm_divergent[473][0] += 10.0  # left eye iris temporal (towards viewer right)
 
         feat_divergent = ext.compute(lm_divergent, timestamp=1/30.0, frame_id=1, face_valid=True)
         assert feat_divergent.vergence_angle_deg < -3.5

@@ -1070,14 +1070,14 @@ class TestPhase9Enhancements:
         # Downward glance: head pitch -18 deg and iris looking down (avg_iris_y = -0.40)
         # down_pitch_deg = 10, down_gaze_unit = 0.20
         # glance_scale = 1.0 - 0.12 - 0.03 = 0.85 -> eff_threshold = 0.170
-        lm_down = self._make_test_landmarks(ear_val=0.185, iris_y_offset=-8.0)
+        lm_down = self._make_test_landmarks(ear_val=0.185, iris_y_offset=+8.0)
         feat_down = ext.compute(lm_down, timestamp=0.1, frame_id=1, face_valid=True,
                                 head_pitch=-18.0)
         # With compensation, 0.185 >= 0.170, so eyes are NOT considered closed!
         assert ext._consecutive_closed == 0
 
         # But a real blink during downward glance (EAR drops to 0.13 < 0.170) is detected
-        lm_blink = self._make_test_landmarks(ear_val=0.13, iris_y_offset=-8.0)
+        lm_blink = self._make_test_landmarks(ear_val=0.13, iris_y_offset=+8.0)
         feat_blink = ext.compute(lm_blink, timestamp=0.2, frame_id=2, face_valid=True,
                                  head_pitch=-18.0)
         assert ext._consecutive_closed == 1

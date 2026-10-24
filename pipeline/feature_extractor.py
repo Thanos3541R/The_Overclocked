@@ -169,16 +169,20 @@ _SACCADE_DEG_PER_UNIT = 22.0      # Saccadic angular scale (so dx=0.055 at 30fps
 
 def is_monochrome_frame(frame: Optional[np.ndarray]) -> bool:
     """Check if input frame is single-channel grayscale or monochrome NIR."""
-    if frame is None:
+    if frame is None or frame.size == 0:
         return True
     if frame.ndim == 2:
         return True
     if frame.ndim == 3:
         if frame.shape[2] == 1:
             return True
+        if frame.shape[0] == 0 or frame.shape[1] == 0:
+            return True
         if frame.shape[2] == 3:
             # Check sub-sample of pixels across channels
             sub = frame[::16, ::16]
+            if sub.size == 0:
+                return True
             diff1 = np.abs(sub[:, :, 0].astype(np.int16) - sub[:, :, 1].astype(np.int16))
             diff2 = np.abs(sub[:, :, 1].astype(np.int16) - sub[:, :, 2].astype(np.int16))
             return bool(np.max(diff1) < 4 and np.max(diff2) < 4)
@@ -529,25 +533,25 @@ class FeatureExtractor:
             elif iris_center_idx == RIGHT_IRIS_CENTER:
                 ring_indices = RIGHT_IRIS_RING
 
-        outer = landmarks[eye_outer_idx]
-        inner = landmarks[eye_inner_idx]
+        outer = np.asarray(landmarks[eye_outer_idx, :2], dtype=np.float64)
+        inner = np.asarray(landmarks[eye_inner_idx, :2], dtype=np.float64)
 
         eye_center = (outer + inner) / 2.0
         eye_width = float(np.linalg.norm(outer - inner))
 
         if (ring_indices is not None and landmarks is not None and
                 landmarks.shape[0] > max(ring_indices)):
-            ring_pts = landmarks[ring_indices, :2]
-            center_pt = landmarks[iris_center_idx, :2]
+            ring_pts = np.asarray(landmarks[ring_indices, :2], dtype=np.float64)
+            center_pt = np.asarray(landmarks[iris_center_idx, :2], dtype=np.float64)
             dists = np.linalg.norm(ring_pts - center_pt, axis=1)
             # Valid iris ring points must have non-zero radius and be within the eye orbit (< 0.6 * eye_width)
             if np.all((dists > 0.2) & (dists < max(1.0, 0.6 * eye_width))):
                 all_iris_indices = [iris_center_idx] + list(ring_indices)
-                iris = np.mean(landmarks[all_iris_indices], axis=0)
+                iris = np.mean(landmarks[all_iris_indices, :2], axis=0)
             else:
-                iris = landmarks[iris_center_idx]
+                iris = np.asarray(landmarks[iris_center_idx, :2], dtype=np.float64)
         else:
-            iris = landmarks[iris_center_idx]
+            iris = np.asarray(landmarks[iris_center_idx, :2], dtype=np.float64)
 
         if eye_width < 1e-6:
             return (0.0, 0.0)
@@ -560,11 +564,11 @@ class FeatureExtractor:
 
         eye_axis = (right_corner - left_corner) / eye_width
         offset = iris - eye_center
-        x = float(np.dot(offset[:2], eye_axis[:2]) / (eye_width / 2.0))
+        x = float(np.dot(offset, eye_axis) / (eye_width / 2.0))
 
-        # Vertical: perpendicular component
-        perp = np.array([-eye_axis[1], eye_axis[0]])
-        y = float(np.dot(offset[:2], perp) / (eye_width / 2.0))
+        # Vertical: perpendicular upward axis (-1 = down in image, +1 = up in image)
+        perp_up = np.array([eye_axis[1], -eye_axis[0]], dtype=np.float64)
+        y = float(np.dot(offset, perp_up) / (eye_width / 2.0))
 
         if np.isnan(x) or np.isinf(x):
             x = 0.0
@@ -1175,7 +1179,7 @@ class FeatureExtractor:
         self, frame: Optional[np.ndarray], landmarks: np.ndarray
     ) -> Optional[Tuple[float, float, float]]:
         """Sample mean (R, G, B) across VASODILATION_LANDMARKS in a single vectorized pass."""
-        if frame is None or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
+        if frame is None or frame.size == 0 or is_monochrome_frame(frame) or landmarks is None or len(landmarks) < 468:
             return None
 
         try:
@@ -1185,9 +1189,16 @@ class FeatureExtractor:
                 return None
 
             pts = landmarks[valid_idx, :2]
-            # Convert normalized coordinates to pixel if in [0, 1]
-            xs_raw = np.where(pts[:, 0] <= 1.0, pts[:, 0] * w, pts[:, 0])
-            ys_raw = np.where(pts[:, 1] <= 1.0, pts[:, 1] * h, pts[:, 1])
+            finite_pts = pts[np.isfinite(pts)]
+            if finite_pts.size == 0:
+                return None
+            is_normalized_coords = bool(np.all((finite_pts >= 0.0) & (finite_pts <= 1.0)))
+            if is_normalized_coords:
+                xs_raw = pts[:, 0] * w
+                ys_raw = pts[:, 1] * h
+            else:
+                xs_raw = pts[:, 0]
+                ys_raw = pts[:, 1]
 
             # Filter uninitialized / origin points from synthetic test mocks (px <= 3 and py <= 3)
             mask_init = (xs_raw > 3.0) | (ys_raw > 3.0)
@@ -1274,7 +1285,7 @@ class FeatureExtractor:
         except Exception as exc:
             logger.debug("Facial flushing computation failed: %s", exc, exc_info=True)
 
-        return (float(self._smoothed_flushing), True, 0.0)
+        return (float(self._smoothed_flushing), False, 0.0)
 
     def _compute_voluntary_eye_widening(
         self,
@@ -1453,6 +1464,15 @@ class FeatureExtractor:
 
     _compute_frontalis_compensation = _compute_brow_micromotion
 
+    @staticmethod
+    def _count_adjacent_valid_reversals(diffs: np.ndarray, valid_mask: np.ndarray) -> int:
+        if len(diffs) < 2 or int(np.count_nonzero(valid_mask)) < 6:
+            return -1
+        signs = np.sign(diffs)
+        adjacent_valid = valid_mask[:-1] & valid_mask[1:]
+        reversals = int(np.sum(adjacent_valid & ((signs[:-1] * signs[1:]) < 0)))
+        return reversals
+
     def _compute_eyelid_tremor(self, ear_avg: float, timestamp: float, blink_phase: str, vibration_score: float = 0.0) -> float:
         """Track high-frequency palpebral micro-flutter (3-15 Hz).
 
@@ -1475,13 +1495,11 @@ class FeatureExtractor:
         ears = np.array([e for t, e in samples], dtype=np.float64)
         diffs = np.diff(ears)
         valid_mask = (np.abs(diffs) > 0.001) & (np.abs(diffs) < 0.025)
-        valid_diffs = diffs[valid_mask]
 
-        if len(valid_diffs) < 6:
+        reversals = self._count_adjacent_valid_reversals(diffs, valid_mask)
+        if reversals < 0:
             return 0.0
 
-        signs = np.sign(valid_diffs)
-        reversals = int(np.sum(signs[1:] * signs[:-1] < 0))
         tremor_hz = float(reversals / (2.0 * duration))
         if vibration_score > 0.35:
             tremor_hz *= max(0.0, 1.0 - vibration_score)
@@ -1517,13 +1535,11 @@ class FeatureExtractor:
         xs = np.array([x for _, x in samples], dtype=np.float64)
         diffs = np.diff(xs)
         valid_mask = (np.abs(diffs) > 0.001) & (np.abs(diffs) < 0.045)
-        valid_diffs = diffs[valid_mask]
 
-        if len(valid_diffs) < 6:
+        reversals = self._count_adjacent_valid_reversals(diffs, valid_mask)
+        if reversals < 0:
             return 0.0
 
-        signs = np.sign(valid_diffs)
-        reversals = int(np.sum(signs[1:] * signs[:-1] < 0))
         tremor_hz = float(reversals / (2.0 * duration))
         if vibration_score > 0.35:
             tremor_hz *= max(0.0, 1.0 - vibration_score)
@@ -1548,7 +1564,7 @@ class FeatureExtractor:
         try:
             rgb = tzone_rgb if tzone_rgb is not None else self._sample_tzone_rgb(frame, landmarks)
             if rgb is None:
-                return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
+                return (0.0, 0.0, False)
 
             mean_r, mean_g, mean_b = rgb
             norm_g = float(mean_g / ((mean_r + mean_g + mean_b) / 3.0 + 1e-5) * 120.0)
@@ -1937,8 +1953,8 @@ class FeatureExtractor:
                 self._prev_head_timestamp = timestamp
                 self._prev_ear_avg = (self.compute_ear(landmarks, LEFT_EYE_EAR_FLAT) + self.compute_ear(landmarks, RIGHT_EYE_EAR_FLAT)) / 2.0
                 iris_lms = image_landmarks if image_landmarks is not None else landmarks
-                left_x, left_y = self.compute_iris_position(iris_lms, LEFT_IRIS_CENTER, 33, 133)
-                right_x, right_y = self.compute_iris_position(iris_lms, RIGHT_IRIS_CENTER, 263, 362)
+                right_x, right_y = self.compute_iris_position(iris_lms, RIGHT_IRIS_CENTER, 33, 133)
+                left_x, left_y = self.compute_iris_position(iris_lms, LEFT_IRIS_CENTER, 263, 362)
                 self._prev_iris_x = (left_x + right_x) / 2.0
                 self._prev_iris_y = (left_y + right_y) / 2.0
                 self._prev_left_iris_x = left_x
@@ -1975,12 +1991,12 @@ class FeatureExtractor:
 
             # ── Iris gaze ──
             iris_lms = image_landmarks if image_landmarks is not None else landmarks
-            # Left eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
-            features.left_iris_x, features.left_iris_y = self.compute_iris_position(
-                iris_lms, LEFT_IRIS_CENTER, 33, 133)
-            # Right eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
+            # Subject's Right eye (viewer's left): iris 468, corners 33 (outer) & 133 (inner)
             features.right_iris_x, features.right_iris_y = self.compute_iris_position(
-                iris_lms, RIGHT_IRIS_CENTER, 263, 362)
+                iris_lms, RIGHT_IRIS_CENTER, 33, 133)
+            # Subject's Left eye (viewer's right): iris 473, corners 263 (outer) & 362 (inner)
+            features.left_iris_x, features.left_iris_y = self.compute_iris_position(
+                iris_lms, LEFT_IRIS_CENTER, 263, 362)
 
             # ── Eyeglass Glare Detection & Monocular Fallback ──
             glare_l, glare_r, any_glare, sunglasses_occluded = self._evaluate_eye_glare_and_occlusion(

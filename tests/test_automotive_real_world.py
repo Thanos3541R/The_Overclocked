@@ -346,13 +346,13 @@ def test_downward_instrument_cluster_glance_no_false_blink():
     assert ext._consecutive_closed == 1
 
     # Case B: Sustained downward glance at instrument cluster for 30 frames (1 second)
-    # pitch = -18.0°, downward iris gaze (iris_y_offset = -8.0 -> avg_iris_y = -0.40)
+    # pitch = -18.0°, downward iris gaze (iris_y_offset = +8.0 -> avg_iris_y = -0.40)
     # Natural downward EAR reduction to 0.175
     ext.reset()
     feat_down = None
     for i in range(30):
         t = i / 30.0
-        lm_down = make_full_landmarks(ear_val=0.175 / 2.0, iris_y_offset=-8.0)
+        lm_down = make_full_landmarks(ear_val=0.175 / 2.0, iris_y_offset=+8.0)
         feat_down = ext.compute(lm_down, timestamp=t, frame_id=i, face_valid=True, head_pitch=-18.0)
 
     assert feat_down is not None

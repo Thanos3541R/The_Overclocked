@@ -342,6 +342,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     paused = False
     frame_id = 0
     t0 = time.perf_counter()
+    camera_t0: Optional[float] = None
     last_telemetry_time = t0
 
     last_raw_frame = None
@@ -398,11 +399,17 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             if frame is None:
                 break
 
+            if capture.is_camera and not getattr(capture, "last_frame_is_new", True):
+                time.sleep(0.001)
+                continue
+
             frame_id += 1
             if capture.is_camera:
-                timestamp = time.perf_counter() - t0
+                if camera_t0 is None:
+                    camera_t0 = capture.last_frame_timestamp
+                timestamp = max(0.0, capture.last_frame_timestamp - camera_t0)
             else:
-                timestamp = (frame_id - 1) / max(capture.fps, 1.0)
+                timestamp = max(0.0, capture.last_frame_timestamp)
 
             # ── Stage 1: Preprocessing ──
             face_bbox = (
@@ -420,7 +427,11 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 face_center=face_center,
                 face_scale=face_scale,
             )
-            landmarks = detector.detect(processed, shift_hint=(dx_cam, dy_cam))
+            landmarks = detector.detect(
+                processed,
+                shift_hint=(dx_cam, dy_cam),
+                timestamp_s=timestamp,
+            )
 
             if landmarks is None:
                 missing_face_frames += 1

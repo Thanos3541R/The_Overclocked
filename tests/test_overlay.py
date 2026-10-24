@@ -120,14 +120,14 @@ def test_key_regions_definitions():
     assert RIGHT_EYELID_REGION.color != LEFT_EYELID_REGION.color
     assert np.array_equal(
         RIGHT_IRIS_CORNERS_REGION.point_indices,
-        [LEFT_IRIS_CENTER, RIGHT_EYE_OUTER, RIGHT_EYE_INNER]
+        [RIGHT_IRIS_CENTER, RIGHT_EYE_OUTER, RIGHT_EYE_INNER]
     )
-    assert np.array_equal(RIGHT_IRIS_CORNERS_REGION.connections, LEFT_IRIS_CONNECTIONS)
+    assert np.array_equal(RIGHT_IRIS_CORNERS_REGION.connections, RIGHT_IRIS_CONNECTIONS)
     assert np.array_equal(
         LEFT_IRIS_CORNERS_REGION.point_indices,
-        [RIGHT_IRIS_CENTER, LEFT_EYE_OUTER, LEFT_EYE_INNER]
+        [LEFT_IRIS_CENTER, LEFT_EYE_OUTER, LEFT_EYE_INNER]
     )
-    assert np.array_equal(LEFT_IRIS_CORNERS_REGION.connections, RIGHT_IRIS_CONNECTIONS)
+    assert np.array_equal(LEFT_IRIS_CORNERS_REGION.connections, LEFT_IRIS_CONNECTIONS)
 
     # Forehead region checks
     assert FOREHEAD_REGION.name == "Forehead"

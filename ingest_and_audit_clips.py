@@ -240,7 +240,7 @@ def audit_and_ingest_clip(
             dx_cam, dy_cam, is_bumpy = stabilizer.estimate_frame_shift(
                 frame, face_center=face_center, face_scale=face_scale
             )
-            landmarks = detector.detect(processed_frame, shift_hint=(dx_cam, dy_cam))
+            landmarks = detector.detect(processed_frame, shift_hint=(dx_cam, dy_cam), timestamp_s=timestamp)
 
             if landmarks is not None:
                 curr_center = np.array(
@@ -373,6 +373,10 @@ def audit_and_ingest_clip(
 
         features_arr = np.stack([w.features for w in accumulated_windows])
         timestamps_arr = np.stack([w.timestamps for w in accumulated_windows])
+        valid_masks_arr = np.stack([
+            w.valid_mask if getattr(w, "valid_mask", None) is not None else np.ones(w.features.shape[0], dtype=bool)
+            for w in accumulated_windows
+        ])
         subject_ids_arr = np.array([w.subject_id for w in accumulated_windows], dtype=str)
         labels_arr = np.array(
             [w.label if w.label is not None else "" for w in accumulated_windows], dtype=str
@@ -393,6 +397,7 @@ def audit_and_ingest_clip(
             archive_path,
             features=features_arr,
             timestamps=timestamps_arr,
+            valid_masks=valid_masks_arr,
             feature_names=np.array(buffer.feature_names, dtype=str),
             subject_ids=subject_ids_arr,
             session_id=buffer.session_id,

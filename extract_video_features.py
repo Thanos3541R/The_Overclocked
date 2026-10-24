@@ -224,7 +224,7 @@ def extract_video_features(video_path: str,
                 face_center=face_center,
                 face_scale=face_scale,
             )
-            landmarks = detector.detect(processed_frame, shift_hint=(dx_cam, dy_cam))
+            landmarks = detector.detect(processed_frame, shift_hint=(dx_cam, dy_cam), timestamp_s=timestamp)
 
             if landmarks is not None:
                 missing_face_frames = 0

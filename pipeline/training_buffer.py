@@ -32,6 +32,7 @@ class TrainingWindow:
     window_end_time: float
     n_gated_frames: int
     label: Optional[str] = None
+    valid_mask: Optional[np.ndarray] = None
 
 
 CORE_NUMERIC_NAMES = (
@@ -249,16 +250,22 @@ class TrainingBuffer:
             window_slice = buf_list[left_idx:right_idx]
             
             if len(window_slice) >= min_required_frames:
+                n_copy = min(len(window_slice), self.window_frames)
+                n_valid = sum(1 for x in window_slice[:n_copy] if not x[2])
+                if n_valid < min_required_frames:
+                    current_window_start += self.stride_sec
+                    continue
+
                 feats = np.zeros((self.window_frames, len(self.feature_names)), dtype=np.float32)
                 timestamps = np.zeros(self.window_frames, dtype=np.float64)
-                
-                n_copy = min(len(window_slice), self.window_frames)
-                
+                valid_mask = np.zeros(self.window_frames, dtype=bool)
+
                 feats[:n_copy] = np.array([x[1] for x in window_slice[:n_copy]], dtype=np.float32)
                 timestamps[:n_copy] = np.array([x[0] for x in window_slice[:n_copy]], dtype=np.float64)
-                
+                valid_mask[:n_copy] = np.array([not x[2] for x in window_slice[:n_copy]], dtype=bool)
+
                 n_gated = sum(1 for x in window_slice if x[2])
-                
+
                 win = TrainingWindow(
                     features=feats,
                     timestamps=timestamps,
@@ -267,18 +274,19 @@ class TrainingBuffer:
                     window_start_time=current_window_start,
                     window_end_time=current_window_end,
                     n_gated_frames=n_gated,
-                    label=win_label
+                    label=win_label,
+                    valid_mask=valid_mask,
                 )
                 windows.append(win)
-                
+
             current_window_start += self.stride_sec
-            
+
         return windows
 
     def save_to_disk(self, path: str, label: Optional[str] = None):
         """
         Save all accumulated windows to a .npz file.
-        
+
         Args:
             path: Target file path.
             label: Optional ground truth label to assign to windows.
@@ -286,12 +294,16 @@ class TrainingBuffer:
         windows = self.extract_windows(label=label)
         if not windows:
             return
-            
+
         features_arr = np.stack([w.features for w in windows])
         timestamps_arr = np.stack([w.timestamps for w in windows])
+        valid_masks_arr = np.stack([
+            w.valid_mask if w.valid_mask is not None else np.ones(w.features.shape[0], dtype=bool)
+            for w in windows
+        ])
         subject_ids_arr = np.array([w.subject_id for w in windows], dtype=str)
         labels_arr = np.array([w.label if w.label is not None else "" for w in windows], dtype=str)
-        
+
         meta = {
             "fps": self.fps,
             "window_size_sec": self.window_size_sec,
@@ -299,14 +311,46 @@ class TrainingBuffer:
             "min_fill_ratio": self.min_fill_ratio,
             "gated_strategy": self.gated_strategy.value
         }
-        
+
         np.savez(
             path,
             features=features_arr,
             timestamps=timestamps_arr,
+            valid_masks=valid_masks_arr,
             feature_names=np.array(self.feature_names, dtype=str),
             subject_ids=subject_ids_arr,
             session_id=self.session_id,
             labels=labels_arr,
             metadata=json.dumps(meta)
         )
+
+    @staticmethod
+    def load_from_disk(path: str) -> List[TrainingWindow]:
+        """Load TrainingWindow objects from a saved .npz file."""
+        data = np.load(path, allow_pickle=True)
+        features = data["features"]
+        timestamps = data["timestamps"]
+        valid_masks = data["valid_masks"] if "valid_masks" in data else None
+        subject_ids = data["subject_ids"] if "subject_ids" in data else np.array([""] * len(features))
+        labels = data["labels"] if "labels" in data else np.array([""] * len(features))
+        session_id = str(data.get("session_id", ""))
+
+        windows = []
+        for i in range(len(features)):
+            feats = features[i]
+            ts = timestamps[i]
+            vm = valid_masks[i] if valid_masks is not None else (ts > 0.0)
+            n_gated = int(np.sum(~vm))
+            w = TrainingWindow(
+                features=feats,
+                timestamps=ts,
+                subject_id=str(subject_ids[i]) if i < len(subject_ids) else "",
+                session_id=session_id,
+                window_start_time=float(ts[0]) if len(ts) > 0 else 0.0,
+                window_end_time=float(ts[-1]) if len(ts) > 0 else 0.0,
+                n_gated_frames=n_gated,
+                label=str(labels[i]) if i < len(labels) else None,
+                valid_mask=vm,
+            )
+            windows.append(w)
+        return windows

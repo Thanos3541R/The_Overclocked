@@ -76,13 +76,13 @@ LEFT_EYE_CONTOUR = [362, 382, 381, 380, 374, 373, 390, 249,
 # ═══════════════════════════════════════════════════════════════════
 # Iris Landmarks (refine_landmarks=True, indices 468–477)
 # ═══════════════════════════════════════════════════════════════════
-# Subject's LEFT eye iris (viewer's right)
-LEFT_IRIS_CENTER = 468
-LEFT_IRIS_RING = [469, 470, 471, 472]
+# Subject's RIGHT eye iris (viewer's left, paired with corners 33 & 133)
+RIGHT_IRIS_CENTER = 468
+RIGHT_IRIS_RING = [469, 470, 471, 472]
 
-# Subject's RIGHT eye iris (viewer's left)
-RIGHT_IRIS_CENTER = 473
-RIGHT_IRIS_RING = [474, 475, 476, 477]
+# Subject's LEFT eye iris (viewer's right, paired with corners 263 & 362)
+LEFT_IRIS_CENTER = 473
+LEFT_IRIS_RING = [474, 475, 476, 477]
 
 # Fast-moving oculomotor landmarks (28 eyelid contour points + 10 iris points)
 # Kept on a high-bandwidth filter path so blink upstroke and saccade velocities are not damped

@@ -15,8 +15,9 @@ import glob
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import joblib
 import numpy as np
@@ -89,6 +90,7 @@ def compute_window_summary_features(
     feature_names: List[str],
     subjects: Optional[np.ndarray] = None,
     apply_subject_deltas: bool = False,
+    valid_masks: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, List[str]]:
     """Transform 3D window tensors (N, window_frames, n_features) into 2D summary statistics.
 
@@ -100,13 +102,59 @@ def compute_window_summary_features(
     """
     n_windows, window_frames, n_features = windows_3d.shape
 
-    means = np.mean(windows_3d, axis=1)
-    stds = np.std(windows_3d, axis=1)
-    mins = np.min(windows_3d, axis=1)
-    maxs = np.max(windows_3d, axis=1)
-    medians = np.median(windows_3d, axis=1)
-    p10s = np.percentile(windows_3d, 10, axis=1)
-    p90s = np.percentile(windows_3d, 90, axis=1)
+    clean_3d = np.array(windows_3d, dtype=np.float32, copy=True)
+
+    if valid_masks is None:
+        # Infer timestamps > 0 & face_valid for legacy archives
+        if "face_valid" in feature_names:
+            fv_idx = feature_names.index("face_valid")
+            valid_masks = (windows_3d[:, :, fv_idx] > 0.5)
+            if "timestamp" in feature_names:
+                ts_idx = feature_names.index("timestamp")
+                valid_masks = valid_masks & (windows_3d[:, :, ts_idx] > 0)
+        else:
+            valid_masks = np.ones((n_windows, window_frames), dtype=bool)
+    else:
+        valid_masks = np.asarray(valid_masks, dtype=bool)
+
+    # Set invalid/padded rows (~valid_mask) to np.nan
+    clean_3d[~valid_masks] = np.nan
+
+    # Set facial_flushing_ratio/flushing_delta to np.nan on rows where flushing_valid < 0.5
+    if "flushing_valid" in feature_names:
+        fv_idx = feature_names.index("flushing_valid")
+        invalid_flush = (windows_3d[:, :, fv_idx] < 0.5)
+        for flush_name in ["facial_flushing_ratio", "flushing_delta"]:
+            if flush_name in feature_names:
+                idx = feature_names.index(flush_name)
+                clean_3d[invalid_flush, idx] = np.nan
+
+    # Set rppg_pulse_bpm/rppg_hrv_rmssd_ms to np.nan on rows where rppg_valid < 0.5
+    if "rppg_valid" in feature_names:
+        rv_idx = feature_names.index("rppg_valid")
+        invalid_rppg = (windows_3d[:, :, rv_idx] < 0.5)
+        for rppg_name in ["rppg_pulse_bpm", "rppg_hrv_rmssd_ms"]:
+            if rppg_name in feature_names:
+                idx = feature_names.index(rppg_name)
+                clean_3d[invalid_rppg, idx] = np.nan
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        means = np.nanmean(clean_3d, axis=1)
+        stds = np.nanstd(clean_3d, axis=1)
+        mins = np.nanmin(clean_3d, axis=1)
+        maxs = np.nanmax(clean_3d, axis=1)
+        medians = np.nanmedian(clean_3d, axis=1)
+        p10s = np.nanpercentile(clean_3d, 10, axis=1)
+        p90s = np.nanpercentile(clean_3d, 90, axis=1)
+
+    means = np.nan_to_num(means, nan=0.0)
+    stds = np.nan_to_num(stds, nan=0.0)
+    mins = np.nan_to_num(mins, nan=0.0)
+    maxs = np.nan_to_num(maxs, nan=0.0)
+    medians = np.nan_to_num(medians, nan=0.0)
+    p10s = np.nan_to_num(p10s, nan=0.0)
+    p90s = np.nan_to_num(p90s, nan=0.0)
 
     # Concatenate statistics horizontally
     features_2d = np.hstack([means, stds, mins, maxs, medians, p10s, p90s]).astype(np.float32)
@@ -227,7 +275,8 @@ def load_dataset_from_npz(
     npz_paths: List[str],
     target_frames: Optional[int] = None,
     clean_contaminated: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    return_valid_masks: bool = False,
+) -> Union[Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]], Tuple[np.ndarray, np.ndarray, np.ndarray, List[str], np.ndarray]]:
     """Load and concatenate training windows from multiple .npz archives.
 
     Handles heterogeneous archives with:
@@ -267,11 +316,30 @@ def load_dataset_from_npz(
         subs = data["subject_ids"]
         labs = data["labels"]
         fnames = list(data["feature_names"]) if "feature_names" in data else [f"feat_{i}" for i in range(feats.shape[2])]
+
+        if "valid_masks" in data:
+            vm = np.asarray(data["valid_masks"], dtype=bool)
+        else:
+            # Infer timestamps > 0 & face_valid for legacy archives
+            n_w, n_f = feats.shape[0], feats.shape[1]
+            vm = np.ones((n_w, n_f), dtype=bool)
+            if "face_valid" in fnames:
+                fv_idx = fnames.index("face_valid")
+                vm = vm & (feats[:, :, fv_idx] > 0.5)
+            if "timestamps" in data:
+                ts = data["timestamps"]
+                if ts.shape == (n_w, n_f):
+                    vm = vm & (ts > 0)
+            elif "timestamp" in fnames:
+                ts_idx = fnames.index("timestamp")
+                vm = vm & (feats[:, :, ts_idx] > 0)
+
         raw_archives.append({
             "features": feats,
             "subject_ids": subs,
             "labels": labs,
             "feature_names": fnames,
+            "valid_masks": vm,
         })
         for fn in fnames:
             if fn not in target_feature_names:
@@ -299,6 +367,7 @@ def load_dataset_from_npz(
                 target_frames = Counter(frame_counts).most_common(1)[0][0]
 
     all_features = []
+    all_valid_masks = []
     all_subjects = []
     all_labels = []
     n_target_features = len(target_feature_names)
@@ -308,6 +377,7 @@ def load_dataset_from_npz(
         fnames = arc["feature_names"]
         subs = arc["subject_ids"]
         labs = arc["labels"]
+        vm = arc["valid_masks"]
 
         if feats.ndim != 3 or feats.shape[0] == 0:
             continue
@@ -328,6 +398,7 @@ def load_dataset_from_npz(
         if win_frames != target_frames:
             if win_frames <= 1:
                 aligned_feats = np.repeat(aligned_feats, target_frames, axis=1)
+                aligned_vm = np.repeat(vm, target_frames, axis=1)
             else:
                 from scipy.interpolate import interp1d
                 x_orig = np.linspace(0.0, 1.0, win_frames)
@@ -343,8 +414,14 @@ def load_dataset_from_npz(
                         resampled[:, :, t_idx] = (resampled[:, :, t_idx] >= 0.5).astype(np.float32)
 
                 aligned_feats = resampled
+                aligned_vm = interp1d(
+                    x_orig, vm.astype(np.float32), axis=1, kind="nearest", assume_sorted=True, fill_value="extrapolate"
+                )(x_target) >= 0.5
+        else:
+            aligned_vm = vm
 
         all_features.append(aligned_feats)
+        all_valid_masks.append(aligned_vm)
         all_subjects.append(subs)
         all_labels.append(labs)
 
@@ -352,6 +429,7 @@ def load_dataset_from_npz(
         raise ValueError("No valid window samples found across all archives.")
 
     X_3d = np.concatenate(all_features, axis=0)
+    valid_masks_out = np.concatenate(all_valid_masks, axis=0).astype(bool)
     subjects = np.concatenate(all_subjects, axis=0)
     raw_labels = np.concatenate(all_labels, axis=0)
 
@@ -364,7 +442,12 @@ def load_dataset_from_npz(
         else:
             y[i] = 0
 
+    if return_valid_masks:
+        return X_3d, y, subjects, target_feature_names, valid_masks_out
     return X_3d, y, subjects, target_feature_names
+
+
+load_npz_dataset = load_dataset_from_npz
 
 
 def generate_synthetic_dataset(n_subjects: int = 10, windows_per_subject: int = 24, window_frames: int = 90) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
@@ -433,8 +516,10 @@ def generate_synthetic_dataset(n_subjects: int = 10, windows_per_subject: int = 
 def augment_minority_windows_in_fold(
     X_train: np.ndarray,
     y_train: np.ndarray,
-    random_state: int = 42
-) -> Tuple[np.ndarray, np.ndarray]:
+    random_state: int = 42,
+    train_subjects: Optional[np.ndarray] = None,
+    return_subjects: bool = False,
+) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """In-fold minority class oversampling with physiological Gaussian jitter.
 
     Count n_pos = np.sum(y_train == 1) and n_neg = np.sum(y_train == 0).
@@ -447,6 +532,8 @@ def augment_minority_windows_in_fold(
     n_neg = int(np.sum(y_train == 0))
 
     if n_pos == 0 or n_neg == 0 or n_pos == n_neg:
+        if return_subjects:
+            return X_train, y_train, train_subjects
         return X_train, y_train
 
     minority_label = 1 if n_pos < n_neg else 0
@@ -477,6 +564,14 @@ def augment_minority_windows_in_fold(
     X_augmented = np.vstack([X_train, synthetic_X])
     y_augmented = np.concatenate([y_train, synthetic_y])
 
+    if return_subjects:
+        if train_subjects is not None:
+            synthetic_subs = train_subjects[sampled_indices]
+            subs_augmented = np.concatenate([train_subjects, synthetic_subs])
+        else:
+            subs_augmented = None
+        return X_augmented, y_augmented, subs_augmented
+
     return X_augmented, y_augmented
 
 
@@ -485,8 +580,9 @@ def downsample_majority_by_subject(
     y_train: np.ndarray,
     train_subjects: np.ndarray,
     target_ratio: float = 1.25,
-    random_state: int = 42
-) -> Tuple[np.ndarray, np.ndarray]:
+    random_state: int = 42,
+    return_subjects: bool = False,
+) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Downsample majority negative class using stratified sampling across majority subjects.
 
     Prevents CalibratedClassifierCV posterior probability collapse on highly imbalanced
@@ -496,6 +592,8 @@ def downsample_majority_by_subject(
     n_pos = int(np.sum(y_train == 1))
     n_neg = int(np.sum(y_train == 0))
     if n_neg <= int(1.5 * n_pos) or n_pos == 0:
+        if return_subjects:
+            return X_train, y_train, train_subjects
         return X_train, y_train
 
     target_neg = int(target_ratio * n_pos)
@@ -547,6 +645,8 @@ def downsample_majority_by_subject(
     selected_indices = np.concatenate([pos_indices, selected_neg])
     rng.shuffle(selected_indices)
 
+    if return_subjects:
+        return X_train[selected_indices], y_train[selected_indices], train_subjects[selected_indices]
     return X_train[selected_indices], y_train[selected_indices]
 
 
@@ -582,10 +682,8 @@ def train_and_evaluate(
         has_single_class_fold = True
         splits = []
 
-    if has_single_class_fold:
-        print(f"[Warning] StratifiedGroupKFold produced single-class validation fold(s). Falling back to StratifiedKFold...")
-        skf = StratifiedKFold(n_splits=actual_splits, shuffle=True, random_state=random_state)
-        splits = list(skf.split(X, y))
+    if has_single_class_fold or len(splits) == 0:
+        raise ValueError("StratifiedGroupKFold produced a single-class validation fold; refusing to fall back to row-level StratifiedKFold to prevent subject leakage.")
 
     oof_preds = np.zeros(len(y), dtype=np.float32)
     oof_probs = np.zeros(len(y), dtype=np.float32)
@@ -605,8 +703,8 @@ def train_and_evaluate(
 
         # Check if majority downsampling is needed (when n_neg_train > 1.5 * n_pos_train)
         if n_neg_train > 1.5 * n_pos_train and n_pos_train > 0:
-            X_train_fold, y_train_fold = downsample_majority_by_subject(
-                X_train, y_train, train_subjects=subjects[train_idx], target_ratio=1.25, random_state=random_state + fold
+            X_train_fold, y_train_fold, train_fold_subjects = downsample_majority_by_subject(
+                X_train, y_train, train_subjects=subjects[train_idx], target_ratio=1.25, random_state=random_state + fold, return_subjects=True
             )
             fold_scale = 1.0
             fold_class_weight = "balanced"
@@ -617,13 +715,14 @@ def train_and_evaluate(
 
             # In-fold minority oversampling only if severe imbalance (< 0.40)
             if imbalance_ratio < 0.40 and min_fold_samples > 0:
-                X_train_fold, y_train_fold = augment_minority_windows_in_fold(
-                    X_train, y_train, random_state=random_state + fold
+                X_train_fold, y_train_fold, train_fold_subjects = augment_minority_windows_in_fold(
+                    X_train, y_train, random_state=random_state + fold, train_subjects=subjects[train_idx], return_subjects=True
                 )
                 fold_scale = 1.0
                 fold_class_weight = None
             else:
                 X_train_fold, y_train_fold = X_train, y_train
+                train_fold_subjects = subjects[train_idx]
                 fold_scale = computed_scale
                 fold_class_weight = "balanced" if computed_scale != 1.0 else None
 
@@ -650,32 +749,38 @@ def train_and_evaluate(
                 random_state=random_state
             )
 
-        # Adaptive CalibratedClassifierCV
+        # Adaptive CalibratedClassifierCV with group-aware inner calibration
         if min_fold_samples < 4:
             clf = base_clf
         else:
             calib_cv = min(3, max(2, int(min_fold_samples // 2)))
-            clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv=calib_cv)
+            calib_splitter = None
+            if train_fold_subjects is not None and len(np.unique(train_fold_subjects)) >= calib_cv:
+                try:
+                    inner_sgkf = StratifiedGroupKFold(n_splits=calib_cv)
+                    inner_splits = list(inner_sgkf.split(X_train_fold, y_train_fold, groups=train_fold_subjects))
+                    if (len(inner_splits) == calib_cv and 
+                        not any(len(np.unique(y_train_fold[v_idx])) < 2 or len(np.unique(y_train_fold[t_idx])) < 2 for t_idx, v_idx in inner_splits)):
+                        calib_splitter = inner_splits
+                except Exception:
+                    calib_splitter = None
+            if calib_splitter is None:
+                calib_splitter = calib_cv
+            clf = CalibratedClassifierCV(estimator=base_clf, method="sigmoid", cv=calib_splitter)
 
         clf.fit(X_train_fold, y_train_fold)
         models.append(clf)
 
         raw_val_probs = clf.predict_proba(X_val)[:, 1]
 
-        # Standardize out-of-fold probabilities per fold to align probability offsets
-        p_mean = float(np.mean(raw_val_probs))
-        p_std = float(np.std(raw_val_probs))
-        z = (raw_val_probs - p_mean) / (p_std + 1e-6)
-        norm_val_probs = 1.0 / (1.0 + np.exp(-z))
+        val_preds = (raw_val_probs >= 0.50).astype(int)
 
-        val_preds = (norm_val_probs >= 0.50).astype(int)
-
-        oof_probs[val_idx] = norm_val_probs
+        oof_probs[val_idx] = raw_val_probs
         oof_preds[val_idx] = val_preds
 
         # Metrics for this fold
-        roc = roc_auc_score(y_val, norm_val_probs) if len(np.unique(y_val)) > 1 else 0.5
-        pr_auc = average_precision_score(y_val, norm_val_probs) if len(np.unique(y_val)) > 1 else 0.0
+        roc = roc_auc_score(y_val, raw_val_probs) if len(np.unique(y_val)) > 1 else 0.5
+        pr_auc = average_precision_score(y_val, raw_val_probs) if len(np.unique(y_val)) > 1 else 0.0
         sens = recall_score(y_val, val_preds, zero_division=0)
         tn, fp, fn, tp = confusion_matrix(y_val, val_preds, labels=[0, 1]).ravel()
         spec = float(tn / max(1, tn + fp))
@@ -829,19 +934,20 @@ def train_and_evaluate(
 
     # Retrain final calibrated model on all data for deployment
     if n_neg > 1.5 * n_pos and n_pos > 0:
-        X_final_aug, y_final_aug = downsample_majority_by_subject(
-            X, y, train_subjects=subjects, target_ratio=1.25, random_state=random_state
+        X_final_aug, y_final_aug, final_subjects = downsample_majority_by_subject(
+            X, y, train_subjects=subjects, target_ratio=1.25, random_state=random_state, return_subjects=True
         )
         final_scale = 1.0
         final_class_weight = "balanced"
     elif min(n_pos, n_neg) / max(n_pos, n_neg, 1) < 0.40 and min(n_pos, n_neg) > 0:
-        X_final_aug, y_final_aug = augment_minority_windows_in_fold(
-            X, y, random_state=random_state
+        X_final_aug, y_final_aug, final_subjects = augment_minority_windows_in_fold(
+            X, y, random_state=random_state, train_subjects=subjects, return_subjects=True
         )
         final_scale = 1.0
         final_class_weight = None
     else:
         X_final_aug, y_final_aug = X, y
+        final_subjects = subjects
         final_scale = computed_scale
         final_class_weight = "balanced" if computed_scale != 1.0 else None
 
@@ -872,7 +978,19 @@ def train_and_evaluate(
         final_model = base_final
     else:
         final_calib_cv = min(3, max(2, int(min_final_samples // 2)))
-        final_model = CalibratedClassifierCV(estimator=base_final, method="sigmoid", cv=final_calib_cv)
+        final_splitter = None
+        if final_subjects is not None and len(np.unique(final_subjects)) >= final_calib_cv:
+            try:
+                inner_sgkf = StratifiedGroupKFold(n_splits=final_calib_cv)
+                inner_splits = list(inner_sgkf.split(X_final_aug, y_final_aug, groups=final_subjects))
+                if (len(inner_splits) == final_calib_cv and
+                    not any(len(np.unique(y_final_aug[v_idx])) < 2 or len(np.unique(y_final_aug[t_idx])) < 2 for t_idx, v_idx in inner_splits)):
+                    final_splitter = inner_splits
+            except Exception:
+                final_splitter = None
+        if final_splitter is None:
+            final_splitter = final_calib_cv
+        final_model = CalibratedClassifierCV(estimator=base_final, method="sigmoid", cv=final_splitter)
 
     final_model.fit(X_final_aug, y_final_aug)
 
@@ -915,6 +1033,7 @@ def main():
         print("* or empirical validation on human subjects.                           *")
         print("*" * 72 + "\n")
         X_3d, y, subjects, raw_feat_names = generate_synthetic_dataset(n_subjects=10, windows_per_subject=24, window_frames=90)
+        valid_masks = np.ones((X_3d.shape[0], X_3d.shape[1]), dtype=bool)
         benchmark_mode = "SYNTHETIC_SELF_TEST"
         empirical_validation = False
     else:
@@ -925,15 +1044,15 @@ def main():
             print("Tip: Provide .npz feature archives via --data-dir, or use --test-synthetic to run the built-in self-test.")
             sys.exit(1)
         print(f"Found {len(npz_files)} feature archives. Loading...")
-        X_3d, y, subjects, raw_feat_names = load_dataset_from_npz(
-            npz_files, clean_contaminated=args.clean_contaminated
+        X_3d, y, subjects, raw_feat_names, valid_masks = load_dataset_from_npz(
+            npz_files, clean_contaminated=args.clean_contaminated, return_valid_masks=True
         )
         benchmark_mode = "REAL_DATA_INGEST"
         empirical_validation = True
 
     print(f"Aggregating 3D window tensors {X_3d.shape} into 2D summary statistics (7 per signal)...")
     X_2d, flat_feature_names = compute_window_summary_features(
-        X_3d, raw_feat_names, subjects=subjects, apply_subject_deltas=args.paired_subject_deltas
+        X_3d, raw_feat_names, subjects=subjects, apply_subject_deltas=args.paired_subject_deltas, valid_masks=valid_masks
     )
     print(f"Generated feature matrix: {X_2d.shape[0]} windows x {X_2d.shape[1]} summary features.")
 

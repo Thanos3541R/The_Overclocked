@@ -31,6 +31,9 @@ class BayesianState:
     status_summary: str = ""                 # Human-readable status summary
 
 
+BayesianFilterState = BayesianState
+
+
 class BayesianEvidenceAccumulator:
     """Sequential Bayesian probability accumulator implementing Wald's Sequential Probability Ratio Test."""
 
@@ -74,6 +77,53 @@ class BayesianEvidenceAccumulator:
         # P = 1 / (1 + exp(-log_odds))
         return float(1.0 / (1.0 + np.exp(-np.clip(self.log_odds, -20.0, 20.0))))
 
+    @property
+    def _sustained_high_time(self) -> float:
+        return self._sustained_time_s
+
+    @_sustained_high_time.setter
+    def _sustained_high_time(self, val: float):
+        self._sustained_time_s = val
+
+    @property
+    def _log_odds(self) -> float:
+        return self.log_odds
+
+    @_log_odds.setter
+    def _log_odds(self, val: float):
+        self.log_odds = val
+
+    def skip_unobserved(self, timestamp: float) -> BayesianState:
+        """Skip unobserved/gated frame without accumulating evidence or abruptly clearing state."""
+        if self._last_timestamp is None:
+            self._last_timestamp = timestamp
+            dt = 0.033
+        else:
+            dt = max(1e-4, min(1.0, timestamp - self._last_timestamp))
+            self._last_timestamp = timestamp
+
+        if not self._lockout_armed:
+            if self.log_odds > self.initial_log_odds:
+                self.log_odds = float(max(self.initial_log_odds, self.log_odds - 0.15 * dt))
+            self._sustained_time_s = max(0.0, self._sustained_time_s - dt * 0.5)
+
+        current_p = self.posterior
+        advisory = bool(current_p >= self.warning_threshold_prob)
+        status = "SOBER"
+        if self._lockout_armed:
+            status = f"CRITICAL LOCKOUT ARMED (P={current_p*100:.2f}%, {self._sustained_time_s:.1f}s sustained [LATCHED])"
+        elif advisory:
+            status = f"IMPAIRMENT WARNING (P={current_p*100:.1f}%, confirming... {self._sustained_time_s:.1f}/{self.lockout_sustained_sec:.0f}s)"
+
+        return BayesianState(
+            posterior_probability=current_p,
+            log_odds=self.log_odds,
+            sustained_high_confidence_s=float(self._sustained_time_s),
+            lockout_confirmed=self._lockout_armed,
+            advisory_warning=advisory,
+            status_summary=status
+        )
+
     def update(self, assessment: ImpairmentAssessment, timestamp: float) -> BayesianState:
         """Update Bayesian evidence with assessment from the current frame/window.
 
@@ -84,6 +134,9 @@ class BayesianEvidenceAccumulator:
         Returns:
             BayesianState dataclass.
         """
+        if getattr(assessment, "classification", None) == "INSUFFICIENT_DATA":
+            return self.skip_unobserved(timestamp)
+
         if self._last_timestamp is None:
             self._last_timestamp = timestamp
             dt = 0.033

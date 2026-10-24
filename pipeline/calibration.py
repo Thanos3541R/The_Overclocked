@@ -82,6 +82,11 @@ class PersonalBaselineCalibrator:
         self._frozen_baselines: Optional[PersonalBaselines] = None
 
     @property
+    def _baselines(self) -> PersonalBaselines:
+        """Property alias for current baselines."""
+        return self.get_baselines()
+
+    @property
     def is_calibrated(self) -> bool:
         """Returns True if the calibrator has finalized baseline estimates."""
         return self._is_calibrated
@@ -98,16 +103,16 @@ class PersonalBaselineCalibrator:
         sample_ratio = min(1.0, len(self._ear_samples) / max(1, self.min_samples))
         return float(min(time_ratio, sample_ratio))
 
-    def update(self, features: FrameFeatures) -> None:
+    def update(self, features: FrameFeatures) -> PersonalBaselines:
         """Ingest a single frame features object into the calibration buffer.
 
         Gated frames (imu_gated or not face_valid) are excluded to prevent corrupted samples.
         """
         if self._is_calibrated:
-            return
+            return self._baselines
 
         if not features.face_valid or features.imu_gated:
-            return
+            return self._baselines
 
         if self._start_timestamp is None:
             self._start_timestamp = features.timestamp
@@ -146,6 +151,8 @@ class PersonalBaselineCalibrator:
         elapsed = features.timestamp - self._start_timestamp
         if elapsed >= self.calibration_duration_sec and len(self._ear_samples) >= self.min_samples:
             self.finalize()
+
+        return self._baselines
 
     def _compute_metrics(self) -> PersonalBaselines:
         """Compute baseline parameters with physiological sanity bounding and Drunk Ingress rejection."""

@@ -225,24 +225,17 @@ def test_in_fold_minority_augmentation_balances_classes():
     assert np.all(np.isin(X_aug[:, 9], [0.0, 1.0]))
 
 
-def test_stratified_group_kfold_and_nonzero_feature_importance():
-    """Verify StratifiedGroupKFold fallback to StratifiedKFold when class representation is unbalanced across subjects,
-    and verify non-zero feature importance via stratified sampling / Cohen's d fallback."""
+def test_stratified_group_kfold_single_class_fallback():
+    """Verify train_and_evaluate raises ValueError when class-pure subject groups produce single-class folds."""
     from train_baseline import train_and_evaluate
 
     rng = np.random.RandomState(42)
     # 1 Sober subject (40 windows) and 4 Drunk subjects (15 windows each = 60 windows)
-    # Total windows: 100
     n_features = 15
     feature_names = [f"feat_{i}" for i in range(n_features)]
 
-    # Feat 0 has strong signal between sober and drunk
     X_sober = rng.randn(40, n_features).astype(np.float32)
-    X_sober[:, 0] -= 2.0  # sober has lower feat 0
-
     X_drunk = rng.randn(60, n_features).astype(np.float32)
-    X_drunk[:, 0] += 2.0  # drunk has higher feat 0
-
     X = np.vstack([X_sober, X_drunk])
     y = np.array([0] * 40 + [1] * 60, dtype=np.int32)
     subjects = np.array(
@@ -253,12 +246,53 @@ def test_stratified_group_kfold_and_nonzero_feature_importance():
         + ["drunk_sub_04"] * 15
     )
 
+    with pytest.raises(ValueError, match="StratifiedGroupKFold produced a single-class validation fold"):
+        train_and_evaluate(
+            X=X,
+            y=y,
+            subjects=subjects,
+            feature_names=feature_names,
+            n_splits=5,
+            use_xgboost=False,
+            random_state=42,
+        )
+
+
+def test_stratified_group_kfold_and_nonzero_feature_importance():
+    """Verify train_and_evaluate on valid multi-subject two-class groups produces non-zero feature importance."""
+    from train_baseline import train_and_evaluate
+
+    rng = np.random.RandomState(42)
+    n_features = 15
+    feature_names = [f"feat_{i}" for i in range(n_features)]
+
+    # 3 Sober subjects (20 windows each) and 3 Drunk subjects (20 windows each)
+    X_list = []
+    y_list = []
+    sub_list = []
+    for s in range(3):
+        x_s = rng.randn(20, n_features).astype(np.float32)
+        x_s[:, 0] -= 2.0
+        X_list.append(x_s)
+        y_list.extend([0] * 20)
+        sub_list.extend([f"sober_sub_{s:02d}"] * 20)
+    for s in range(3):
+        x_d = rng.randn(20, n_features).astype(np.float32)
+        x_d[:, 0] += 2.0
+        X_list.append(x_d)
+        y_list.extend([1] * 20)
+        sub_list.extend([f"drunk_sub_{s:02d}"] * 20)
+
+    X = np.vstack(X_list)
+    y = np.array(y_list, dtype=np.int32)
+    subjects = np.array(sub_list)
+
     results, model = train_and_evaluate(
         X=X,
         y=y,
         subjects=subjects,
         feature_names=feature_names,
-        n_splits=5,
+        n_splits=3,
         use_xgboost=False,
         random_state=42,
     )

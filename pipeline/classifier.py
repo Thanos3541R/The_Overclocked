@@ -30,11 +30,21 @@ from pipeline.feature_extractor import FrameFeatures, is_monochrome_frame
 from utils.landmarks import RIGHT_EYE_CONTOUR, LEFT_EYE_CONTOUR
 
 
+class StarterLockout:
+    ALLOW = False
+    LOCK = True
+
+
+class ThrottleState:
+    NORMAL = 0
+    LIMITED = 1
+
+
 @dataclass
 class ImpairmentAssessment:
     """Diagnostic outcome from the impairment classification engine."""
     risk_score: float = 0.0          # 0.0 to 100.0%
-    classification: str = "SOBER"    # "SOBER", "MILD_IMPAIRMENT", "HIGH_RISK_INTOXICATED"
+    classification: str = "SOBER"    # "SOBER", "MILD_IMPAIRMENT", "HIGH_RISK_INTOXICATED", "INSUFFICIENT_DATA"
     confidence: float = 0.0          # 0.0 to 1.0
     primary_indicators: List[str] = field(default_factory=list)
     marker_scores: Dict[str, float] = field(default_factory=dict)
@@ -45,6 +55,12 @@ class ImpairmentAssessment:
     lockout_recommended: bool = False
     ml_probability: Optional[float] = None
     ml_model_active: bool = False
+    involuntary_score: float = 0.0
+    voluntary_score: float = 0.0
+    total_risk_score: float = 0.0
+    starter_lockout: bool = StarterLockout.ALLOW
+    throttle_state: int = ThrottleState.NORMAL
+    reason: str = ""
 
 
 class ImpairmentClassifier:
@@ -79,6 +95,7 @@ class ImpairmentClassifier:
         self._ml_model = None
         self._ml_feature_names: List[str] = []
         self._ml_frame_buffer: Deque[np.ndarray] = deque(maxlen=90)
+        self._ml_feature_window = self._ml_frame_buffer
         self._ml_infer_stride: int = 5
         self._ml_eval_counter: int = 0
         self._last_ml_prob: Optional[float] = None
@@ -341,6 +358,26 @@ class ImpairmentClassifier:
         Returns:
             ImpairmentAssessment dataclass.
         """
+        if not features.face_valid or features.imu_gated:
+            self._ml_frame_buffer.clear()
+            reason_msg = "Frame gated or face invalid — holding display only"
+            return ImpairmentAssessment(
+                risk_score=0.0,
+                classification="INSUFFICIENT_DATA",
+                confidence=0.0,
+                primary_indicators=[reason_msg],
+                marker_scores={},
+                summary_text=f"Risk Score: 0.0% | Classification: INSUFFICIENT_DATA ({reason_msg})",
+                involuntary_risk_score=0.0,
+                voluntary_masking_score=0.0,
+                involuntary_score=0.0,
+                voluntary_score=0.0,
+                total_risk_score=0.0,
+                starter_lockout=StarterLockout.ALLOW,
+                throttle_state=ThrottleState.NORMAL,
+                reason=reason_msg,
+            )
+
         marker_scores = {}
         indicators = []
 

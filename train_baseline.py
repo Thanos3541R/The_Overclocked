@@ -197,6 +197,32 @@ def compute_window_summary_features(
         extra_cols.append(blink_ratio[:, None])
         extra_names.append("blink_up_to_down_ratio")
 
+    # Compute window-level ocular eyeball micro-flutter frequency (eyeball_tremor_hz_window)
+    # from horizontal conjugate iris coordinates on valid non-blink, non-saccade frames
+    if "left_iris_x" in feature_names and "right_iris_x" in feature_names:
+        lx_idx = feature_names.index("left_iris_x")
+        rx_idx = feature_names.index("right_iris_x")
+        avg_ix = 0.5 * (clean_3d[:, :, lx_idx] + clean_3d[:, :, rx_idx])
+        open_mask = valid_masks.copy()
+        if "blink_detected" in feature_names:
+            open_mask = open_mask & (windows_3d[:, :, feature_names.index("blink_detected")] < 0.5)
+        if "saccade_detected" in feature_names:
+            open_mask = open_mask & (windows_3d[:, :, feature_names.index("saccade_detected")] < 0.5)
+        eyeball_tremor_col = np.zeros((n_windows, 1), dtype=np.float32)
+        if window_frames >= 12:
+            diffs = np.diff(avg_ix, axis=1)
+            pair_open = open_mask[:, :-1] & open_mask[:, 1:] & np.isfinite(diffs)
+            valid_diff = pair_open & (np.abs(diffs) > 0.001) & (np.abs(diffs) < 0.045)
+            adj_valid = valid_diff[:, :-1] & valid_diff[:, 1:]
+            signs = np.sign(diffs)
+            reversals = np.sum(adj_valid & ((signs[:, :-1] * signs[:, 1:]) < 0), axis=1)
+            n_val_diffs = np.sum(valid_diff, axis=1)
+            est_dur_s = np.maximum(window_frames / 30.0, 0.4)
+            hz = np.where(n_val_diffs >= 6, reversals / (2.0 * est_dur_s), 0.0)
+            eyeball_tremor_col[:, 0] = np.round(hz, 2).astype(np.float32)
+        extra_cols.append(eyeball_tremor_col)
+        extra_names.append("eyeball_tremor_hz_window")
+
     if extra_cols:
         features_2d = np.hstack([features_2d] + extra_cols).astype(np.float32)
         flat_names.extend(extra_names)

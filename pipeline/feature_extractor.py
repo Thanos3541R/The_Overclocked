@@ -869,10 +869,8 @@ class FeatureExtractor:
                     if inst_up > self._last_blink_opening_vel:
                         self._last_blink_opening_vel = float(min(inst_up, 6.0))
 
-            stare_dur = (timestamp - self._stare_start_time) if getattr(self, "_stare_start_time", None) is not None else 0.0
-            if ear_avg >= self.blink_threshold * 1.20 and stare_dur < 1.0:
-                if 0.0 < self._last_blink_opening_vel < self.sober_blink_up_baseline:
-                    self._last_blink_opening_vel = min(self.sober_blink_up_baseline, self._last_blink_opening_vel + 0.15 * dt)
+            # Keep _last_blink_opening_vel strictly equal to the last completed blink's
+            # measured upstroke velocity (no artificial +0.15*dt upward drift during open eyes).
             if (d_ear < -0.010 or d_inst < -0.010) and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
                 # EAR dropping → entering closing phase
                 self._post_blink_followthrough_frames = 0
@@ -1678,6 +1676,12 @@ class FeatureExtractor:
         if r_sluggish > 1.25 and r_rate >= 0.80:
             sluggish_excess = r_sluggish - 1.25
             kinetic_mismatch = min(100.0, 50.0 * min(2.0, r_rate) * sluggish_excess)
+            # Apply exponential recency decay strictly to kinetic_mismatch when the last blink
+            # occurred > 8.0s ago and the driver is not suppressing blinks or staring:
+            if self._last_blink_time > 0.0 and (timestamp - self._last_blink_time) > 8.0:
+                if not features.deliberate_blink_suppression and not features.compensatory_stare_active:
+                    stale_sec = (timestamp - self._last_blink_time) - 8.0
+                    kinetic_mismatch *= float(np.exp(-stale_sec / 5.0))
 
         # 3. Behavioral discordance: voluntary masking fighting involuntary signs
         invol_count = 0

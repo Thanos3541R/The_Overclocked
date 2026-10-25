@@ -7,7 +7,7 @@ Supports both:
 
 Critical implementation details:
   - MediaPipe expects RGB input. OpenCV reads BGR. This wrapper handles conversion internally.
-  - AdaptiveROITracker: Maintains smoothed face ROI via EMA (alpha=0.35, margin=2.0)
+  - AdaptiveROITracker: Maintains smoothed face ROI via EMA (alpha=0.15, margin=2.0)
     for an ~8x receptive-field resolution boost on distant faces.
   - Multi-Scale Pyramid Acquisition: Falls back to central driver quadrant crop
     ([0.2*W, 0.1*H] to [0.8*W, 0.85*H]) on frame 0 or when lost.
@@ -501,8 +501,17 @@ class FaceMeshDetector:
                 logger.warning("[DMS] Failed initializing FaceLandmarker RunningMode.VIDEO (%s); falling back to IMAGE mode", exc)
                 self._landmarker_video = None
 
-    def _detect_video_raw(self, frame: np.ndarray, timestamp_s: Optional[float] = None) -> Optional[np.ndarray]:
-        """Run MediaPipe in temporal VIDEO mode with strictly monotonic timestamps."""
+    def _detect_video_raw(
+        self,
+        frame: np.ndarray,
+        timestamp_s: Optional[float] = None,
+        return_normalized: bool = False,
+    ) -> Optional[np.ndarray]:
+        """Run MediaPipe in temporal VIDEO mode with strictly monotonic timestamps.
+
+        When called on an AdaptiveROITracker crop (typically 250x250 to 480x480 px),
+        preserves native optical resolution on the eyes and irises while keeping <12ms C++ speed.
+        """
         if getattr(self, "_landmarker_video", None) is None:
             return None
         if (frame is None or not isinstance(frame, np.ndarray) or
@@ -558,11 +567,19 @@ class FaceMeshDetector:
         face = result.face_landmarks[0]
         if len(face) < self._n_landmarks:
             return None
-        coords = np.fromiter(
-            (val for lm in face[:self._n_landmarks] for val in (lm.x * w, lm.y * h, lm.z * w)),
-            dtype=np.float64,
-            count=self._n_landmarks * 3,
-        ).reshape(self._n_landmarks, 3)
+
+        if return_normalized:
+            coords = np.fromiter(
+                (val for lm in face[:self._n_landmarks] for val in (lm.x, lm.y, lm.z)),
+                dtype=np.float64,
+                count=self._n_landmarks * 3,
+            ).reshape(self._n_landmarks, 3)
+        else:
+            coords = np.fromiter(
+                (val for lm in face[:self._n_landmarks] for val in (lm.x * w, lm.y * h, lm.z * w)),
+                dtype=np.float64,
+                count=self._n_landmarks * 3,
+            ).reshape(self._n_landmarks, 3)
         return coords
 
     def _validate_face_geometry(self, landmarks: np.ndarray, w: int, h: int) -> bool:
@@ -681,33 +698,41 @@ class FaceMeshDetector:
             hasattr(self._detect_raw, "mock")
         )
 
-        # 0. Temporal VIDEO mode detection (cuts inference time ~50% via C++ temporal tracking)
+        # 1. High-resolution Adaptive ROI tracking when active:
+        #    Feeds the 2.0x face crop into VIDEO mode (or _detect_raw when mocked) so
+        #    distant driver eyes/irises fill 60-80% of MediaPipe's 256x256 tensor (~8x resolution boost).
+        if self.enable_adaptive_roi and self.roi_tracker.is_tracking:
+            if shift_hint is not None:
+                self.roi_tracker.apply_shift_hint(shift_hint[0], shift_hint[1])
+            crop, crop_box = self.roi_tracker.crop_frame(frame)
+            norm_lms = None
+            if not is_raw_mocked and getattr(self, "_landmarker_video", None) is not None:
+                norm_lms = self._detect_video_raw(crop, timestamp_s=timestamp_s, return_normalized=True)
+            else:
+                norm_lms = self._detect_raw(crop)
+
+            if norm_lms is not None:
+                landmarks = self.roi_tracker.remap_to_global(norm_lms, crop_box)
+                if is_raw_mocked or self._validate_face_geometry(landmarks, w, h):
+                    self.roi_tracker.update(landmarks, w, h)
+                    self._consecutive_losses = 0
+                    self._last_valid_landmarks = landmarks
+                    return landmarks
+
+            # Crop detection failed on this frame: immediately reset and fallback to full-frame
+            self.roi_tracker.reset()
+
+        # 2. Full-frame detection (initial acquisition on frame 0 or recovery after crop failure)
         if not is_raw_mocked and getattr(self, "_landmarker_video", None) is not None and w <= 1280:
-            video_lms = self._detect_video_raw(frame, timestamp_s=timestamp_s)
+            video_lms = self._detect_video_raw(frame, timestamp_s=timestamp_s, return_normalized=False)
             if video_lms is not None and self._validate_face_geometry(video_lms, w, h):
-                self.roi_tracker.update(video_lms, w, h)
+                if self.enable_adaptive_roi:
+                    self.roi_tracker.update(video_lms, w, h)
                 self._consecutive_losses = 0
                 self._last_valid_landmarks = video_lms
                 return video_lms
             self._consecutive_losses += 1
 
-        # 1. High-resolution ROI tracking if active
-        if self.enable_adaptive_roi and self.roi_tracker.is_tracking:
-            if shift_hint is not None:
-                self.roi_tracker.apply_shift_hint(shift_hint[0], shift_hint[1])
-            crop, crop_box = self.roi_tracker.crop_frame(frame)
-            norm_lms = self._detect_raw(crop)
-            if norm_lms is not None:
-                landmarks = self.roi_tracker.remap_to_global(norm_lms, crop_box)
-                self.roi_tracker.update(landmarks, w, h)
-                self._consecutive_losses = 0
-                self._last_valid_landmarks = landmarks
-                return landmarks
-            else:
-                # Crop detection failed on this frame: immediately reset and fallback to full-frame
-                self.roi_tracker.reset()
-
-        # 2. Full-frame detection
         full_box = (0, 0, w, h)
         norm_lms = self._detect_raw(frame)
         if norm_lms is not None:
@@ -768,4 +793,3 @@ class FaceMeshDetector:
 
 
 _ensure_model_bundle = FaceMeshDetector._ensure_model_bundle
-

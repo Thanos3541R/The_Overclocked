@@ -289,9 +289,16 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
     if model_path and os.path.exists(model_path):
         print(f"[DMS] Loaded trained ML model: {model_path}")
-        classifier = ImpairmentClassifier(model_path=model_path)
+        classifier = ImpairmentClassifier(
+            model_path=model_path,
+            fps=capture.fps,
+            max_occlusion_hold_frames=config.max_occlusion_hold_frames,
+        )
     else:
-        classifier = ImpairmentClassifier()
+        classifier = ImpairmentClassifier(
+            fps=capture.fps,
+            max_occlusion_hold_frames=config.max_occlusion_hold_frames,
+        )
     bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 
     # Filter bank (lazy-initialized on first valid frame)

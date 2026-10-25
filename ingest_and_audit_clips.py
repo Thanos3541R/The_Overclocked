@@ -34,8 +34,22 @@ from pipeline.training_buffer import TrainingBuffer, TrainingWindow
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 
+COMPILATION_KEYWORDS = (
+    "react",
+    "compilation",
+    "bloopers",
+    "adults get drunk",
+    "people try",
+    "kids try",
+    "try not to",
+)
 
-def infer_subject_id(filepath: str, label: str) -> str:
+
+def infer_subject_id(
+    filepath: str,
+    label: str,
+    split_compilations: Optional[bool] = None,
+) -> str:
     r"""Extract source video/person subject_id from clip filepath and condition label.
 
     When clips are split from a longer video (e.g. videoA_clip01.mp4, videoA_part2.mp4,
@@ -44,9 +58,12 @@ def infer_subject_id(filepath: str, label: str) -> str:
     _seg\d+, -\d+$, _\d+$) or using the parent subfolder name if nested, prefixed with
     'sober_' or 'drunk_'.
 
-    If a file has a trailing clip/part number > 5, it is sub-grouped into batches of 6
-    (e.g. _grp01, _grp02) to guarantee sufficient distinct subject groups for StratifiedGroupKFold
-    on compilation videos.
+    To prevent same-subject cross-validation data leakage in StratifiedGroupKFold,
+    single-person videos are never split into sub-groups (_grpXX) by default.
+    Sub-grouping into batches of 6 (_grp01, _grp02) is only applied when:
+      - split_compilations is explicitly True, OR
+      - split_compilations is None (auto) and the stem matches known multi-person
+        compilation keywords (e.g. "REACT", "Compilation").
     """
     p = Path(filepath.strip())
     stem = p.stem.strip()
@@ -80,7 +97,14 @@ def infer_subject_id(filepath: str, label: str) -> str:
         clean_stem = "unknown"
 
     sub_id = f"{lbl}_{clean_stem}"
-    if part_num is not None and (part_num // 6) > 0:
+
+    if split_compilations is None:
+        stem_lower = clean_stem.lower()
+        should_split = any(kw in stem_lower for kw in COMPILATION_KEYWORDS)
+    else:
+        should_split = bool(split_compilations)
+
+    if should_split and part_num is not None and (part_num // 6) > 0:
         sub_id = f"{sub_id}_grp{part_num // 6:02d}"
 
     return sub_id
@@ -108,6 +132,7 @@ def audit_and_ingest_clip(
     stride_sec: float,
     window_sec: float = 3.0,
     headless: bool = True,
+    split_compilations: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run full DMS pipeline on a video clip, audit for artifacts, and extract training windows.
 
@@ -118,11 +143,12 @@ def audit_and_ingest_clip(
         stride_sec: Window sliding stride in seconds.
         window_sec: Window duration in seconds (default 3.0s).
         headless: Headless flag for execution.
+        split_compilations: Optional override for multi-person compilation sub-grouping.
 
     Returns:
         Audit record dict with metrics, status, and window counts.
     """
-    subject_id = infer_subject_id(video_path, label)
+    subject_id = infer_subject_id(video_path, label, split_compilations=split_compilations)
     stem = Path(video_path).stem.strip()
 
     cap = cv2.VideoCapture(video_path)
@@ -168,7 +194,12 @@ def audit_and_ingest_clip(
         roi_margin=config.roi_margin,
         roi_alpha=config.roi_alpha,
     )
-    pnp = PnPNormalizer(width, height, focal_length=config.focal_length_px)
+    pnp = PnPNormalizer(
+        width,
+        height,
+        focal_length=config.focal_length_px,
+        calibration_path=config.camera_calibration_path,
+    )
     pose_gate = HeadPoseGate(
         yaw_limit=config.yaw_limit,
         pitch_down_limit=config.pitch_down_limit,
@@ -185,16 +216,41 @@ def audit_and_ingest_clip(
     stabilizer = KinematicStabilizer()
     filter_bank: Optional[OneEuroFilterBank] = None
 
+    scaled_microsleep_frames = max(5, int(round(0.50 * fps)))
+    scaled_yawn_frames = max(10, int(round(1.0 * fps)))
+
     def make_extractor():
         return FeatureExtractor(
             blink_threshold=config.ear_blink_threshold,
             mar_yawn_threshold=config.mar_yawn_threshold,
             perclos_window_sec=config.perclos_window_sec,
             perclos_alert_threshold=config.perclos_alert_threshold,
+            microsleep_frames=scaled_microsleep_frames,
+            yawn_frames=scaled_yawn_frames,
+            gaze_dispersion_window_sec=config.gaze_dispersion_window_sec,
+            saccade_onset_velocity=config.saccade_onset_velocity,
+            saccade_offset_velocity=config.saccade_offset_velocity,
+            eccentric_gaze_threshold=config.eccentric_gaze_threshold,
+            gen_drift_min_vel=config.gen_drift_min_vel,
+            gen_drift_max_vel=config.gen_drift_max_vel,
+            gen_reset_min_vel=config.gen_reset_min_vel,
+            loc_vergence_threshold_deg=config.loc_vergence_threshold_deg,
+            vor_min_head_speed=config.vor_min_head_speed,
+            vor_max_head_speed=config.vor_max_head_speed,
+            pursuit_window_sec=config.pursuit_window_sec,
+            perclos_min_warmup_sec=5.0,
             fps=fps,
             deg_per_iris_unit=config.deg_per_iris_unit,
             saccade_deg_per_unit=config.saccade_deg_per_unit,
+            saccade_subpixel_deadzone_dx=config.saccade_subpixel_deadzone_dx,
+            saccade_subpixel_deadzone_hypot=config.saccade_subpixel_deadzone_hypot,
+            saccade_head_motion_dx=config.saccade_head_motion_dx,
+            eye_socket_vel_threshold=config.eye_socket_vel_threshold,
+            blink_phase_timeout_frames=config.blink_phase_timeout_frames,
             sway_window_sec=config.sway_window_sec,
+            sway_yaw_gate_deg_s=config.sway_yaw_gate_deg_s,
+            sway_nod_reset_deg_s=config.sway_nod_reset_deg_s,
+            rigid_head_sway_threshold=config.rigid_head_sway_threshold,
         )
 
     extractor = make_extractor()
@@ -209,6 +265,7 @@ def audit_and_ingest_clip(
     face_detected_frames = 0
     valid_ungated_frames = 0
     scene_cut_count = 0
+    missing_face_frames = 0
     prev_bbox_center: Optional[np.ndarray] = None
     prev_iod: Optional[float] = None
     accumulated_windows: List[TrainingWindow] = []
@@ -243,6 +300,7 @@ def audit_and_ingest_clip(
             landmarks = detector.detect(processed_frame, shift_hint=(dx_cam, dy_cam), timestamp_s=timestamp)
 
             if landmarks is not None:
+                missing_face_frames = 0
                 curr_center = np.array(
                     [
                         (landmarks[:, 0].min() + landmarks[:, 0].max()) / 2.0,
@@ -330,6 +388,12 @@ def audit_and_ingest_clip(
                     vibration_score=eff_vibration,
                 )
             else:
+                missing_face_frames += 1
+                if missing_face_frames > config.max_occlusion_hold_frames:
+                    pnp.reset()
+                    imu_gate.reset()
+                    stabilizer.reset()
+                    filter_bank = None
                 features = extractor.compute(
                     landmarks=None,
                     timestamp=timestamp,
@@ -434,6 +498,7 @@ def ingest_dataset(
     max_clips: Optional[int] = None,
     headless: bool = True,
     clean_output: bool = True,
+    split_compilations: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Discover clips, audit each, extract training windows, and write audit summaries."""
     os.makedirs(output_dir, exist_ok=True)
@@ -511,6 +576,7 @@ def ingest_dataset(
             stride_sec=stride,
             window_sec=window_sec,
             headless=headless,
+            split_compilations=split_compilations,
         )
         audit_records.append(rec)
 
@@ -653,6 +719,12 @@ def main():
         default=True,
         help="Run without displaying GUI windows (default True)",
     )
+    parser.add_argument(
+        "--split-compilation-groups",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Split multi-part clips into _grpXX subject batches (default: auto-detect compilation keywords only)",
+    )
 
     args = parser.parse_args()
     ingest_dataset(
@@ -665,6 +737,7 @@ def main():
         max_clips=args.max_clips,
         headless=args.headless,
         clean_output=args.clean_output,
+        split_compilations=args.split_compilation_groups,
     )
 
 

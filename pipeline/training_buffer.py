@@ -35,6 +35,10 @@ class TrainingWindow:
     valid_mask: Optional[np.ndarray] = None
 
 
+# Shared physiological outlier caps for train-serve consistency
+MAX_SACCADE_LATENCY_MS: float = 10000.0
+MAX_STARE_DURATION_S: float = 30.0
+
 CORE_NUMERIC_NAMES = (
     "ear_left", "ear_right", "ear_avg", "mar", "perclos",
     "left_iris_x", "left_iris_y", "right_iris_x", "right_iris_y",
@@ -79,6 +83,8 @@ class TrainingBuffer:
     EXTENDED_BOOL_NAMES = EXTENDED_BOOL_NAMES
     FEATURE_NAMES = FEATURE_NAMES
     EXTENDED_FEATURE_NAMES = EXTENDED_FEATURE_NAMES
+    MAX_SACCADE_LATENCY_MS = MAX_SACCADE_LATENCY_MS
+    MAX_STARE_DURATION_S = MAX_STARE_DURATION_S
 
     def __init__(
         self,
@@ -153,10 +159,22 @@ class TrainingBuffer:
     def n_features(self) -> int:
         """Return total number of features in the assembled vector."""
         return len(self.feature_names)
-        
+
+    @classmethod
+    def clamp_numeric_feature(cls, name: str, val: float) -> float:
+        """Apply identical physiological outlier bounds across training and live inference."""
+        if name == "saccade_latency_ms":
+            return min(val, cls.MAX_SACCADE_LATENCY_MS)
+        if name == "stare_fixation_duration_s":
+            return min(val, cls.MAX_STARE_DURATION_S)
+        return val
+
     def _extract_vector(self, ff: FrameFeatures) -> np.ndarray:
-        numeric = [float(getattr(ff, name)) for name in self._numeric_names]
-        bools = [int(bool(getattr(ff, name))) for name in self._bool_names]
+        numeric = [
+            self.clamp_numeric_feature(name, float(getattr(ff, name, 0.0)))
+            for name in self._numeric_names
+        ]
+        bools = [int(bool(getattr(ff, name, False))) for name in self._bool_names]
         return np.array(numeric + bools, dtype=np.float32)
 
     _features_to_vector = _extract_vector

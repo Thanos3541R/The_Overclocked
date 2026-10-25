@@ -4,7 +4,7 @@
 ### Edge-Optimized Involuntary Neuro-Reflexes & Anti-Masking Telemetry
 
 [![CI Status](https://github.com/Thanos3541R/The_Overclocked/actions/workflows/ci.yml/badge.svg)](https://github.com/Thanos3541R/The_Overclocked/actions/workflows/ci.yml)
-[![Tests Passing](https://img.shields.io/badge/tests-294%2F294%20passed-brightgreen.svg?style=flat-square)]()
+[![Tests Passing](https://img.shields.io/badge/tests-299%2F299%20passed-brightgreen.svg?style=flat-square)]()
 [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11-blue.svg?style=flat-square)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![Edge Ready](https://img.shields.io/badge/throughput-30--60%2B%20FPS-purple.svg?style=flat-square)]()
@@ -79,12 +79,12 @@ python main.py --source "path/to/clip.mp4" --headless --output-csv "features.csv
 - **`[q]`** or **`[ESC]`**: Safely exit and flush streaming CSV and video output.
 
 ### 3. Run Complete Automated Test Suite
-Verify that all 294 automated unit, invariance, geometric, and integration tests pass on your machine:
+Verify that all 299 automated unit, invariance, geometric, and integration tests pass on your machine:
 
 ```bash
 python -m pytest tests/ -v
 ```
-*(All 294 tests execute in $< 60\text{ seconds}$ with a 100% pass rate).*
+*(All 299 tests execute in $< 60\text{ seconds}$ with a 100% pass rate).*
 
 ---
 
@@ -278,7 +278,7 @@ $$\Lambda_t = \Lambda_{t-1} + \ln \left( \frac{P(\text{biomarkers}_t \mid \text{
 | **`extract_video_features.py`** | Batch forensic video analyzer producing clinical reports (`report.txt`), JSON metrics (`summary.json`), and CSV time-series. | `python extract_video_features.py --video drive.mp4 --output-dir ./audit/`<br>`python extract_video_features.py --video drive.mp4 --csv-path features.csv` |
 | **`ingest_and_audit_clips.py`** | Discovers, audits, and ingests YouTube or dataset clips with quality gating and balanced window strides. | `python ingest_and_audit_clips.py --sober-dir ./Sober/ --drunk-dir ./Drunk/ --output-dir ./training_data/` |
 | **`train_baseline.py`** | Trains ML classifiers on `.npz` archives using `StratifiedGroupKFold` cross-validation with subject isolation. | `python train_baseline.py --data-dir ./training_data/ --output-model models/trained_model.joblib` |
-| **`pytest`** | Executes the complete 294-test automated regression and invariant suite. | `python -m pytest tests/ -v` |
+| **`pytest`** | Executes the complete 299-test automated regression and invariant suite. | `python -m pytest tests/ -v` |
 
 ---
 
@@ -321,7 +321,7 @@ The_Overclocked/
 │   └── visualization.py       # OpenCV HUD telemetry display & region legend
 └── tests/
     ├── sample_driver_video.mp4 # Video fixture for regression & invariance benchmarking
-    └── test_*.py              # 19 test modules (294 automated unit, invariance & integration tests)
+    └── test_*.py              # 19 test modules (299 automated unit, invariance & integration tests)
 ```
 
 ---

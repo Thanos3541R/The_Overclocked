@@ -178,9 +178,16 @@ def extract_video_features(video_path: str,
 
     if model_path and os.path.exists(model_path):
         print(f"  Loaded ML Model    : {model_path}")
-        classifier = ImpairmentClassifier(model_path=model_path)
+        classifier = ImpairmentClassifier(
+            model_path=model_path,
+            fps=fps,
+            max_occlusion_hold_frames=config.max_occlusion_hold_frames,
+        )
     else:
-        classifier = ImpairmentClassifier()
+        classifier = ImpairmentClassifier(
+            fps=fps,
+            max_occlusion_hold_frames=config.max_occlusion_hold_frames,
+        )
     calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=fps)
     bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 

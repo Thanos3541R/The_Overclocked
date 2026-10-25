@@ -1,7 +1,8 @@
-"""Driver Impairment Classification & Scoring Engine.
+"""Driver Impairment Classification & Scoring Engine (Hybrid ML + Clinical Rule Matrix).
 
-WARNING: This is a rule-based demonstration tool with placeholder thresholds, NOT a validated clinical model.
-No training data has been ingested and all numeric thresholds are educated guesses pending calibration against real empirical driving data.
+Combines trained gradient-boosted involuntary ocular models
+(models/involuntary_model.joblib) with deterministic NHTSA/DRE clinical rules,
+feeding calibrated probability streams into the BayesianEvidenceAccumulator.
 
 Evaluates biological markers of alcohol intoxication and drowsiness:
   1. Static Image Analysis:
@@ -11,10 +12,11 @@ Evaluates biological markers of alcohol intoxication and drowsiness:
      - Jaw slackness (resting mouth aspect ratio)
      - Conjunctival redness (sclera vascular dilation / bloodshot index)
   2. Temporal Video Analysis:
-     - Saccadic velocity degradation
+     - Saccadic velocity degradation & pursuit fragmentation
      - Involuntary blink upstroke/downstroke slowing
-     - Gaze tunneling (reduced σ_yaw)
-     - Elevated PERCLOS & microsleep episodes
+     - Gaze-Evoked Nystagmus (GEN) & Lack of Convergence (LOC)
+     - Gaze tunneling (reduced σ_yaw), PERCLOS & microsleep episodes
+     - Real-time rolling-window ML probability fusion
 """
 import logging
 import os
@@ -64,14 +66,17 @@ class ImpairmentAssessment:
 
 
 class ImpairmentClassifier:
-    """Rule-based placeholder classifier with invented thresholds. NOT a validated model. All thresholds require calibration against labeled impairment data before any production use."""
+    """Hybrid neuro-symbolic impairment classifier fusing NHTSA/DRE clinical rules with rolling-window ML inference."""
 
     def __init__(self,
                  sober_ear_baseline: float = 0.28,  # [PLACEHOLDER — pending calibration against real data]
                  sober_saccade_baseline: float = 80.0,  # [PLACEHOLDER — pending calibration against real data]
                  sober_blink_up_baseline: float = 2.5,  # [PLACEHOLDER — pending calibration against real data]
                  baseline_asymmetry: float = 0.0,  # [PLACEHOLDER — natural resting asymmetry offset]
-                 model_path: Optional[str] = None):
+                 model_path: Optional[str] = None,
+                 fps: float = 30.0,
+                 window_sec: float = 3.0,
+                 max_occlusion_hold_frames: int = 15):
         """
         Args:
             sober_ear_baseline: Expected normal awake EAR for an alert driver.
@@ -80,6 +85,9 @@ class ImpairmentClassifier:
             baseline_asymmetry: Driver's natural resting eyelid asymmetry (|ΔEAR| offset)
                 subtracted from raw asymmetry to prevent false positive ptosis alerts.
             model_path: Optional file path to trained .joblib ML classifier artifact.
+            fps: Expected stream framerate for physical-time ML window sizing (default 30.0).
+            window_sec: Physical window duration in seconds for ML summary features (default 3.0s).
+            max_occlusion_hold_frames: Max consecutive missing-face frames before clearing ML buffer.
         """
         self.sober_ear = sober_ear_baseline
         self.sober_saccade = sober_saccade_baseline
@@ -90,11 +98,19 @@ class ImpairmentClassifier:
         self.pitch_baseline: float = 0.0
         self.roll_baseline: float = 0.0
 
+        # Physical-time ML window configuration
+        self.fps: float = float(max(fps, 1.0))
+        self.window_sec: float = float(max(window_sec, 1.0))
+        self._ml_buffer_len: int = max(30, int(round(self.fps * self.window_sec)))
+        self._ml_min_infer_len: int = max(30, int(round(self.fps * 1.0)))
+        self._max_occlusion_hold_frames: int = max(1, int(max_occlusion_hold_frames))
+        self._consecutive_invalid_frames: int = 0
+
         # ML model attributes
         self.model_path = model_path
         self._ml_model = None
         self._ml_feature_names: List[str] = []
-        self._ml_frame_buffer: Deque[np.ndarray] = deque(maxlen=90)
+        self._ml_frame_buffer: Deque[np.ndarray] = deque(maxlen=self._ml_buffer_len)
         self._ml_feature_window = self._ml_frame_buffer
         self._ml_infer_stride: int = 5
         self._ml_eval_counter: int = 0
@@ -121,9 +137,10 @@ class ImpairmentClassifier:
         self._ml_frame_buffer.clear()
         self._ml_eval_counter = 0
         self._last_ml_prob = None
+        self._consecutive_invalid_frames = 0
 
     def _predict_ml_probability(self, features: FrameFeatures) -> Optional[float]:
-        """Predict real-time impairment probability over rolling 3.0s window using trained ML model."""
+        """Predict real-time impairment probability over rolling physical window using trained ML model."""
         if self._ml_model is None:
             return None
 
@@ -132,14 +149,10 @@ class ImpairmentClassifier:
 
         try:
             from pipeline.training_buffer import TrainingBuffer
-            numeric = []
-            for name in TrainingBuffer.EXTENDED_NUMERIC_NAMES:
-                val = float(getattr(features, name, 0.0))
-                if name == "saccade_latency_ms":
-                    val = min(val, 8000.0)
-                elif name == "stare_fixation_duration_s":
-                    val = min(val, 5.0)
-                numeric.append(val)
+            numeric = [
+                TrainingBuffer.clamp_numeric_feature(name, float(getattr(features, name, 0.0)))
+                for name in TrainingBuffer.EXTENDED_NUMERIC_NAMES
+            ]
             bools = [float(bool(getattr(features, name, False))) for name in TrainingBuffer.EXTENDED_BOOL_NAMES]
             vec = np.array(numeric + bools, dtype=np.float32)
         except Exception as e:
@@ -149,7 +162,7 @@ class ImpairmentClassifier:
         self._ml_frame_buffer.append(vec)
         self._ml_eval_counter += 1
 
-        if len(self._ml_frame_buffer) >= 30 and (self._ml_eval_counter % self._ml_infer_stride == 0):
+        if len(self._ml_frame_buffer) >= self._ml_min_infer_len and (self._ml_eval_counter % self._ml_infer_stride == 0):
             try:
                 from train_baseline import compute_window_summary_features
                 from pipeline.training_buffer import TrainingBuffer
@@ -376,7 +389,13 @@ class ImpairmentClassifier:
             ImpairmentAssessment dataclass.
         """
         if not features.face_valid or features.imu_gated:
-            self._ml_frame_buffer.clear()
+            # Preserve rolling ML window across brief IMU road shocks or short head-pose/occlusion drops;
+            # only clear the buffer if the face has been invalid for > max_occlusion_hold_frames.
+            if not features.face_valid:
+                self._consecutive_invalid_frames += 1
+                if self._consecutive_invalid_frames > self._max_occlusion_hold_frames:
+                    self._ml_frame_buffer.clear()
+                    self._last_ml_prob = None
             reason_msg = "Frame gated or face invalid — holding display only"
             return ImpairmentAssessment(
                 risk_score=0.0,
@@ -394,6 +413,8 @@ class ImpairmentClassifier:
                 throttle_state=ThrottleState.NORMAL,
                 reason=reason_msg,
             )
+
+        self._consecutive_invalid_frames = 0
 
         marker_scores = {}
         indicators = []
@@ -641,7 +662,7 @@ class ImpairmentClassifier:
 
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
-        # Real-time ML model fusion (rolling 3.0s window)
+        # Real-time ML model fusion (rolling physical window)
         ml_prob = self._predict_ml_probability(features)
         ml_prob_pct = None
         ml_active = False

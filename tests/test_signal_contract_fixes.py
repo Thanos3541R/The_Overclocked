@@ -362,3 +362,148 @@ def test_low_fps_blink_upstroke_chord_floor():
     expected_chord = (0.25 - 0.08) / 0.085
     assert ext._last_blink_opening_vel == pytest.approx(expected_chord, abs=0.15)
     assert ext._last_blink_opening_vel >= 1.8
+
+
+def test_blink_opening_velocity_does_not_artificially_drift_upward():
+    """Verify _last_blink_opening_vel holds true measured sluggish velocity across open-eye intervals."""
+    ext = FeatureExtractor(fps=30.0)
+    ext._last_blink_opening_vel = 1.05
+    ext._prev_ear_avg = 0.28
+    ext._prev_ear_timestamp = 0.0
+    ext._blink_phase = "open"
+
+    # Simulate 8 seconds (240 frames) of open-eye gaze without staring
+    for i in range(1, 241):
+        t = i / 30.0
+        ext._stare_start_time = t  # keep stare_dur == 0.0 < 1.0
+        _, v_up = ext._compute_blink_velocity(0.28, timestamp=t)
+        assert v_up == pytest.approx(1.05, abs=1e-6), f"Unexpected upward drift at t={t:.2f}s: {v_up}"
+
+
+def test_classifier_fps_scaled_ml_buffer_and_gated_frame_preservation():
+    """Verify ImpairmentClassifier scales _ml_frame_buffer by FPS and preserves buffer across brief IMU shocks."""
+    from pipeline.classifier import ImpairmentClassifier
+    from pipeline.feature_extractor import FrameFeatures
+    from pipeline.training_buffer import TrainingBuffer
+
+    # 1. 60 FPS classifier scales buffer to 180 frames (3.0s) and min_infer_len to 60 (1.0s)
+    clf_60 = ImpairmentClassifier(fps=60.0, window_sec=3.0, max_occlusion_hold_frames=15)
+    assert clf_60._ml_buffer_len == 180
+    assert clf_60._ml_min_infer_len == 60
+    assert clf_60._ml_frame_buffer.maxlen == 180
+
+    # 2. Populate buffer and verify brief IMU shock or 5-frame occlusion does NOT clear buffer
+    clf_60._ml_frame_buffer.append(np.zeros(48, dtype=np.float32))
+    clf_60._ml_frame_buffer.append(np.ones(48, dtype=np.float32))
+    assert len(clf_60._ml_frame_buffer) == 2
+
+    # 4 frames of IMU road shock (face_valid=True, imu_gated=True)
+    for _ in range(4):
+        clf_60.evaluate_temporal_stream(FrameFeatures(face_valid=True, imu_gated=True))
+    assert len(clf_60._ml_frame_buffer) == 2
+
+    # 5 frames of brief hand occlusion (face_valid=False, <= 15 hold frames)
+    for _ in range(5):
+        clf_60.evaluate_temporal_stream(FrameFeatures(face_valid=False, imu_gated=False))
+    assert len(clf_60._ml_frame_buffer) == 2
+
+    # Prolonged occlusion (> 15 frames) clears buffer
+    for _ in range(12):
+        clf_60.evaluate_temporal_stream(FrameFeatures(face_valid=False, imu_gated=False))
+    assert len(clf_60._ml_frame_buffer) == 0
+
+    # 3. Verify train-serve clamping parity in TrainingBuffer
+    tb = TrainingBuffer(subject_id="test_clamp", include_extended_features=True)
+    ff_extreme = FrameFeatures(
+        saccade_latency_ms=25000.0,
+        stare_fixation_duration_s=12.5,
+    )
+    vec = tb._extract_vector(ff_extreme)
+    lat_idx = tb.feature_names.index("saccade_latency_ms")
+    stare_idx = tb.feature_names.index("stare_fixation_duration_s")
+    assert vec[lat_idx] == pytest.approx(10000.0)
+    # 12.5s stare (>= 6.0s compensatory threshold) must NOT be clamped down to 5.0s
+    assert vec[stare_idx] == pytest.approx(12.5)
+
+
+def test_infer_subject_id_prevents_single_person_leakage_and_splits_compilations():
+    """Verify infer_subject_id keeps single-person multi-part videos unified while splitting compilations."""
+    from ingest_and_audit_clips import infer_subject_id
+
+    # Single-person multi-part videos (even part >= 6) must NOT split into _grpXX by default
+    s1 = infer_subject_id("Sober/YouTube CEO Susan Wojcicki_ How I Work_part01.mp4", "sober")
+    s8 = infer_subject_id("Sober/YouTube CEO Susan Wojcicki_ How I Work_part08.mp4", "sober")
+    assert s1 == s8 == "sober_YouTube CEO Susan Wojcicki_ How I Work"
+
+    d1 = infer_subject_id("Drunk/drunk_7part_part01.mp4", "drunk")
+    d12 = infer_subject_id("Drunk/drunk_7part_part12.mp4", "drunk")
+    assert d1 == d12 == "drunk_7part"
+
+    # Multi-person compilation videos auto-split at part >= 6
+    c1 = infer_subject_id("Sober/ADULTS REACT TO THE SIMPSONS_part01.mp4", "sober")
+    c8 = infer_subject_id("Sober/ADULTS REACT TO THE SIMPSONS_part08.mp4", "sober")
+    assert c1 == "sober_ADULTS REACT TO THE SIMPSONS"
+    assert c8 == "sober_ADULTS REACT TO THE SIMPSONS_grp01"
+
+
+def test_face_mesh_detector_video_mode_uses_adaptive_roi_crop():
+    """Verify FaceMeshDetector.detect() feeds the AdaptiveROITracker crop into _detect_video_raw when tracking."""
+    from pipeline.face_mesh_detector import FaceMeshDetector
+    from tests.test_face_mesh_detector import create_synthetic_landmarks
+
+    detector = FaceMeshDetector(enable_adaptive_roi=True)
+    frame = np.random.randint(40, 200, (720, 1280, 3), dtype=np.uint8)
+
+    # Seed ROI tracker around (640, 360) with scale 180 -> crop size 360x360
+    seed_lms = create_synthetic_landmarks(cx=640.0, cy=360.0, width=150.0, height=180.0)
+    detector.roi_tracker.update(seed_lms, 1280, 720)
+    assert detector.roi_tracker.is_tracking
+
+    video_call_shapes = []
+    orig_video_raw = detector._detect_video_raw
+
+    def spy_video_raw(img, timestamp_s=None, return_normalized=False):
+        video_call_shapes.append((img.shape[:2], return_normalized))
+        # Return centered normalized coordinates inside crop
+        norm = np.zeros((478, 3), dtype=np.float64)
+        norm[:, 0] = np.linspace(0.3, 0.7, 478)
+        norm[:, 1] = np.linspace(0.3, 0.7, 478)
+        if return_normalized:
+            return norm
+        h_i, w_i = img.shape[:2]
+        norm[:, 0] *= w_i
+        norm[:, 1] *= h_i
+        return norm
+
+    detector._landmarker_video = object()  # ensure video path is active
+    detector._detect_video_raw = spy_video_raw
+    try:
+        lms = detector.detect(frame, timestamp_s=1.0)
+        assert lms is not None
+        assert len(video_call_shapes) == 1
+        crop_shape, ret_norm = video_call_shapes[0]
+        assert ret_norm is True
+        assert crop_shape[0] < 720 and crop_shape[1] < 1280, f"Expected ROI crop smaller than 720x1280, got {crop_shape}"
+    finally:
+        detector._detect_video_raw = orig_video_raw
+        detector.close()
+
+
+def test_window_summary_includes_eyeball_tremor_hz_window():
+    """Verify compute_window_summary_features computes eyeball_tremor_hz_window from iris traces."""
+    from train_baseline import compute_window_summary_features
+    from pipeline.training_buffer import TrainingBuffer
+
+    feature_names = list(TrainingBuffer.EXTENDED_FEATURE_NAMES)
+    win = np.zeros((1, 90, len(feature_names)), dtype=np.float32)
+    lx_idx = feature_names.index("left_iris_x")
+    rx_idx = feature_names.index("right_iris_x")
+    t = np.arange(90) / 30.0
+    osc = 0.012 * np.sin(2.0 * np.pi * 6.0 * t)
+    win[0, :, lx_idx] = osc
+    win[0, :, rx_idx] = osc
+
+    feat_2d, summary_names = compute_window_summary_features(win, feature_names)
+    assert "eyeball_tremor_hz_window" in summary_names
+    idx = summary_names.index("eyeball_tremor_hz_window")
+    assert feat_2d[0, idx] > 4.0

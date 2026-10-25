@@ -4,7 +4,7 @@
 ### Edge-Optimized Involuntary Neuro-Reflexes & Anti-Masking Telemetry
 
 [![CI Status](https://github.com/Thanos3541R/The_Overclocked/actions/workflows/ci.yml/badge.svg)](https://github.com/Thanos3541R/The_Overclocked/actions/workflows/ci.yml)
-[![Tests Passing](https://img.shields.io/badge/tests-272%2F272%20passed-brightgreen.svg?style=flat-square)]()
+[![Tests Passing](https://img.shields.io/badge/tests-294%2F294%20passed-brightgreen.svg?style=flat-square)]()
 [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11-blue.svg?style=flat-square)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![Edge Ready](https://img.shields.io/badge/throughput-30--60%2B%20FPS-purple.svg?style=flat-square)]()
@@ -44,7 +44,7 @@
 ## 🚀 Quick Start in 60 Seconds
 
 ### 1. Installation
-Ensure you are using **Python 3.10 or 3.11 (64-bit)** for plug-and-play binary wheel support:
+Ensure you are using **Python 3.9, 3.10, or 3.11 (64-bit)** for plug-and-play binary wheel support:
 
 ```bash
 # Clone the repository
@@ -55,26 +55,36 @@ cd The_Overclocked
 pip install -r requirements.txt
 ```
 
-### 2. Launch Live Monitoring
-Connect any standard USB webcam or NIR camera and launch the real-time HUD:
+### 2. Launch Real-Time Monitoring
+Connect any standard USB webcam or NIR camera and launch the live HUD:
 
 ```bash
 # Launch live camera feed with real-time HUD & telemetry
 python main.py
+
+# Or run on a pre-recorded video clip and save both CSV telemetry & annotated video:
+python main.py --source "path/to/clip.mp4" --output-csv "features.csv" --output "annotated_clip.mp4"
+
+# Or run headless for high-throughput batch extraction:
+python main.py --source "path/to/clip.mp4" --headless --output-csv "features.csv"
 ```
 
-**Live HUD Interactive Hotkeys:**
-- **`[v]`**: Cycle landmark overlays: `Key Regions` $\to$ `Full 478-Point Mesh` $\to$ `Off` (unobstructed view).
-- **`[r]`**: Toggle the **Adaptive ROI Zoom Box** showing the dynamic $2.0\times$ face crop tracker.
-- **`[q]`** or **`[ESC]`**: Safely exit the application.
+**Live HUD Interactive Controls:**
+- **`[v]`**: Cycle landmark overlays: `Key Regions` $\to$ `Full 478-Point Mesh` $\to$ `Solid Part Masking` $\to$ `Off`.
+- **`[1-8]`**: Selectively toggle solid part highlights (`[1]` Forehead, `[2]` Cheeks, `[3]` Chin, `[4]` Lips, `[5]` Eyes, `[6]` Nose, `[7]` Eyebrows, `[8]` Full Face) or **`[0]`** to toggle all.
+- **`[r]`**: Toggle the **Adaptive ROI Zoom Box** displaying the dynamic $2.0\times$ face crop tracker.
+- **`[s]`**: Toggle real-time visual video stabilization on the display window.
+- **`[p]`**: Pause or resume video stream playback.
+- **`[u]`**: Simulate vehicle **PARK gear** (unlatches Bayesian interlock and resets classifier state).
+- **`[q]`** or **`[ESC]`**: Safely exit and flush streaming CSV and video output.
 
 ### 3. Run Complete Automated Test Suite
-Verify that all 272 automated unit, invariance, and geometric tests pass on your machine:
+Verify that all 294 automated unit, invariance, geometric, and integration tests pass on your machine:
 
 ```bash
 python -m pytest tests/ -v
 ```
-*(All 272 tests execute in $< 60\text{ seconds}$ with a 100% pass rate).*
+*(All 294 tests execute in $< 60\text{ seconds}$ with a 100% pass rate).*
 
 ---
 
@@ -112,6 +122,7 @@ While a driver can consciously control their gross eyelid opening, they **cannot
 │ • Sluggish Blink Upstroke Velocity    │   │ • Frontalis Brow-Raising Ptosis Lift  │
 │ • Vestibulo-Ocular Reflex Depression  │   │ • Rigid Neck / Cervical Spine Lock    │
 │ • T-Zone Microvascular Flushing (rPPG)│   │                                       │
+│ • Lack of Convergence (LOC strabismus)│   │                                       │
 └───────────────────┬───────────────────┘   └───────────────────┬───────────────────┘
                     │                                           │
                     └─────────────────────┬─────────────────────┘
@@ -145,13 +156,13 @@ The pipeline processes raw camera frames through 10 strictly decoupled, zero-cop
 
 ```mermaid
 flowchart TD
-    A["1. Capture & Sensor Ingestion\nDirectShow / MJPG / 940nm NIR"] --> B["2. Lighting Preprocessing\nCLAHE (8x8) + Adaptive Gamma LUT"]
+    A["1. Capture & Sensor Ingestion\nDirectShow / MJPG / 940nm NIR / Auto-Exposure 0.75"] --> B["2. Lighting Preprocessing\nCLAHE (8x8) + Adaptive Gamma LUT"]
     B --> C["3. Kinematic Video Stabilizer\nSub-0.5ms Phase Correlation & Vibration Scorer"]
-    C --> D["4. Face Mesh & Adaptive ROI\nMediaPipe 478-pt Mesh + EMA Crop Zoom (~8x resolution)"]
+    C --> D["4. Face Mesh & Adaptive ROI\nMediaPipe 478-pt Mesh + EMA Crop Zoom + 480px Inference Cap"]
     D --> E["5. Split-Bandwidth 1-Euro Smoothing\n3 Decoupled Cutoff Profiles (<0.4ms vectorized)"]
     E --> F["6. PnP 3D Head Pose Normalizer\n8-Point Skull Model + View-Ray Angle Compensation"]
     F --> G["7. Multi-Modal Gating\nHead Pose Limits + 5-pt Savitzky-Golay IMU + Voluntary Nod Gate"]
-    G --> H["8. Feature Extraction Engine\n29 Core / 48 Extended Channels + 60fps Vitals & Micromotions"]
+    G --> H["8. Feature Extraction Engine\n29 Core / 48 Extended Channels + Gated Vergence & Saccade VOR Guard"]
     H --> I["9. Personal Baseline Calibrator\n30s Rolling Accumulator + Drunk Ingress Bounding"]
     I --> J["10. Classifier & Bayesian SPRT\nInvoluntary Likelihood Ratio + Anti-Chattering Leaky Integrator"]
 ```
@@ -160,35 +171,34 @@ flowchart TD
 
 ## 🌟 Key Engineering Innovations
 
-### 1. Zero-Blur Kinematic Video & Landmark Stabilizer (`pipeline/stabilizer.py`)
-Traditional software image stabilization warps pixels via affine transformations or homography, which degrades high-frequency pixel clarity and blurs delicate eyelid margins and pupils.
-- **Coordinate-Space Stabilization:** Operates strictly on landmark coordinates and crop bounding boxes without touching pixel buffers.
-- **Fourier Phase Correlation:** Measures instantaneous vehicle cabin translation $(dx, dy)$ in $< 0.3\text{ ms}$.
-- **Chassis Vibration Filtering:** Extracts high-frequency chassis vibration energy ($3\text{--}15\text{ Hz}$) and vertical road shock impulses ($> 12\text{ px}$), discounting road noise from ocular tremor calculations.
+### 1. High-Throughput Camera Engine & DirectShow Optimization (`pipeline/frame_capture.py`)
+- **DirectShow MJPG Stream Negotiation:** Negotiates `MJPG` fourcc and sets `CAP_PROP_BUFFERSIZE = 1` to eliminate buffer latency.
+- **Auto-Exposure Persistence Prevention:** Explicitly sets `CAP_PROP_AUTO_EXPOSURE = 0.75` on live cameras so webcams never remain stuck in dark manual exposure settings from previous sessions.
+- **Anti-Motion Blur Mode:** Optional `--anti-motion-blur` flag locks exposure to $-6$ ($1/64\text{ s}$) with fixed gain for high-speed night-driving scenarios.
+- **Asynchronous Worker Thread:** Uses condition variable notifications and yields the GIL cleanly with micro-sleeps to deliver steady 30–60 FPS capture.
 
-### 2. Adaptive ROI Tracker for Distant Drivers (`pipeline/face_mesh_detector.py`)
-Standard MediaPipe Face Mesh downsamples frames to $192 \times 192\text{ px}$. When a driver is seated $1.5\text{--}2.0\text{ m}$ away, their face covers $< 100\text{ px}$ in a 720p frame, shrinking to $< 15\text{ px}$ in the model and causing severe landmark loss.
-- **Dynamic Crop Zoom:** Tracks the face center $(c_x, c_y)$ with Exponential Moving Average (EMA, $\alpha=0.15$) and crops an expanded $2.0\times$ bounding box directly from the raw sensor buffer.
-- **$\approx 8\times$ Receptive Field Gain:** The driver's face occupies $60\text{--}80\%$ of MediaPipe's receptive field.
-- **Subpixel Inversion:** Reverse-maps landmark coordinates back to full-frame coordinates with zero quantization error.
-- **Quadrant Fallback:** Automatically searches the central driver quadrant ($[0.2W, 0.1H]$ to $[0.8W, 0.85H]$) when a driver is initially seated at a distance.
+### 2. High-FPS MediaPipe Inference Scaling (`pipeline/face_mesh_detector.py`)
+- **Proportional 480px Inference Cap:** If frame width $w > 480$, frames are smoothly resized to $480 \times \text{round}(h \times \frac{480}{w})$ via `cv2.INTER_AREA` for MediaPipe detection, achieving $> 60\text{ FPS}$ pipeline throughput while remapping 3D landmarks back to native image coordinates with subpixel precision.
+- **Adaptive ROI Zoom Tracker:** Tracks the face bounding box using Exponential Moving Average (EMA, $\alpha=0.15$) and feeds a focused $2.0\times$ face crop directly into the detector, granting distant drivers an effective $\approx 8\times$ resolution boost.
+- **Quadrant Recovery Fallback:** Searches the driver's central quadrant ($[0.2W, 0.1H]$ to $[0.8W, 0.85H]$) if tracking is temporarily lost.
 
-### 3. Robust 8-Point PnP Head Pose Normalization (`pipeline/pnp_normalizer.py`)
-Isolates internal facial movements from head rotation and vehicle cabin bounce:
-- **Expanded 8-Point Skull Model:** Employs `cv2.solvePnP` with `SOLVEPNP_ITERATIVE` using 8 rigid skull points (including the nose bridge 168 and glabella 9).
-- **Yaw Bifurcation Elimination:** Temporal extrinsic seeding prevents human faces narrower than canonical models from oscillating between mirror $\pm 42^\circ$ yaw minima.
-- **Optical View-Ray Compensation:** Adjusts apparent yaw/pitch based on the 3D ray angle from the camera lens to the driver's head, eliminating distortion from off-axis mounting positions.
-- **Custom Intrinsics Support:** Loads OpenCV camera calibration files (`.json` and `.npz`) with automatic focal length scaling across resolution changes.
+### 3. Saccade Dynamics, Occlusion Guard & VOR Suppression (`pipeline/feature_extractor.py`)
+- **Blink & Eyelid-Motion Occlusion Guard:** When eyelids are in closing, closed, or opening phases, iris tracking holds over without latching false saccades.
+- **Physical 2D Socket Translation Guard:** Distinguishes genuine head motion from stationary PnP Euler jitter. Vestibulo-Ocular Reflex (VOR) counter-rotation compensation requires physical 2D eye-socket translation ($\text{eye\_socket\_vel} > 0.30$) or high angular velocity ($\text{head\_vel} > 15.0^\circ/\text{s}$), preventing stationary gaze saccades from being suppressed.
+- **Conjugate Binocular Validation:** Uses `min(|dx_l|, |dx_r|)` during head rotations to eliminate false saccades caused by far-eye perspective corner compression.
 
-### 4. Split-Bandwidth Vectorized 1-Euro Filter (`pipeline/one_euro_filter.py`)
-Filters all 478 landmarks simultaneously in $< 0.4\text{ ms}$ using NumPy vectorization across **three decoupled bandwidth profiles**:
-- **Rigid Skull Anchors (460 points):** Strong resting smoothing ($f_{\text{c,min}} = 0.8\text{ Hz}$, $\beta=0.04$) to guarantee a rock-solid PnP coordinate foundation.
-- **Eyelid Margins (28 points):** High-speed response ($f_{\text{c,min}} = 2.0\text{ Hz}$, $\beta=0.50$, $f_{\text{d}} = 8.0\text{ Hz}$) to capture sub-100ms blink downstrokes without clipping peak velocities.
-- **Iris Centers & Rings (10 points):** Dedicated ocular tracking profile ($f_{\text{c,min}} = 1.5\text{ Hz}$, $\beta=0.55$, $f_{\text{d}} = 8.0\text{ Hz}$) that preserves rapid 20–50ms saccadic jumps while suppressing detector jitter.
+### 4. Pose-Compensated EAR & Bilateral Blink Verification (`pipeline/feature_extractor.py`)
+- **Unilateral Foreshortening Guard:** When $| \text{head\_yaw} | > 10^\circ$, one eye is wide open ($\ge \max(0.26, \text{eff\_blink\_threshold} \times 1.30)$), and there is severe inter-ocular asymmetry ($|\text{ear\_left} - \text{ear\_right}| > 0.09$), perspective compression on the far eye is guarded against triggering false blinks. Genuine bilateral blinks are 100% preserved.
+- **Blink FSM Un-foreshortened Ear Injection:** During head turns, un-foreshortened dominant eye EAR is fed into `_compute_blink_velocity` to prevent the state machine from entering false `"closing"` or `"closed"` phases.
 
-### 5. Multi-Modal IMU & Voluntary Nod Gating (`pipeline/imu_gate.py`)
-- **Software IMU Gate:** Fits a 5-point non-uniform Savitzky-Golay polynomial to the 3D nose-tip translation vector. If instantaneous acceleration exceeds $2.5\text{ m/s}^2$ without head rotation ($\dot{\theta} < 20^\circ/\text{s}$), a 150ms feature freeze is triggered, preventing speed bumps from being counted as head slumps.
-- **Voluntary Nod Decoupling:** When head angular velocity exceeds $35.0^\circ/\text{s}$ (checking mirrors or nodding to music), postural sway accumulators pause and reset without false positive alerts.
+### 5. Resting Vergence Auto-Zeroing (`pipeline/feature_extractor.py`)
+- **Individual Vergence Offset Calibration:** Measures resting vergence angle during forward gaze and auto-subtracts the learned baseline $\theta_{\text{base}}$.
+- **Blink Phase Guard:** Baseline subtraction is applied strictly within the `blink_phase == 'open'` execution branch. When eyelids are closed, held vergence does not accumulate repeated baseline subtractions.
+
+### 6. Zero-Blur Kinematic Video Stabilizer (`pipeline/stabilizer.py`)
+- **Landmark-Space Stabilization:** Operates exclusively in coordinate space without warping pixel arrays, preventing blur on eyelid margins and iris boundaries.
+- **Phase Correlation Engine:** Computes inter-frame cabin translation $(dx, dy)$ in $< 0.3\text{ ms}$.
+- **Chassis Vibration Extraction:** Isolates vehicle vibration ($3\text{--}15\text{ Hz}$) and road shocks ($> 12\text{ px}$), dynamically widening saccade deadzones under harsh road vibrations.
 
 ---
 
@@ -201,6 +211,7 @@ Filters all 478 landmarks simultaneously in $< 0.4\text{ ms}$ using NumPy vector
 | **Gaze-Evoked Nystagmus (GEN)** | Neural Gaze Integrator | Slow drift towards center followed by fast reset beat | ❌ **No.** Brainstem gaze-holding failure at lateral angles. |
 | **Smooth Pursuit Fragmentation** | Vestibulocerebellum | Broken tracking requiring corrective catch-up saccades | ❌ **No.** Tracking continuous motion cannot be voluntary. |
 | **Vestibulo-Ocular Reflex (VOR)** | Semicircular Canals & Ocular Motor | Depressed counter-rotation gain ($G_{\text{VOR}} < 0.65$) | ❌ **No.** Involuntary vestibulo-ocular reflex arch. |
+| **Lack of Convergence (LOC)** | Midbrain Oculomotor Subnuclei | Exotropic divergence at near fixation ($< -3.5^\circ$) | ❌ **No.** Inability to maintain binocular vergence (DRE sign). |
 | **Facial Flushing (rPPG)** | Autonomic Vasomotor Tone | Elevation in facial microvascular chromaticity ratio | ❌ **No.** Cutaneous capillary vasodilation. |
 | **Stare Fixation Duration** | Prefrontal Cortex | Continuous unblinking stare ($> 6.0\text{ s}$) | ⚠️ **Voluntary.** Driver attempts to prove alertness. |
 | **Frontalis Ptosis Compensation** | Frontalis Muscle | Sustained brow elevation ($\Delta \ge +12\%$) | ⚠️ **Voluntary.** Driver lifts forehead to fight eyelid droop. |
@@ -254,7 +265,7 @@ $$\Lambda_t = \Lambda_{t-1} + \ln \left( \frac{P(\text{biomarkers}_t \mid \text{
 - **Anti-Chattering Leaky Integrator:** Includes a graceful decay term ($\lambda = 2.0\text{ log-odds/s}$) ensuring that momentary optical glitches or yaw glancing do not permanently elevate risk.
 - **Sustained Lockout Threshold:** To arm a starter lockout or vehicle interlock signal, the posterior probability must satisfy:
   $$P(\text{Impaired}) \ge 0.999 \quad \text{sustained continuously for } \ge 15.0\text{ seconds}$$
-- **Vehicle Safety Interlock:** Once armed, the interlock enters a latching state that clears only when the vehicle is verified to be in Park gear.
+- **Vehicle Safety Interlock:** Once armed, the interlock enters a latching state that clears only when the vehicle is verified to be in Park gear (`[u]` key in the HUD).
 
 ---
 
@@ -262,12 +273,12 @@ $$\Lambda_t = \Lambda_{t-1} + \ln \left( \frac{P(\text{biomarkers}_t \mid \text{
 
 | Script | Purpose & Key Arguments | Example Usage |
 | :--- | :--- | :--- |
-| **`main.py`** | Real-time live webcam/video monitoring with HUD overlay and CSV logging. | `python main.py`<br>`python main.py --source drive.mp4 --headless --save-csv` |
-| **`inspect_driver.py`** | Diagnostic inspection on a single photo, live camera snapshot, or video clip. | `python inspect_driver.py --image driver.jpg`<br>`python inspect_driver.py --video drive.mp4` |
-| **`extract_video_features.py`** | Batch forensic video analyzer producing clinical reports, JSON metrics, and CSV time-series. | `python extract_video_features.py --video drive.mp4 --output-dir ./audit/` |
+| **`main.py`** | Real-time live webcam or video clip monitoring with HUD visualization, video recording, and streaming CSV logging. | `python main.py`<br>`python main.py --source drive.mp4 --output-csv features.csv --output annotated.mp4`<br>`python main.py --source drive.mp4 --headless --output-csv features.csv` |
+| **`inspect_driver.py`** | Diagnostic inspection on a single photo, live camera snapshot, or video clip. | `python inspect_driver.py --image driver.jpg`<br>`python inspect_driver.py --video drive.mp4 --output diagnosis.csv` |
+| **`extract_video_features.py`** | Batch forensic video analyzer producing clinical reports (`report.txt`), JSON metrics (`summary.json`), and CSV time-series. | `python extract_video_features.py --video drive.mp4 --output-dir ./audit/`<br>`python extract_video_features.py --video drive.mp4 --csv-path features.csv` |
 | **`ingest_and_audit_clips.py`** | Discovers, audits, and ingests YouTube or dataset clips with quality gating and balanced window strides. | `python ingest_and_audit_clips.py --sober-dir ./Sober/ --drunk-dir ./Drunk/ --output-dir ./training_data/` |
-| **`train_baseline.py`** | Trains ML classifiers on `.npz` archives using `StratifiedGroupKFold` cross-validation. | `python train_baseline.py --data-dir ./training_data/ --output-model models/trained_model.joblib` |
-| **`pytest`** | Executes the full 272-test automated regression and invariant suite. | `python -m pytest tests/ -v` |
+| **`train_baseline.py`** | Trains ML classifiers on `.npz` archives using `StratifiedGroupKFold` cross-validation with subject isolation. | `python train_baseline.py --data-dir ./training_data/ --output-model models/trained_model.joblib` |
+| **`pytest`** | Executes the complete 294-test automated regression and invariant suite. | `python -m pytest tests/ -v` |
 
 ---
 
@@ -277,7 +288,7 @@ $$\Lambda_t = \Lambda_{t-1} + \ln \left( \frac{P(\text{biomarkers}_t \mid \text{
 The_Overclocked/
 ├── config.py                 # Central configuration dataclass (tunable thresholds & constants)
 ├── conftest.py               # Root pytest configuration ensuring clean sys.path resolution
-├── main.py                   # Real-time DMS application with live HUD visualization & CSV logging
+├── main.py                   # Real-time DMS application with live HUD visualization, video recording & CSV logging
 ├── inspect_driver.py         # Forensic inspector for static photos, snapshots, and video clips
 ├── extract_video_features.py # Batch video analyzer generating Section A/B audit reports
 ├── ingest_and_audit_clips.py # YouTube & raw dataset ingestion, quality auditor & window balancer
@@ -285,16 +296,16 @@ The_Overclocked/
 ├── requirements.txt          # Python package requirements
 ├── .github/
 │   └── workflows/
-│       └── ci.yml            # Automated GitHub Actions CI workflow (Python 3.10 & 3.11)
+│       └── ci.yml            # Automated GitHub Actions CI workflow (Python 3.10 & 3.11 with OpenGL support)
 ├── models/
 │   ├── face_landmarker.task  # MediaPipe 478-point landmark bundle (auto-downloaded if missing)
 │   ├── involuntary_model.joblib       # Pre-trained ML model trained exclusively on involuntary markers
 │   └── baseline_impairment_model.joblib # Full-feature baseline impairment model artifact
 ├── pipeline/
-│   ├── frame_capture.py       # Polymorphic camera/video capture (DirectShow, MJPG, RGB & NIR)
+│   ├── frame_capture.py       # Polymorphic camera/video capture (DirectShow, MJPG, RGB & NIR, auto-exposure)
 │   ├── preprocessing.py       # CLAHE & adaptive Gamma LUT low-light enhancer
 │   ├── stabilizer.py          # Zero-blur kinematic video & chassis vibration stabilizer (<0.5ms)
-│   ├── face_mesh_detector.py  # MediaPipe Face Mesh with AdaptiveROITracker & Multi-Scale Zoom
+│   ├── face_mesh_detector.py  # MediaPipe Face Mesh with AdaptiveROITracker & 480px inference cap
 │   ├── one_euro_filter.py     # Vectorized 3-bandwidth temporal low-pass filter (<0.4ms)
 │   ├── pnp_normalizer.py      # Robust 8-point solvePnP pose estimation & camera calibration loader
 │   ├── head_pose_estimator.py # Head pose gating & tracking
@@ -305,12 +316,12 @@ The_Overclocked/
 │   ├── bayesian_filter.py     # Sequential Bayesian evidence accumulator with Wald SPRT
 │   └── training_buffer.py     # Dual-mode (29-channel core / 48-channel extended) windowed buffer
 ├── utils/
-│   ├── landmarks.py           # Canonical 3D models, MediaPipe constants, forehead & cheek indices
+│   ├── landmarks.py           # Canonical 3D models, MediaPipe constants, anatomical iris pairing
 │   ├── overlay_regions.py     # 9 color-coded HUD overlay regions with vectorized batch drawing
 │   └── visualization.py       # OpenCV HUD telemetry display & region legend
 └── tests/
     ├── sample_driver_video.mp4 # Video fixture for regression & invariance benchmarking
-    └── test_*.py              # 19 test modules (272 automated unit, invariance & integration tests)
+    └── test_*.py              # 19 test modules (294 automated unit, invariance & integration tests)
 ```
 
 ---

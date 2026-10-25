@@ -50,24 +50,27 @@ class FrameCapture:
                 self.cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
                 if not self.cap.isOpened():
                     self.cap = cv2.VideoCapture(source)
-                else:
-                    self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             else:
                 self.cap = cv2.VideoCapture(source)
             self._cap = self.cap
+            try:
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            except Exception:
+                pass
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, target_fps)
-            # Prevent camera driver from dropping shutter speed below 1/30s in indoor lighting
             try:
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-            try:
-                # Disable DirectShow low-light compensation / auto-exposure rate dropping
-                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25 if anti_motion_blur else 0.75)
-            except Exception:
-                pass
+            if anti_motion_blur:
+                try:
+                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+                    self.cap.set(cv2.CAP_PROP_EXPOSURE, -6)
+                except Exception:
+                    pass
         else:
             self.cap = cv2.VideoCapture(source)
             self._cap = self.cap
@@ -184,7 +187,7 @@ class FrameCapture:
                 # Wait up to one frame interval (max 50ms) for a fresh hardware frame
                 wait_timeout = min(0.05, 1.5 / max(self.fps, 15.0))
                 self._condition.wait(timeout=wait_timeout)
-            frame = self._latest_frame.copy() if self._latest_frame is not None else None
+            frame = self._latest_frame if self._latest_frame is not None else None
             self.last_frame_timestamp = self._latest_frame_timestamp
             self.last_frame_is_new = (self._raw_frame_seq != prev_consumed) and (frame is not None)
             self._consumed_frame_seq = self._raw_frame_seq

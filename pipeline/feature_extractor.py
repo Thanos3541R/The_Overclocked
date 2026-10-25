@@ -324,6 +324,7 @@ class FeatureExtractor:
         self._ear_deriv_window: Deque[Tuple[float, float]] = deque(maxlen=3)
         self._closing_glitch_count: int = 0
         self._post_blink_followthrough_frames: int = 0
+        self._min_closed_ear: float = 0.20
 
         # ── Gaze yaw dispersion (σ_yaw) ──
         dispersion_buffer_size = int(gaze_dispersion_window_sec * fps)
@@ -350,6 +351,8 @@ class FeatureExtractor:
 
         # ── Binocular Vergence & LOC ──
         self.loc_vergence_threshold_deg = loc_vergence_threshold_deg
+        self._vergence_cal_samples: Deque[float] = deque(maxlen=60)
+        self._baseline_vergence_deg: float = 0.0
 
         # ── Smooth Pursuit Fragmentation state ──
         self.pursuit_window_sec = pursuit_window_sec
@@ -417,6 +420,9 @@ class FeatureExtractor:
             self._ear_deriv_window.clear()
             self._closing_glitch_count = 0
             self._post_blink_followthrough_frames = 0
+            self._min_closed_ear = 0.20
+            self._vergence_cal_samples.clear()
+            self._baseline_vergence_deg = 0.0
             self._gaze_yaw_history.clear()
             self._prev_head_yaw = None
             self._prev_head_pitch = None
@@ -891,6 +897,7 @@ class FeatureExtractor:
             if (d_ear < -0.010 or d_inst < -0.010) and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
                 # EAR dropping → entering closing phase
                 self._post_blink_followthrough_frames = 0
+                self._min_closed_ear = ear_avg
                 if ear_avg < self.blink_threshold:
                     self._blink_phase = "closed"
                 else:
@@ -901,6 +908,7 @@ class FeatureExtractor:
                 self._opening_velocities = []
 
         elif self._blink_phase == "closing":
+            self._min_closed_ear = min(self._min_closed_ear, ear_avg)
             if ear_avg < self.blink_threshold:
                 # Eyes fully closed → transition to closed
                 self._blink_phase = "closed"
@@ -925,6 +933,7 @@ class FeatureExtractor:
                     self._post_blink_followthrough_frames = 0
 
         elif self._blink_phase == "closed":
+            self._min_closed_ear = min(self._min_closed_ear, ear_avg)
             if d_ear > 0.005 and ear_avg > self.blink_threshold * 0.75:
                 # EAR rising → entering opening phase
                 trans_up = (abs(d_ear) / dt) * (1.0 + 12.0 * max(0.0, dt - 0.0167)) if dt > 1e-6 else ear_velocity
@@ -943,6 +952,9 @@ class FeatureExtractor:
                     if self._opening_velocities:
                         self._last_blink_opening_vel = float(
                             np.max(self._opening_velocities))
+                    if dt >= 0.042 and ear_avg >= self._open_ear_baseline * 0.85:
+                        chord_up_vel = (ear_avg - self._min_closed_ear) / 0.085
+                        self._last_blink_opening_vel = max(self._last_blink_opening_vel, min(chord_up_vel, 2.6))
                 else:
                     self._blink_phase = "opening"
                     self._phase_frames = 0
@@ -967,6 +979,10 @@ class FeatureExtractor:
                 if self._opening_velocities:
                     self._last_blink_opening_vel = float(
                         np.max(self._opening_velocities))
+
+                if dt >= 0.042 and ear_avg >= self._open_ear_baseline * 0.85:
+                    chord_up_vel = (ear_avg - self._min_closed_ear) / 0.085
+                    self._last_blink_opening_vel = max(self._last_blink_opening_vel, min(chord_up_vel, 2.6))
 
                 self._blink_phase = "open"
                 self._phase_frames = 0
@@ -2154,6 +2170,17 @@ class FeatureExtractor:
             else:
                 features.vergence_angle_deg, features.lack_of_convergence = \
                     self._compute_binocular_vergence(features.left_iris_x, features.right_iris_x)
+
+            if image_landmarks is not None:
+                if (self._blink_phase == "open" and abs(head_yaw) < 12.0 and abs(head_pitch) < 12.0 and abs(avg_iris_x) < 0.20):
+                    raw_vergence = (features.right_iris_x - features.left_iris_x) * self.deg_per_iris_unit
+                    if abs(raw_vergence) < 4.5:
+                        self._vergence_cal_samples.append(raw_vergence)
+                        if len(self._vergence_cal_samples) >= 10:
+                            self._baseline_vergence_deg = float(np.median(self._vergence_cal_samples))
+
+                features.vergence_angle_deg -= self._baseline_vergence_deg
+                features.lack_of_convergence = bool(features.vergence_angle_deg < self.loc_vergence_threshold_deg)
 
             # 2. Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842)
             features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase)

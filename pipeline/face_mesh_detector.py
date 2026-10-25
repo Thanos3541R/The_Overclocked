@@ -526,14 +526,21 @@ class FaceMeshDetector:
                 frame = np.clip(frame, 0, 255).astype(np.uint8)
 
         h, w = frame.shape[:2]
-        if frame.ndim == 2:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-        elif frame.shape[2] == 4:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-        elif frame.shape[2] == 1:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+        if w > 640 and h > 360:
+            infer_w = w // 2
+            infer_h = h // 2
+            input_frame = cv2.resize(frame, (infer_w, infer_h), interpolation=cv2.INTER_LINEAR)
         else:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            input_frame = frame
+
+        if input_frame.ndim == 2:
+            rgb = cv2.cvtColor(input_frame, cv2.COLOR_GRAY2RGB)
+        elif input_frame.shape[2] == 4:
+            rgb = cv2.cvtColor(input_frame, cv2.COLOR_BGRA2RGB)
+        elif input_frame.shape[2] == 1:
+            rgb = cv2.cvtColor(input_frame, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb = cv2.cvtColor(input_frame, cv2.COLOR_BGR2RGB)
         rgb = np.ascontiguousarray(rgb)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
@@ -551,10 +558,11 @@ class FaceMeshDetector:
         face = result.face_landmarks[0]
         if len(face) < self._n_landmarks:
             return None
-        coords = np.array(
-            [[lm.x * w, lm.y * h, lm.z * w] for lm in face[:self._n_landmarks]],
+        coords = np.fromiter(
+            (val for lm in face[:self._n_landmarks] for val in (lm.x * w, lm.y * h, lm.z * w)),
             dtype=np.float64,
-        )
+            count=self._n_landmarks * 3,
+        ).reshape(self._n_landmarks, 3)
         return coords
 
     def _validate_face_geometry(self, landmarks: np.ndarray, w: int, h: int) -> bool:
@@ -618,10 +626,11 @@ class FaceMeshDetector:
             if not results.multi_face_landmarks:
                 return None
             face = results.multi_face_landmarks[0]
-            landmarks = np.array(
-                [[lm.x, lm.y, lm.z] for lm in face.landmark[:self._n_landmarks]],
-                dtype=np.float64
-            )
+            landmarks = np.fromiter(
+                (val for lm in face.landmark[:self._n_landmarks] for val in (lm.x, lm.y, lm.z)),
+                dtype=np.float64,
+                count=self._n_landmarks * 3,
+            ).reshape(self._n_landmarks, 3)
             return landmarks
         else:
             mp_image = mp.Image(
@@ -632,10 +641,11 @@ class FaceMeshDetector:
             if not results.face_landmarks:
                 return None
             face = results.face_landmarks[0]
-            landmarks = np.array(
-                [[lm.x, lm.y, lm.z] for lm in face[:self._n_landmarks]],
-                dtype=np.float64
-            )
+            landmarks = np.fromiter(
+                (val for lm in face[:self._n_landmarks] for val in (lm.x, lm.y, lm.z)),
+                dtype=np.float64,
+                count=self._n_landmarks * 3,
+            ).reshape(self._n_landmarks, 3)
             return landmarks
 
     def detect(

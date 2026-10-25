@@ -265,3 +265,84 @@ def test_main_module_imports_cleanly():
     import main
     importlib.reload(main)
     assert hasattr(main, "main")
+
+
+def test_resting_vergence_auto_zeroing_on_real_frames():
+    """Verify resting vergence auto-zeroing adapts on real frames and is bypassed on synthetic frames."""
+    from utils.landmarks import (
+        RIGHT_EYE_OUTER, RIGHT_EYE_INNER, LEFT_EYE_OUTER, LEFT_EYE_INNER,
+        RIGHT_IRIS_CENTER, LEFT_IRIS_CENTER, RIGHT_EYE_EAR_FLAT, LEFT_EYE_EAR_FLAT
+    )
+    ext = FeatureExtractor()
+
+    # Build realistic eye geometry
+    lms = np.zeros((478, 3), dtype=np.float64)
+    # Right eye (subject's right, viewer's left: outer=33, inner=133)
+    lms[RIGHT_EYE_OUTER] = [180.0, 200.0, 0.0]
+    lms[RIGHT_EYE_INNER] = [220.0, 200.0, 0.0]
+    # Small offset on right iris (+1.0 px normalized offset)
+    lms[RIGHT_IRIS_CENTER] = [201.0, 200.0, 0.0]
+    for idx in RIGHT_EYE_EAR_FLAT[1:3]:
+        lms[idx] = [200.0, 190.0, 0.0]
+    for idx in RIGHT_EYE_EAR_FLAT[4:]:
+        lms[idx] = [200.0, 210.0, 0.0]
+
+    # Left eye (subject's left, viewer's right: inner=362, outer=263)
+    lms[LEFT_EYE_INNER] = [380.0, 200.0, 0.0]
+    lms[LEFT_EYE_OUTER] = [420.0, 200.0, 0.0]
+    lms[LEFT_IRIS_CENTER] = [400.0, 200.0, 0.0]
+    for idx in LEFT_EYE_EAR_FLAT[1:3]:
+        lms[idx] = [400.0, 190.0, 0.0]
+    for idx in LEFT_EYE_EAR_FLAT[4:]:
+        lms[idx] = [400.0, 210.0, 0.0]
+
+    # Synthetic frame (image_landmarks is None) -> _baseline_vergence_deg stays 0.0
+    f_synth = ext.compute(lms, timestamp=1.0, frame_id=1, face_valid=True, image_landmarks=None)
+    assert ext._baseline_vergence_deg == 0.0
+
+    # Real frame (image_landmarks is not None) with constant offset
+    # Simulate 15 frames with forward gaze and static vergence offset
+    for i in range(15):
+        t = 2.0 + i * 0.033
+        f_real = ext.compute(lms, timestamp=t, frame_id=10 + i, face_valid=True, image_landmarks=lms)
+
+    assert len(ext._vergence_cal_samples) >= 10
+    # Baseline was learned and subtracted from real frames
+    assert f_real.vergence_angle_deg == pytest.approx(0.0, abs=0.5)
+    assert f_real.lack_of_convergence is False
+
+
+def test_low_fps_blink_upstroke_chord_floor():
+    """Verify low-FPS (dt >= 0.042) blink upstroke computes physiological chord velocity."""
+    ext = FeatureExtractor(fps=20.0)
+
+    # Simulate blink sequence at ~17 FPS (dt = 0.06s)
+    # Frame 1: Open
+    ext._compute_blink_velocity(0.28, timestamp=1.00)
+    assert ext._blink_phase == "open"
+
+    # Frame 2: Closing
+    ext._compute_blink_velocity(0.18, timestamp=1.06)
+    assert ext._blink_phase in ("closing", "closed")
+
+    # Frame 3: Closed at nadir (0.08)
+    ext._compute_blink_velocity(0.08, timestamp=1.12)
+    assert ext._blink_phase == "closed"
+    assert ext._min_closed_ear == pytest.approx(0.08, abs=1e-4)
+
+    # Frame 4: Partial reopening
+    ext._compute_blink_velocity(0.16, timestamp=1.18)
+    assert ext._blink_phase == "opening"
+
+    # Frame 5: Reopening slow step
+    ext._compute_blink_velocity(0.20, timestamp=1.24)
+    assert ext._blink_phase == "opening"
+
+    # Frame 6: Reaches full open baseline (0.25)
+    # At ~17 FPS, dt = 0.06s >= 0.042
+    ext._compute_blink_velocity(0.25, timestamp=1.30)
+    assert ext._blink_phase == "open"
+    # Chord upstroke velocity: (0.25 - 0.08) / 0.085 = 2.00 EAR/s
+    expected_chord = (0.25 - 0.08) / 0.085
+    assert ext._last_blink_opening_vel == pytest.approx(expected_chord, abs=0.15)
+    assert ext._last_blink_opening_vel >= 1.8

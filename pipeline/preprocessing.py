@@ -182,18 +182,35 @@ class LightingNormalizer:
         yuv[:, :, 0] = raw_y
 
         raw_lum = self._compute_fast_mean(self._get_eval_region(raw_y, face_bbox))
-        clahe_y = self.clahe.apply(raw_y)
-        if raw_lum >= 95.0:
-            # Blend 35% CLAHE + 65% original Y in-place into clahe_y to prevent temporary array allocations
-            cv2.addWeighted(clahe_y, 0.35, raw_y, 0.65, 0, dst=clahe_y)
+        h, w = raw_y.shape[:2]
 
-        mean_lum = self._compute_fast_mean(self._get_eval_region(clahe_y, face_bbox))
+        if face_bbox is not None and raw_lum >= self.low_light_threshold:
+            fx1 = max(0, int(round(face_bbox[0])) - 32)
+            fy1 = max(0, int(round(face_bbox[1])) - 32)
+            fx2 = min(w, int(round(face_bbox[2])) + 32)
+            fy2 = min(h, int(round(face_bbox[3])) + 32)
+            if (fx2 - fx1) >= 16 and (fy2 - fy1) >= 16:
+                face_y = raw_y[fy1:fy2, fx1:fx2]
+                clahe_face = self.clahe.apply(face_y)
+                if raw_lum >= 95.0:
+                    cv2.addWeighted(clahe_face, 0.35, face_y, 0.65, 0, dst=clahe_face)
+                yuv[fy1:fy2, fx1:fx2, 0] = clahe_face
+                mean_lum = self._compute_fast_mean(self._get_eval_region(yuv[:, :, 0], face_bbox))
+            else:
+                mean_lum = raw_lum
+        else:
+            clahe_y = self.clahe.apply(raw_y)
+            if raw_lum >= 95.0:
+                # Blend 35% CLAHE + 65% original Y in-place into clahe_y to prevent temporary array allocations
+                cv2.addWeighted(clahe_y, 0.35, raw_y, 0.65, 0, dst=clahe_y)
 
-        if mean_lum < self.low_light_threshold:
-            lut = self._lut_dark if mean_lum < 40.0 else self._lut_dim
-            cv2.LUT(clahe_y, lut, dst=clahe_y)
+            mean_lum = self._compute_fast_mean(self._get_eval_region(clahe_y, face_bbox))
 
-        yuv[:, :, 0] = clahe_y
+            if mean_lum < self.low_light_threshold:
+                lut = self._lut_dark if mean_lum < 40.0 else self._lut_dim
+                cv2.LUT(clahe_y, lut, dst=clahe_y)
+
+            yuv[:, :, 0] = clahe_y
 
         if return_rgb:
             return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB)

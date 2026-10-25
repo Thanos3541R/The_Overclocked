@@ -10,12 +10,13 @@ htmlcov/
 
 # Logs and run artifacts
 *.log
-output_features.csv
-my_video_features.csv
-video_features*
-feature_extraction_output*
-Output.csv
-output.csv
+*.mp4
+*.avi
+*.csv
+*report.txt
+*summary.json
+extracted_features/
+output_features/
 captured_snapshot.jpg
 inspection_result.jpg
 panel_*.jpg

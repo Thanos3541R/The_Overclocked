@@ -467,6 +467,14 @@ class FeatureExtractor:
             self._mar_history.clear()
 
     @property
+    def _vergence_baseline(self) -> float:
+        return self._baseline_vergence_deg
+
+    @_vergence_baseline.setter
+    def _vergence_baseline(self, val: float) -> None:
+        self._baseline_vergence_deg = val
+
+    @property
     def _last_rppg_hrv(self) -> float:
         return self._last_rppg_rmssd
 
@@ -2164,16 +2172,16 @@ class FeatureExtractor:
                 features.vergence_angle_deg, features.lack_of_convergence = \
                     self._compute_binocular_vergence(features.left_iris_x, features.right_iris_x)
 
-            if image_landmarks is not None:
-                if (self._blink_phase == "open" and abs(head_yaw) < 12.0 and abs(head_pitch) < 12.0 and abs(avg_iris_x) < 0.20):
-                    raw_vergence = (features.right_iris_x - features.left_iris_x) * self.deg_per_iris_unit
-                    if abs(raw_vergence) < 4.5:
-                        self._vergence_cal_samples.append(raw_vergence)
-                        if len(self._vergence_cal_samples) >= 10:
-                            self._baseline_vergence_deg = float(np.median(self._vergence_cal_samples))
+                if image_landmarks is not None:
+                    if abs(head_yaw) < 12.0 and abs(head_pitch) < 12.0 and abs(avg_iris_x) < 0.20:
+                        raw_vergence = (features.right_iris_x - features.left_iris_x) * self.deg_per_iris_unit
+                        if abs(raw_vergence) < 4.5:
+                            self._vergence_cal_samples.append(raw_vergence)
+                            if len(self._vergence_cal_samples) >= 10:
+                                self._baseline_vergence_deg = float(np.median(self._vergence_cal_samples))
 
-                features.vergence_angle_deg -= self._baseline_vergence_deg
-                features.lack_of_convergence = bool(features.vergence_angle_deg < self.loc_vergence_threshold_deg)
+                    features.vergence_angle_deg -= self._baseline_vergence_deg
+                    features.lack_of_convergence = bool(features.vergence_angle_deg < self.loc_vergence_threshold_deg)
 
             # 2. Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842)
             features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase)

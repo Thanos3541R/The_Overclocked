@@ -310,6 +310,22 @@ def test_resting_vergence_auto_zeroing_on_real_frames():
     # Baseline was learned and subtracted from real frames
     assert f_real.vergence_angle_deg == pytest.approx(0.0, abs=0.5)
     assert f_real.lack_of_convergence is False
+    assert ext._baseline_vergence_deg != 0.0
+
+    # Simulate closed-eye blink sequence; held vergence must NOT accumulate -baseline
+    vergence_before_blink = f_real.vergence_angle_deg
+    lms_closed = lms.copy()
+    # Flatten eye landmarks so EAR < 0.15 (closed eye)
+    for idx in RIGHT_EYE_EAR_FLAT[1:]:
+        lms_closed[idx] = lms[RIGHT_EYE_EAR_FLAT[0]]
+    for idx in LEFT_EYE_EAR_FLAT[1:]:
+        lms_closed[idx] = lms[LEFT_EYE_EAR_FLAT[0]]
+
+    for j in range(10):
+        t_closed = 2.462 + (j + 1) * 0.033
+        f_closed = ext.compute(lms_closed, timestamp=t_closed, frame_id=30 + j, face_valid=True, image_landmarks=lms_closed)
+        assert f_closed.blink_phase in ("closing", "closed")
+        assert f_closed.vergence_angle_deg == pytest.approx(vergence_before_blink, abs=1e-5)
 
 
 def test_low_fps_blink_upstroke_chord_floor():

@@ -526,10 +526,10 @@ class FaceMeshDetector:
                 frame = np.clip(frame, 0, 255).astype(np.uint8)
 
         h, w = frame.shape[:2]
-        if w > 640 and h > 360:
-            infer_w = w // 2
-            infer_h = h // 2
-            input_frame = cv2.resize(frame, (infer_w, infer_h), interpolation=cv2.INTER_LINEAR)
+        if w > 480:
+            infer_w = 480
+            infer_h = max(10, int(round(h * (480.0 / w))))
+            input_frame = cv2.resize(frame, (infer_w, infer_h), interpolation=cv2.INTER_AREA)
         else:
             input_frame = frame
 

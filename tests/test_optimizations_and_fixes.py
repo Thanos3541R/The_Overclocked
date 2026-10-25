@@ -723,6 +723,12 @@ class TestExternalReviewFixes:
                     resolved = getattr(args, "overlay_mode", "regions")
                 assert resolved == expected_mode
 
+        # Test --output-csv and --output aliases
+        with patch.object(sys, "argv", ["main.py", "--output-csv", "my_features.csv", "--output", "annotated.mp4"]):
+            args = main.parse_args()
+            assert args.csv_path == "my_features.csv"
+            assert args.output_video == "annotated.mp4"
+
     def test_mediapipe_missing_import_guard(self):
         """FaceMeshDetector must raise actionable RuntimeError when mediapipe is None."""
         with patch("pipeline.face_mesh_detector.mp", None):

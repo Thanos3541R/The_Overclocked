@@ -76,8 +76,11 @@ def parse_args() -> argparse.Namespace:
         "--no-csv", action="store_false", dest="save_csv",
         help="Disable CSV feature logging")
     parser.add_argument(
-        "--csv-path", type=str, default="output_features.csv",
+        "--csv-path", "--output-csv", type=str, default="output_features.csv", dest="csv_path",
         help="CSV output file path (default: output_features.csv)")
+    parser.add_argument(
+        "--output", "--output-video", type=str, default=None, dest="output_video",
+        help="Optional path to save annotated output video (.mp4 or .avi)")
     parser.add_argument(
         "--overlay-mode", type=str, choices=["off", "regions", "full", "solid"], default="regions",
         help="HUD landmark overlay mode: 'regions' (default key regions), 'full' (full mesh), 'solid' (color-filled facial parts), 'off'")
@@ -344,6 +347,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     t0 = time.perf_counter()
     camera_t0: Optional[float] = None
     last_telemetry_time = t0
+    video_writer: Optional[cv2.VideoWriter] = None
 
     last_raw_frame = None
     last_smooth_landmarks = None
@@ -465,7 +469,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 last_roi_bounds = face_bbox
                 last_shift_vector = (dx_cam, dy_cam)
 
-                if not args.headless:
+                if not args.headless or args.output_video:
                     try:
                         viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
                         visualizer.draw(
@@ -480,18 +484,27 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                             roi_bounds=face_bbox,
                             shift_vector=(dx_cam, dy_cam),
                         )
-                        cv2.imshow("Driver Monitor", viz_frame)
-                        key = cv2.waitKey(1) & 0xFF
-                        if key in (ord('q'), ord('Q')):
-                            break
-                        elif key in (ord('p'), ord('P')):
-                            paused = True
-                        elif key in (ord('u'), ord('U')):
-                            bayesian_filter.unlatch(park_gear_confirmed=True)
-                            classifier.reset()
-                            print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
-                        else:
-                            visualizer.handle_key(key)
+                        if args.output_video:
+                            if video_writer is None:
+                                h_out, w_out = viz_frame.shape[:2]
+                                fps_out = capture.fps if (capture.fps and capture.fps > 0) else 30.0
+                                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                video_writer = cv2.VideoWriter(args.output_video, fourcc, fps_out, (w_out, h_out))
+                            video_writer.write(viz_frame)
+
+                        if not args.headless:
+                            cv2.imshow("Driver Monitor", viz_frame)
+                            key = cv2.waitKey(1) & 0xFF
+                            if key in (ord('q'), ord('Q')):
+                                break
+                            elif key in (ord('p'), ord('P')):
+                                paused = True
+                            elif key in (ord('u'), ord('U')):
+                                bayesian_filter.unlatch(park_gear_confirmed=True)
+                                classifier.reset()
+                                print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
+                            else:
+                                visualizer.handle_key(key)
                     except cv2.error as exc:
                         print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                         args.headless = True
@@ -602,7 +615,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 print(f"[DMS Telemetry] {cam_label}CPU Pipeline: {cpu_fps:.1f} FPS ({cpu_ms:.1f} ms/frame)")
                 last_telemetry_time = now_t
 
-            if not args.headless:
+            if not args.headless or args.output_video:
                 try:
                     viz_frame = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
                     visualizer.draw(
@@ -618,18 +631,27 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                         shift_vector=(dx_cam, dy_cam),
                         cam_fps=cam_fps,
                     )
-                    cv2.imshow("Driver Monitor", viz_frame)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key in (ord('q'), ord('Q')):
-                        break
-                    elif key in (ord('p'), ord('P')):
-                        paused = True
-                    elif key in (ord('u'), ord('U')):
-                        bayesian_filter.unlatch(park_gear_confirmed=True)
-                        classifier.reset()
-                        print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
-                    else:
-                        visualizer.handle_key(key)
+                    if args.output_video:
+                        if video_writer is None:
+                            h_out, w_out = viz_frame.shape[:2]
+                            fps_out = capture.fps if (capture.fps and capture.fps > 0) else 30.0
+                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                            video_writer = cv2.VideoWriter(args.output_video, fourcc, fps_out, (w_out, h_out))
+                        video_writer.write(viz_frame)
+
+                    if not args.headless:
+                        cv2.imshow("Driver Monitor", viz_frame)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key in (ord('q'), ord('Q')):
+                            break
+                        elif key in (ord('p'), ord('P')):
+                            paused = True
+                        elif key in (ord('u'), ord('U')):
+                            bayesian_filter.unlatch(park_gear_confirmed=True)
+                            classifier.reset()
+                            print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
+                        else:
+                            visualizer.handle_key(key)
                 except cv2.error as exc:
                     print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                     args.headless = True
@@ -643,6 +665,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         print(f"[DMS] Processed {frame_id} frames")
         capture.release()
         detector.close()
+        if video_writer is not None:
+            video_writer.release()
+            print(f"[DMS] Annotated video saved to: {args.output_video}")
         if csv_logger is not None:
             csv_logger.close()
             print(f"[DMS] CSV saved to: {csv_logger.filepath}")

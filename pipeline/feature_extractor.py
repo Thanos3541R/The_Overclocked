@@ -636,23 +636,35 @@ class FeatureExtractor:
                 self._prev_right_iris_x = right_iris_x
             return (0.0, False, 0.0, 0.0)
 
-        # ── Blink & Eyelid-Motion Occlusion Guard ──
-        # Never latch saccade_detected=True into closing/closed/opening phases, and suppress
-        # iris derivative spikes when the upper eyelid is actively descending/ascending (|d_ear| > 0.020).
-        if blink_phase != "open" or abs(d_ear) > 0.022:
-            self._was_in_blink = (blink_phase != "open")
+        # ── Blink Occlusion Guard ──
+        if blink_phase != "open":
+            self._was_in_blink = True
+            raw_dx = 0.0
+            velocity = 0.0
+            saccade_detected = self._last_features.saccade_detected
+            self._in_saccade = saccade_detected
+
             if self._in_saccade:
-                self._in_saccade = False
-                self._last_saccade_end_time = timestamp
-            latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0 if self._last_saccade_end_time > 0 else 0.0
-            return (0.0, False, latency_ms, 0.0)
+                latency_ms = 0.0
+            elif self._last_saccade_end_time > 0:
+                latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
+            else:
+                latency_ms = 0.0
+
+            return (velocity, saccade_detected, latency_ms, raw_dx)
 
         if getattr(self, "_was_in_blink", False):
             self._was_in_blink = False
+            raw_dx = 0.0
+            velocity = 0.0
             if self._in_saccade:
                 self._in_saccade = False
                 self._last_saccade_end_time = timestamp
-            latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0 if self._last_saccade_end_time > 0 else 0.0
+                latency_ms = 0.0
+            elif self._last_saccade_end_time > 0:
+                latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
+            else:
+                latency_ms = 0.0
             self._prev_iris_x = iris_x
             self._prev_iris_y = iris_y
             self._prev_timestamp = timestamp
@@ -660,36 +672,34 @@ class FeatureExtractor:
                 self._prev_left_iris_x = left_iris_x
             if right_iris_x is not None:
                 self._prev_right_iris_x = right_iris_x
-            return (0.0, False, latency_ms, 0.0)
+            return (velocity, False, latency_ms, raw_dx)
 
         raw_dx = float(abs(iris_x - self._prev_iris_x))
         raw_dy = float(abs(iris_y - self._prev_iris_y))
 
-        # Binocular conjugate validation:
-        # 1. Reject opposite-direction movement (vergence / glare / PnP roll artifact).
-        # 2. When head is turned (|head_yaw| > 8°) or rotating (head_vel_deg_s > 6°/s),
-        #    use min(|dx_l|, |dx_r|) so far-eye corner foreshortening never creates fake saccades.
+        # Binocular conjugate check:
+        # 1. Zero out if eyes move in strictly opposite directions.
+        # 2. If head is turned past 12 deg and one eye jumps much more than the other (foreshortened far eye),
+        #    use min(|dx_l|, |dx_r|) so far-eye corner compression does not create a fake saccade.
         if (left_iris_x is not None and right_iris_x is not None and
                 self._prev_left_iris_x is not None and self._prev_right_iris_x is not None):
             dx_l = left_iris_x - self._prev_left_iris_x
             dx_r = right_iris_x - self._prev_right_iris_x
-            if (dx_l * dx_r) <= 0.0:
+            if (dx_l * dx_r) < -1e-4:
                 effective_dx = 0.0
-            elif abs(head_yaw) > 8.0 or head_vel_deg_s > 6.0 or eye_socket_vel > 0.18:
+            elif abs(head_yaw) > 12.0 and max(abs(dx_l), abs(dx_r)) > 2.2 * min(abs(dx_l), abs(dx_r)):
                 effective_dx = float(min(abs(dx_l), abs(dx_r)))
             else:
                 effective_dx = raw_dx
         else:
             effective_dx = raw_dx
 
-        # ── Head-Motion & Vestibulo-Ocular Reflex (VOR) Suppression Guard ──
-        # When the head rotates or translates while the eyes stay locked on the screen,
-        # the iris slides inside the eye socket due to VOR and 3D perspective projection.
+        # Head-Motion / VOR Guard:
+        # Require physical 2D eye-socket translation (eye_socket_vel > 0.30) to confirm real head movement
+        # so stationary PnP Euler jitter never blocks real saccades!
         is_head_moving = (
-            (head_vel_deg_s > 7.5) or
-            (abs(d_head_yaw) > 0.45) or
-            (eye_socket_vel > min(self.eye_socket_vel_threshold, 0.22)) or
-            (abs(head_yaw) > 11.0 and (head_vel_deg_s > 2.5 or eye_socket_vel > 0.10))
+            (eye_socket_vel > self.eye_socket_vel_threshold) or
+            (head_vel_deg_s > 15.0 and eye_socket_vel > 0.30)
         )
 
         if vibration_score > 0.2:
@@ -701,16 +711,11 @@ class FeatureExtractor:
             eff_saccade_deadzone_hypot = self.saccade_subpixel_deadzone_hypot
 
         if is_head_moving:
-            # Require both eyes to jump substantially beyond VOR counter-rotation
-            vor_dx_floor = max(self.saccade_head_motion_dx, eff_saccade_deadzone_dx, 0.16)
-            if effective_dx < vor_dx_floor:
+            if effective_dx < max(self.saccade_head_motion_dx, eff_saccade_deadzone_dx, 0.085):
                 velocity = 0.0
             else:
                 dx_deg = effective_dx * self.saccade_deg_per_unit
-                vor_comp_deg_s = max(1.25 * head_vel_deg_s, 18.0 * eye_socket_vel, 15.0)
-                velocity = max(0.0, (dx_deg / dt) - vor_comp_deg_s)
-                if velocity < self.saccade_onset_velocity * 1.25:
-                    velocity = 0.0
+                velocity = max(0.0, (dx_deg / dt) - 0.85 * head_vel_deg_s)
         else:
             if effective_dx < eff_saccade_deadzone_dx or np.hypot(raw_dx, raw_dy * 0.5) < eff_saccade_deadzone_hypot:
                 velocity = 0.0
@@ -1998,7 +2003,7 @@ class FeatureExtractor:
                 features.right_iris_x = features.left_iris_x
                 features.right_iris_y = features.left_iris_y
 
-            # Compute instantaneous head angular speed early so both EAR/Blink and Saccade guards use it
+            # Compute instantaneous head angular speed early
             head_total_vel = 0.0
             d_yaw_step = 0.0
             if self._prev_head_yaw is not None and self._prev_head_pitch is not None and self._prev_head_timestamp is not None:
@@ -2013,14 +2018,9 @@ class FeatureExtractor:
                 if not (glare_l and not glare_r) and not (glare_r and not glare_l):
                     raw_ear_avg = (features.ear_left + features.ear_right) / 2.0
                     curr_ear_avg = raw_ear_avg
-                    max_eye_ear = max(features.ear_left, features.ear_right)
-                    min_eye_ear = min(features.ear_left, features.ear_right)
-                    # When turning the head (|yaw| > 5°) or when one eye is foreshortened during head motion,
-                    # weight the camera-facing (un-foreshortened) eye up to 95% so far-eye compression
-                    # never causes a fake EAR drop or false blink.
-                    if (abs(head_yaw) > 5.0 or head_total_vel > 10.0) and max_eye_ear > 0.21:
-                        yaw_weight = min(0.45, max((abs(head_yaw) - 5.0) / 18.0, head_total_vel / 60.0))
-                        curr_ear_avg = (0.5 + yaw_weight) * max_eye_ear + (0.5 - yaw_weight) * min_eye_ear
+                    if abs(head_yaw) > 12.0 and max(features.ear_left, features.ear_right) > 0.18:
+                        yaw_weight = min(0.35, (abs(head_yaw) - 12.0) / 40.0)
+                        curr_ear_avg = (0.5 + yaw_weight) * max(features.ear_left, features.ear_right) + (0.5 - yaw_weight) * min(features.ear_left, features.ear_right)
                     if head_pitch > 6.0:
                         pitch_comp = min(0.045, (head_pitch - 6.0) * 0.0025)
                         curr_ear_avg = curr_ear_avg + pitch_comp
@@ -2039,15 +2039,17 @@ class FeatureExtractor:
             else:
                 eff_blink_threshold = self.blink_threshold
 
-            # ── Blink / Micro-sleep detection (with Head-Turn Foreshortening Guard) ──
-            # Genuine blinks are bilateral. When the head is turned (|yaw| > 6°) or rotating (> 10°/s),
-            # if the camera-facing eye remains clearly open (>= blink_threshold * 1.12), do NOT count
-            # far-eye perspective foreshortening as a blink closure.
-            if image_landmarks is not None and (abs(head_yaw) > 6.0 or head_total_vel > 10.0):
-                dominant_eye_open = max(features.ear_left, features.ear_right) >= (eff_blink_threshold * 1.12)
-                eyes_closed = (features.ear_avg < eff_blink_threshold) and (not dominant_eye_open)
-            else:
-                eyes_closed = features.ear_avg < eff_blink_threshold
+            # ── Blink / Micro-sleep detection (with Unilateral Foreshortening Guard) ──
+            # Only block eye closure when head is turned (> 10 deg) AND one eye is wide open (>= 0.26)
+            # while the other eye is severely foreshortened (|ear_left - ear_right| > 0.09).
+            ear_asym = abs(features.ear_left - features.ear_right)
+            unilateral_foreshortening = (
+                image_landmarks is not None
+                and abs(head_yaw) > 10.0
+                and max(features.ear_left, features.ear_right) >= max(0.26, eff_blink_threshold * 1.30)
+                and ear_asym > 0.09
+            )
+            eyes_closed = (features.ear_avg < eff_blink_threshold) and (not unilateral_foreshortening)
 
             if eyes_closed:
                 self._consecutive_closed += 1
@@ -2110,12 +2112,9 @@ class FeatureExtractor:
             d_ear_step = float(features.ear_avg - prev_ear_for_saccade)
 
             # ── Blink closing/opening velocity & FSM tracking ──
-            # When image_landmarks is present and dominant eye is open during head turn, feed the
-            # un-foreshortened EAR into the blink FSM so head turns never enter "closing"/"closed".
             fsm_ear = (
-                max(features.ear_avg, max(features.ear_left, features.ear_right) * 0.92)
-                if (image_landmarks is not None and (abs(head_yaw) > 6.0 or head_total_vel > 10.0)
-                    and max(features.ear_left, features.ear_right) >= eff_blink_threshold * 1.12)
+                max(features.ear_avg, max(features.ear_left, features.ear_right) * 0.90)
+                if unilateral_foreshortening
                 else features.ear_avg
             )
             features.blink_closing_velocity, features.blink_opening_velocity = \

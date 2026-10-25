@@ -54,25 +54,30 @@ class FrameCapture:
                 self.cap = cv2.VideoCapture(source)
             self._cap = self.cap
             try:
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             except Exception:
                 pass
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             self.cap.set(cv2.CAP_PROP_FPS, target_fps)
-            # Disable Windows DirectShow "Low-Light Compensation" shutter drag so indoor
-            # lighting never caps a 30/60 FPS webcam down to ~16.8 FPS (59ms exposure).
             try:
-                # In OpenCV DSHOW, AUTO_EXPOSURE=0.25 (or 1) disables auto low-light shutter slowdown
-                if anti_motion_blur:
-                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                    self.cap.set(cv2.CAP_PROP_EXPOSURE, -6)
-                else:
-                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                    self.cap.set(cv2.CAP_PROP_EXPOSURE, -5)
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
+            if anti_motion_blur:
+                try:
+                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+                    self.cap.set(cv2.CAP_PROP_EXPOSURE, -6)
+                except Exception:
+                    pass
+            else:
+                # Explicitly restore DirectShow Auto-Exposure (0.75 = Auto on DSHOW, 3 = Auto on V4L2)
+                # so the webcam hardware never stays stuck in dark manual exposure (-5) from a prior run.
+                try:
+                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+                except Exception:
+                    pass
         else:
             self.cap = cv2.VideoCapture(source)
             self._cap = self.cap
@@ -153,6 +158,7 @@ class FrameCapture:
                 self._latest_frame_timestamp = t_now
                 self._raw_frame_seq += 1
                 self._condition.notify_all()
+            time.sleep(0.001)
 
     def read(self) -> Optional[np.ndarray]:
         """Read the next frame.

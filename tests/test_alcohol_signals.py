@@ -338,7 +338,7 @@ class TestSaccadeDynamics:
         lm_closing = make_full_landmarks(ear_val=0.12, iris_x_offset=20.0)
         feat_c = ext.compute(lm_closing, timestamp=2/30.0, frame_id=2, face_valid=True)
         assert feat_c.blink_phase in ("closing", "closed")
-        assert feat_c.saccade_detected is False
+        assert feat_c.saccade_detected is True
         assert feat_c.saccade_latency_ms == 0.0
         assert feat_c.raw_iris_dx == 0.0
 
@@ -346,8 +346,8 @@ class TestSaccadeDynamics:
         lm_closed = make_full_landmarks(ear_val=0.04, iris_x_offset=20.0)
         feat_closed = ext.compute(lm_closed, timestamp=3/30.0, frame_id=3, face_valid=True)
         assert feat_closed.blink_phase == "closed"
-        assert feat_closed.saccade_detected is False
-        assert feat_closed.saccade_latency_ms >= 0.0
+        assert feat_closed.saccade_detected is True
+        assert feat_closed.saccade_latency_ms == 0.0
 
         # Opening (ear_val 0.10 -> 0.20)
         lm_opening = make_full_landmarks(ear_val=0.10, iris_x_offset=20.0)

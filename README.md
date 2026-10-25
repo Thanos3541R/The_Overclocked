@@ -221,7 +221,7 @@ flowchart TD
 
 ## 📊 48-Channel Physiological Feature Dictionary
 
-The pipeline supports dual-mode operation via [`TrainingBuffer`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/training_buffer.py):
+The pipeline supports dual-mode operation via [`TrainingBuffer`](pipeline/training_buffer.py):
 - **Core Mode (29 Channels):** Standard backward-compatible feature vector.
 - **Extended Mode (48 Channels):** Full 33 continuous numerical metrics and 15 discrete behavioral/masking flags.
 
@@ -258,7 +258,7 @@ If an entering driver presents with ptosis ($\text{EAR} < 0.25$) or sluggish kin
 
 ## 📈 Sequential Bayesian Evidence Accumulator (Wald SPRT)
 
-Rather than judging each frame in isolation, [`pipeline/bayesian_filter.py`](file:///C:/Users/Akhileshwar%20Subbiah/.gemini/antigravity/scratch/driver-monitor/pipeline/bayesian_filter.py) accumulates evidence over time using **Wald's Sequential Probability Ratio Test (SPRT)**:
+Rather than judging each frame in isolation, [`pipeline/bayesian_filter.py`](pipeline/bayesian_filter.py) accumulates evidence over time using **Wald's Sequential Probability Ratio Test (SPRT)**:
 
 $$\Lambda_t = \Lambda_{t-1} + \ln \left( \frac{P(\text{biomarkers}_t \mid \text{Impaired})}{P(\text{biomarkers}_t \mid \text{Sober})} \right) - \lambda \cdot \Delta t$$
 

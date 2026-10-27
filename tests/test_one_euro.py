@@ -154,19 +154,26 @@ class TestOneEuroFilterBank:
         betas = bank.landmark_filter.beta
         d_cutoffs = bank.landmark_filter.d_cutoff
 
-        # All 440 structural landmarks
+        # Structural landmarks excluding oculomotor and eye corners
         all_indices = set(range(478))
         oculomotor_indices = set(DYNAMIC_EYELID_INDICES + DYNAMIC_IRIS_INDICES)
-        structural_indices = list(all_indices - oculomotor_indices)
-        assert len(structural_indices) == 440
+        corner_indices = {33, 133, 263, 362}
+        structural_indices = list(all_indices - oculomotor_indices - corner_indices)
+        assert len(structural_indices) == 436
         assert len(DYNAMIC_EYELID_INDICES) == 28
         assert len(DYNAMIC_IRIS_INDICES) == 10
+        assert len(corner_indices) == 4
 
         # Structural landmarks: min_cutoff = 0.7 Hz, beta = 0.007, d_cutoff = 1.0 Hz
         for idx in structural_indices:
             assert min_cutoffs[idx, 0] == 0.7
             assert betas[idx, 0] == 0.007
             assert d_cutoffs[idx, 0] == 1.0
+
+        # Eye canthi corners: min_cutoff = 1.5 Hz, beta = 0.35
+        for idx in corner_indices:
+            assert min_cutoffs[idx, 0] == 1.5
+            assert betas[idx, 0] == 0.35
 
         # Eyelid landmarks: min_cutoff = 2.0 Hz, beta = 0.50, d_cutoff = 8.0 Hz
         for idx in DYNAMIC_EYELID_INDICES:
@@ -190,18 +197,25 @@ class TestOneEuroFilterBank:
         betas = bank.landmark_filter.beta
         d_cutoffs = bank.landmark_filter.d_cutoff
 
-        # All 440 structural landmarks
+        # Structural landmarks excluding eyelids and eye corners
         all_indices = set(range(468))
         eyelid_indices = set(DYNAMIC_EYELID_INDICES)
-        structural_indices = list(all_indices - eyelid_indices)
-        assert len(structural_indices) == 440
+        corner_indices = {33, 133, 263, 362}
+        structural_indices = list(all_indices - eyelid_indices - corner_indices)
+        assert len(structural_indices) == 436
         assert len(DYNAMIC_EYELID_INDICES) == 28
+        assert len(corner_indices) == 4
 
         # Structural landmarks: min_cutoff = 0.7 Hz, beta = 0.007, d_cutoff = 1.0 Hz
         for idx in structural_indices:
             assert min_cutoffs[idx, 0] == 0.7
             assert betas[idx, 0] == 0.007
             assert d_cutoffs[idx, 0] == 1.0
+
+        # Eye canthi corners: min_cutoff = 1.5 Hz, beta = 0.35
+        for idx in corner_indices:
+            assert min_cutoffs[idx, 0] == 1.5
+            assert betas[idx, 0] == 0.35
 
         # Eyelid landmarks: min_cutoff = 2.0 Hz, beta = 0.50, d_cutoff = 8.0 Hz
         for idx in DYNAMIC_EYELID_INDICES:

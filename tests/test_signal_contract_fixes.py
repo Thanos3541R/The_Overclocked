@@ -447,7 +447,8 @@ def test_infer_subject_id_prevents_single_person_leakage_and_splits_compilations
 
 
 def test_face_mesh_detector_video_mode_uses_adaptive_roi_crop():
-    """Verify FaceMeshDetector.detect() feeds the AdaptiveROITracker crop into _detect_video_raw when tracking."""
+    """Verify FaceMeshDetector.detect() runs _detect_video_raw on consistent full-frame coordinates,
+    and falls back to AdaptiveROITracker crop via _detect_raw when video detection returns None."""
     from pipeline.face_mesh_detector import FaceMeshDetector
     from tests.test_face_mesh_detector import create_synthetic_landmarks
 
@@ -464,7 +465,6 @@ def test_face_mesh_detector_video_mode_uses_adaptive_roi_crop():
 
     def spy_video_raw(img, timestamp_s=None, return_normalized=False):
         video_call_shapes.append((img.shape[:2], return_normalized))
-        # Return centered normalized coordinates inside crop
         norm = np.zeros((478, 3), dtype=np.float64)
         norm[:, 0] = np.linspace(0.3, 0.7, 478)
         norm[:, 1] = np.linspace(0.3, 0.7, 478)
@@ -478,12 +478,37 @@ def test_face_mesh_detector_video_mode_uses_adaptive_roi_crop():
     detector._landmarker_video = object()  # ensure video path is active
     detector._detect_video_raw = spy_video_raw
     try:
+        # 1. Video mode runs on full-frame dimensions (720, 1280) with return_normalized=False
         lms = detector.detect(frame, timestamp_s=1.0)
         assert lms is not None
         assert len(video_call_shapes) == 1
-        crop_shape, ret_norm = video_call_shapes[0]
-        assert ret_norm is True
-        assert crop_shape[0] < 720 and crop_shape[1] < 1280, f"Expected ROI crop smaller than 720x1280, got {crop_shape}"
+        frame_shape, ret_norm = video_call_shapes[0]
+        assert ret_norm is False
+        assert frame_shape == (720, 1280), f"Expected full-frame (720, 1280), got {frame_shape}"
+        assert detector.roi_tracker.is_tracking
+
+        # 2. When _detect_video_raw returns None, detect() falls back to AdaptiveROITracker crop via _detect_raw
+        raw_crop_shapes = []
+        orig_detect_raw = detector._detect_raw
+
+        def spy_detect_raw(crop):
+            raw_crop_shapes.append(crop.shape[:2])
+            norm = np.zeros((478, 3), dtype=np.float64)
+            norm[:, 0] = np.linspace(0.3, 0.7, 478)
+            norm[:, 1] = np.linspace(0.3, 0.7, 478)
+            return norm
+
+        detector._detect_video_raw = lambda img, timestamp_s=None, return_normalized=False: None
+        detector._detect_raw = spy_detect_raw
+
+        try:
+            fallback_lms = detector.detect(frame, timestamp_s=2.0)
+            assert fallback_lms is not None
+            assert len(raw_crop_shapes) >= 1
+            crop_h, crop_w = raw_crop_shapes[0]
+            assert crop_h < 720 and crop_w < 1280, f"Expected ROI crop smaller than 720x1280, got {(crop_h, crop_w)}"
+        finally:
+            detector._detect_raw = orig_detect_raw
     finally:
         detector._detect_video_raw = orig_video_raw
         detector.close()

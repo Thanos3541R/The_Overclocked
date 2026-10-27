@@ -276,8 +276,8 @@ class OneEuroFilterBank:
                  iris_min_cutoff: float = 1.0,
                  iris_beta: float = 0.20,
                  iris_d_cutoff: float = 3.0,
-                 corner_min_cutoff: float = 0.6,
-                 corner_beta: float = 0.01,
+                 corner_min_cutoff: float = 1.5,
+                 corner_beta: float = 0.35,
                  preserve_oculomotor: bool = True,
                  ear_min_cutoff: float = 1.5,
                  ear_beta: float = 0.003,
@@ -297,8 +297,8 @@ class OneEuroFilterBank:
             iris_min_cutoff: Smoothing for iris landmarks (default 1.0 Hz).
             iris_beta: Speed coefficient for iris landmarks (default 0.20).
             iris_d_cutoff: Derivative cutoff for iris landmarks (default 3.0 Hz).
-            corner_min_cutoff: Smoothing for eye corner anchors (default 0.6 Hz).
-            corner_beta: Speed coefficient for eye corner anchors (default 0.01).
+            corner_min_cutoff: Smoothing for eye corner anchors (default 1.5 Hz).
+            corner_beta: Speed coefficient for eye corner anchors (default 0.35).
             preserve_oculomotor: If True, applies high-bandwidth profiles to eyelid and iris landmarks.
             ear_min_cutoff: Smoothing for auxiliary scalar signals.
             ear_beta: Speed coefficient for auxiliary scalar signals.
@@ -372,6 +372,11 @@ class OneEuroFilterBank:
                 min_cutoff_vec[iris_indices, 0] = float(iris_min_cutoff)
                 beta_vec[iris_indices, 0] = float(iris_beta)
                 d_cutoff_vec[iris_indices, 0] = float(iris_d_cutoff)
+
+            corner_indices = [i for i in (33, 133, 263, 362) if i < n_pts]
+            if corner_indices:
+                min_cutoff_vec[corner_indices, 0] = float(corner_min_cutoff)
+                beta_vec[corner_indices, 0] = float(corner_beta)
 
             x0_init = (x0_arr - self._compute_local_anchors(x0_arr, init_skull)) if x0_arr.shape[0] > 362 else x0_arr
             self.landmark_filter = VectorizedOneEuroFilter(

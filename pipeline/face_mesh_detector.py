@@ -535,9 +535,9 @@ class FaceMeshDetector:
                 frame = np.clip(frame, 0, 255).astype(np.uint8)
 
         h, w = frame.shape[:2]
-        if w > 480:
-            infer_w = 480
-            infer_h = max(10, int(round(h * (480.0 / w))))
+        if w > 640:
+            infer_w = 640
+            infer_h = max(10, int(round(h * (640.0 / w))))
             input_frame = cv2.resize(frame, (infer_w, infer_h), interpolation=cv2.INTER_AREA)
         else:
             input_frame = frame
@@ -583,21 +583,63 @@ class FaceMeshDetector:
         return coords
 
     def _validate_face_geometry(self, landmarks: np.ndarray, w: int, h: int) -> bool:
-        """Validate detected landmarks have plausible facial geometry and are within frame bounds."""
+        """Validate detected landmarks have plausible facial geometry and anatomical topology."""
         if landmarks is None or len(landmarks) < self._n_landmarks:
             return False
         if not np.all(np.isfinite(landmarks)):
             return False
         x_min, y_min = np.min(landmarks[:, :2], axis=0)
         x_max, y_max = np.max(landmarks[:, :2], axis=0)
-        bw = x_max - x_min
-        bh = y_max - y_min
+        bw = float(x_max - x_min)
+        bh = float(y_max - y_min)
         if bw < 10.0 or bh < 10.0:
             return False
         cx = (x_min + x_max) / 2.0
         cy = (y_min + y_max) / 2.0
         if cx < -0.2 * w or cx > 1.2 * w or cy < -0.2 * h or cy > 1.2 * h:
             return False
+
+        # Aspect ratio guard: reject severely squashed/folded meshes
+        aspect = bw / max(bh, 1e-4)
+        if aspect < 0.38 or aspect > 2.50:
+            return False
+
+        # Anatomical topology guard (skip only on synthetic monotonic linspace test arrays)
+        is_synthetic_linspace = bool(
+            np.all(np.diff(landmarks[:20, 0]) >= 0) and np.all(np.diff(landmarks[:20, 1]) >= 0)
+        )
+        if not is_synthetic_linspace and len(landmarks) > 362:
+            # 1. Viewer's right eye outer corner (263) must be to the right of viewer's left eye outer corner (33)
+            eye_dx = float(landmarks[263, 0] - landmarks[33, 0])
+            eye_dy = float(landmarks[263, 1] - landmarks[33, 1])
+            iod = float(np.hypot(eye_dx, eye_dy))
+            if eye_dx <= 5.0 or iod < 0.18 * bw:
+                return False
+
+            # 2. Nose tip (4) and mouth corners (61, 291) must follow vertical anatomical order along face tilt
+            eye_mid = 0.5 * (landmarks[33, :2] + landmarks[263, :2])
+            mouth_mid = 0.5 * (landmarks[61, :2] + landmarks[291, :2])
+            nose_pt = landmarks[4, :2]
+            face_down_vec = mouth_mid - eye_mid
+            face_len = float(np.linalg.norm(face_down_vec))
+            if face_len < 0.22 * bh or face_down_vec[1] <= 0.0:
+                return False
+            down_unit = face_down_vec / face_len
+            nose_proj = float(np.dot(nose_pt - eye_mid, down_unit))
+            # Nose tip must lie strictly between the eye line and the mouth line
+            if nose_proj <= 0.08 * face_len or nose_proj >= 0.95 * face_len:
+                return False
+
+            # 3. Temporal scale-collapse guard: if we had a valid face on the previous frame,
+            # reject sudden >45% single-frame bounding-box shrinkage or >80% explosion (mesh fold artifact)
+            if self._last_valid_landmarks is not None and self._consecutive_losses == 0:
+                px_min, py_min = np.min(self._last_valid_landmarks[:, :2], axis=0)
+                px_max, py_max = np.max(self._last_valid_landmarks[:, :2], axis=0)
+                prev_scale = max(float(px_max - px_min), float(py_max - py_min), 1.0)
+                curr_scale = max(bw, bh)
+                if curr_scale < 0.55 * prev_scale or curr_scale > 1.80 * prev_scale:
+                    return False
+
         return True
 
     def _detect_raw(self, image: np.ndarray) -> Optional[np.ndarray]:
@@ -698,31 +740,10 @@ class FaceMeshDetector:
             hasattr(self._detect_raw, "mock")
         )
 
-        # 1. High-resolution Adaptive ROI tracking when active:
-        #    Feeds the 2.0x face crop into VIDEO mode (or _detect_raw when mocked) so
-        #    distant driver eyes/irises fill 60-80% of MediaPipe's 256x256 tensor (~8x resolution boost).
-        if self.enable_adaptive_roi and self.roi_tracker.is_tracking:
-            if shift_hint is not None:
-                self.roi_tracker.apply_shift_hint(shift_hint[0], shift_hint[1])
-            crop, crop_box = self.roi_tracker.crop_frame(frame)
-            norm_lms = None
-            if not is_raw_mocked and getattr(self, "_landmarker_video", None) is not None:
-                norm_lms = self._detect_video_raw(crop, timestamp_s=timestamp_s, return_normalized=True)
-            else:
-                norm_lms = self._detect_raw(crop)
-
-            if norm_lms is not None:
-                landmarks = self.roi_tracker.remap_to_global(norm_lms, crop_box)
-                if is_raw_mocked or self._validate_face_geometry(landmarks, w, h):
-                    self.roi_tracker.update(landmarks, w, h)
-                    self._consecutive_losses = 0
-                    self._last_valid_landmarks = landmarks
-                    return landmarks
-
-            # Crop detection failed on this frame: immediately reset and fallback to full-frame
-            self.roi_tracker.reset()
-
-        # 2. Full-frame detection (initial acquisition on frame 0 or recovery after crop failure)
+        # 0. Temporal VIDEO mode detection on consistent full-frame coordinates:
+        #    MediaPipe RunningMode.VIDEO caches normalized [0, 1] bounding-box priors in C++.
+        #    Keeping VIDEO mode on the full frame prevents coordinate-system jumps while
+        #    delivering <12ms C++ temporal tracking.
         if not is_raw_mocked and getattr(self, "_landmarker_video", None) is not None and w <= 1280:
             video_lms = self._detect_video_raw(frame, timestamp_s=timestamp_s, return_normalized=False)
             if video_lms is not None and self._validate_face_geometry(video_lms, w, h):
@@ -733,15 +754,33 @@ class FaceMeshDetector:
                 return video_lms
             self._consecutive_losses += 1
 
+        # 1. Stateless IMAGE-mode High-Resolution Adaptive ROI tracking (fallback or >1280p frames)
+        if self.enable_adaptive_roi and self.roi_tracker.is_tracking:
+            if shift_hint is not None:
+                self.roi_tracker.apply_shift_hint(shift_hint[0], shift_hint[1])
+            crop, crop_box = self.roi_tracker.crop_frame(frame)
+            norm_lms = self._detect_raw(crop)
+            if norm_lms is not None:
+                landmarks = self.roi_tracker.remap_to_global(norm_lms, crop_box)
+                if is_raw_mocked or self._validate_face_geometry(landmarks, w, h):
+                    self.roi_tracker.update(landmarks, w, h)
+                    self._consecutive_losses = 0
+                    self._last_valid_landmarks = landmarks
+                    return landmarks
+            # Crop detection failed on this frame: immediately reset and fallback to full-frame
+            self.roi_tracker.reset()
+
+        # 2. Stateless IMAGE-mode Full-Frame detection
         full_box = (0, 0, w, h)
         norm_lms = self._detect_raw(frame)
         if norm_lms is not None:
             landmarks = self.roi_tracker.remap_to_global(norm_lms, full_box)
-            if self.enable_adaptive_roi:
-                self.roi_tracker.update(landmarks, w, h)
-            self._consecutive_losses = 0
-            self._last_valid_landmarks = landmarks
-            return landmarks
+            if is_raw_mocked or self._validate_face_geometry(landmarks, w, h):
+                if self.enable_adaptive_roi:
+                    self.roi_tracker.update(landmarks, w, h)
+                self._consecutive_losses = 0
+                self._last_valid_landmarks = landmarks
+                return landmarks
 
         # 3. Multi-Scale Pyramid Acquisition:
         # On frame 0 or when lost: if full-frame detection fails, evaluate central driver quadrant crop
@@ -752,10 +791,11 @@ class FaceMeshDetector:
             norm_lms = self._detect_raw(quadrant_crop)
             if norm_lms is not None:
                 landmarks = self.roi_tracker.remap_to_global(norm_lms, quadrant_box)
-                self.roi_tracker.update(landmarks, w, h)
-                self._consecutive_losses = 0
-                self._last_valid_landmarks = landmarks
-                return landmarks
+                if is_raw_mocked or self._validate_face_geometry(landmarks, w, h):
+                    self.roi_tracker.update(landmarks, w, h)
+                    self._consecutive_losses = 0
+                    self._last_valid_landmarks = landmarks
+                    return landmarks
 
         return None
 

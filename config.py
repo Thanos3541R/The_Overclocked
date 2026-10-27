@@ -62,7 +62,7 @@ class PipelineConfig:
 
     # ── 1-Euro Filter ──
     landmark_min_cutoff: float = 0.8   # smoothing at rest
-    landmark_beta: float = 0.04       # speed coefficient
+    landmark_beta: float = 0.08        # responsive tracking during head turns
     landmark_d_cutoff: float = 2.0     # derivative cutoff
     eyelid_min_cutoff: float = 2.0     # smoothing for fast eyelid landmarks
     eyelid_beta: float = 0.50          # speed coefficient for eyelids
@@ -70,8 +70,8 @@ class PipelineConfig:
     iris_min_cutoff: float = 1.5       # smoothing for iris landmarks at rest
     iris_beta: float = 0.55            # fast response for relative iris saccades
     iris_d_cutoff: float = 8.0         # fast derivative cutoff for 1-2 frame saccades
-    corner_min_cutoff: float = 0.6     # low cutoff for stabilized eye corners
-    corner_beta: float = 0.01          # low speed coefficient to prevent eye-corner jitter injection
+    corner_min_cutoff: float = 1.5     # stabilized eye corners without head-turn lag
+    corner_beta: float = 0.35          # tracks head rotation in lockstep with skull_filter
     ear_min_cutoff: float = 1.5        # less smoothing for EAR signal
     ear_beta: float = 0.003
 

@@ -445,6 +445,7 @@ class FaceMeshDetector:
         self._landmarker_video = None
         self.face_landmarker = None
         self._landmarker = None
+        self._closed: bool = False
 
         # Check if legacy mp.solutions is present
         if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
@@ -744,7 +745,9 @@ class FaceMeshDetector:
         #    MediaPipe RunningMode.VIDEO caches normalized [0, 1] bounding-box priors in C++.
         #    Keeping VIDEO mode on the full frame prevents coordinate-system jumps while
         #    delivering <12ms C++ temporal tracking.
+        video_attempted_full_frame = False
         if not is_raw_mocked and getattr(self, "_landmarker_video", None) is not None and w <= 1280:
+            video_attempted_full_frame = True
             video_lms = self._detect_video_raw(frame, timestamp_s=timestamp_s, return_normalized=False)
             if video_lms is not None and self._validate_face_geometry(video_lms, w, h):
                 if self.enable_adaptive_roi:
@@ -769,6 +772,11 @@ class FaceMeshDetector:
                     return landmarks
             # Crop detection failed on this frame: immediately reset and fallback to full-frame
             self.roi_tracker.reset()
+
+        # If VIDEO mode already scanned the full frame and failed, only run heavy IMAGE-mode
+        # full-frame + quadrant fallbacks on initial acquisition or every 5th lost frame.
+        if video_attempted_full_frame and self._consecutive_losses > 1 and (self._consecutive_losses % 5 != 0):
+            return None
 
         # 2. Stateless IMAGE-mode Full-Frame detection
         full_box = (0, 0, w, h)
@@ -811,19 +819,29 @@ class FaceMeshDetector:
         return self._n_landmarks
 
     def close(self):
-        """Release MediaPipe resources."""
+        """Release MediaPipe resources idempotently."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         if self._mode == "legacy" and hasattr(self, "face_mesh") and self.face_mesh is not None:
-            self.face_mesh.close()
-        if hasattr(self, "face_landmarker") and self.face_landmarker is not None:
             try:
-                self.face_landmarker.close()
+                self.face_mesh.close()
             except Exception:
                 pass
+            self.face_mesh = None
         if hasattr(self, "_landmarker_video") and self._landmarker_video is not None:
             try:
                 self._landmarker_video.close()
             except Exception:
                 pass
+            self._landmarker_video = None
+        if hasattr(self, "face_landmarker") and self.face_landmarker is not None:
+            try:
+                self.face_landmarker.close()
+            except Exception:
+                pass
+            self.face_landmarker = None
+            self._landmarker = None
 
     def __enter__(self):
         return self

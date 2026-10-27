@@ -367,41 +367,56 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     last_shift_vector = None
     missing_face_frames = 0
 
+    def _poll_gui_events(wait_ms: int = 1) -> str:
+        """Pump OpenCV GUI message queue and return 'quit', 'pause_toggle', or 'continue'."""
+        if args.headless:
+            return "continue"
+        try:
+            key = cv2.waitKey(wait_ms) & 0xFF
+            if key in (ord('q'), ord('Q'), 27):  # 'q', 'Q', or ESC
+                return "quit"
+            elif key in (ord('p'), ord('P')):
+                return "pause_toggle"
+            elif key in (ord('u'), ord('U')):
+                bayesian_filter.unlatch(park_gear_confirmed=True)
+                classifier.reset()
+                print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
+            elif key != 255:
+                visualizer.handle_key(key)
+            # Also detect if user clicked the window title-bar [X] close button
+            if cv2.getWindowProperty("Driver Monitor", cv2.WND_PROP_VISIBLE) < 1:
+                return "quit"
+        except cv2.error as exc:
+            print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
+            args.headless = True
+        return "continue"
+
     try:
         while capture.is_open():
             if paused:
                 if not args.headless:
-                    try:
-                        key = cv2.waitKey(50) & 0xFF
-                        if key in (ord('p'), ord('P')):
-                            paused = False
-                        elif key in (ord('q'), ord('Q')):
-                            break
-                        elif key in (ord('u'), ord('U')):
-                            bayesian_filter.unlatch(park_gear_confirmed=True)
-                            classifier.reset()
-                            print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
-                        elif visualizer.handle_key(key) or getattr(visualizer, "_mouse_clicked", False):
-                            visualizer._mouse_clicked = False
-                            if last_raw_frame is not None:
-                                viz_frame = last_raw_frame.copy() if len(last_raw_frame.shape) == 3 else cv2.cvtColor(last_raw_frame, cv2.COLOR_GRAY2BGR)
-                                visualizer.draw(
-                                    viz_frame,
-                                    last_smooth_landmarks,
-                                    last_features,
-                                    last_normalizer,
-                                    pnp_success=last_pnp_success,
-                                    assessment=last_assessment,
-                                    bayesian_state=last_bayesian_state,
-                                    calibration_progress=calibrator.progress,
-                                    roi_bounds=last_roi_bounds,
-                                    shift_vector=last_shift_vector,
-                                )
-                                cv2.imshow("Driver Monitor", viz_frame)
-                    except cv2.error as exc:
-                        print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
-                        args.headless = True
+                    action = _poll_gui_events(wait_ms=50)
+                    if action == "quit":
+                        break
+                    elif action == "pause_toggle":
                         paused = False
+                    elif getattr(visualizer, "_mouse_clicked", False):
+                        visualizer._mouse_clicked = False
+                        if last_raw_frame is not None:
+                            viz_frame = last_raw_frame.copy() if len(last_raw_frame.shape) == 3 else cv2.cvtColor(last_raw_frame, cv2.COLOR_GRAY2BGR)
+                            visualizer.draw(
+                                viz_frame,
+                                last_smooth_landmarks,
+                                last_features,
+                                last_normalizer,
+                                pnp_success=last_pnp_success,
+                                assessment=last_assessment,
+                                bayesian_state=last_bayesian_state,
+                                calibration_progress=calibrator.progress,
+                                roi_bounds=last_roi_bounds,
+                                shift_vector=last_shift_vector,
+                            )
+                            cv2.imshow("Driver Monitor", viz_frame)
                 else:
                     time.sleep(0.05)
                 continue
@@ -411,7 +426,14 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 break
 
             if capture.is_camera and not getattr(capture, "last_frame_is_new", True):
-                time.sleep(0.001)
+                if not args.headless:
+                    action = _poll_gui_events(wait_ms=1)
+                    if action == "quit":
+                        break
+                    elif action == "pause_toggle":
+                        paused = True
+                else:
+                    time.sleep(0.001)
                 continue
 
             frame_id += 1
@@ -501,17 +523,11 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
                         if not args.headless:
                             cv2.imshow("Driver Monitor", viz_frame)
-                            key = cv2.waitKey(1) & 0xFF
-                            if key in (ord('q'), ord('Q')):
+                            action = _poll_gui_events(wait_ms=1)
+                            if action == "quit":
                                 break
-                            elif key in (ord('p'), ord('P')):
+                            elif action == "pause_toggle":
                                 paused = True
-                            elif key in (ord('u'), ord('U')):
-                                bayesian_filter.unlatch(park_gear_confirmed=True)
-                                classifier.reset()
-                                print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
-                            else:
-                                visualizer.handle_key(key)
                     except cv2.error as exc:
                         print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                         args.headless = True
@@ -648,17 +664,11 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
                     if not args.headless:
                         cv2.imshow("Driver Monitor", viz_frame)
-                        key = cv2.waitKey(1) & 0xFF
-                        if key in (ord('q'), ord('Q')):
+                        action = _poll_gui_events(wait_ms=1)
+                        if action == "quit":
                             break
-                        elif key in (ord('p'), ord('P')):
+                        elif action == "pause_toggle":
                             paused = True
-                        elif key in (ord('u'), ord('U')):
-                            bayesian_filter.unlatch(park_gear_confirmed=True)
-                            classifier.reset()
-                            print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
-                        else:
-                            visualizer.handle_key(key)
                 except cv2.error as exc:
                     print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                     args.headless = True
@@ -669,20 +679,31 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         logger.exception("[DMS] Unexpected error in pipeline loop: %s", exc)
         raise
     finally:
-        print(f"[DMS] Processed {frame_id} frames")
-        capture.release()
-        detector.close()
-        if video_writer is not None:
-            video_writer.release()
-            print(f"[DMS] Annotated video saved to: {args.output_video}")
-        if csv_logger is not None:
-            csv_logger.close()
-            print(f"[DMS] CSV saved to: {csv_logger.filepath}")
+        # 1. Close GUI window FIRST and pump waitKey(1) so OS window disappears immediately
         if not args.headless:
             try:
                 cv2.destroyAllWindows()
+                for _ in range(4):
+                    cv2.waitKey(1)
             except cv2.error:
                 pass
+        print(f"[DMS] Processed {frame_id} frames")
+        # 2. Flush & close output files before hardware/C++ teardown
+        if video_writer is not None:
+            try:
+                video_writer.release()
+                print(f"[DMS] Annotated video saved to: {args.output_video}")
+            except Exception:
+                pass
+        if csv_logger is not None:
+            try:
+                csv_logger.close()
+                print(f"[DMS] CSV saved to: {csv_logger.filepath}")
+            except Exception:
+                pass
+        # 3. Release camera & MediaPipe C++ graphs
+        capture.release()
+        detector.close()
 
 
 def main():

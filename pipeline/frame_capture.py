@@ -109,7 +109,9 @@ class FrameCapture:
 
         self._frame_count = 0
         self._lock = threading.Lock()
+        self._cap_lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
+        self._released: bool = False
         self._raw_frame_seq: int = 1
         self._consumed_frame_seq: int = 0
         self._latest_frame_timestamp: float = time.perf_counter()
@@ -135,30 +137,44 @@ class FrameCapture:
         """Asynchronous background worker continuously polling live camera frames."""
         t_prev = time.perf_counter()
         fps_ema = float(self.fps)
-        while self._running:
-            try:
-                if not hasattr(self, "cap") or not self.cap.isOpened():
+        try:
+            while self._running:
+                try:
+                    with self._cap_lock:
+                        if not self._running or not hasattr(self, "cap") or self.cap is None or not self.cap.isOpened():
+                            break
+                        ret, frame = self.cap.read()
+                except Exception as exc:
+                    logger.debug("Exception in FrameCapture._capture_worker: %s", exc, exc_info=True)
                     break
-                ret, frame = self.cap.read()
-            except Exception as exc:
-                logger.debug("Exception in FrameCapture._capture_worker: %s", exc, exc_info=True)
-                break
 
-            if not ret or frame is None:
-                time.sleep(0.005)
-                continue
-            t_now = time.perf_counter()
-            dt = t_now - t_prev
-            if dt > 1e-4:
-                fps_ema = 0.92 * fps_ema + 0.08 * (1.0 / dt)
-            t_prev = t_now
-            self.actual_capture_fps = fps_ema
-            with self._condition:
-                self._latest_frame = frame
-                self._latest_frame_timestamp = t_now
-                self._raw_frame_seq += 1
-                self._condition.notify_all()
-            time.sleep(0.001)
+                if not self._running:
+                    break
+                if not ret or frame is None:
+                    time.sleep(0.005)
+                    continue
+                t_now = time.perf_counter()
+                dt = t_now - t_prev
+                if dt > 1e-4:
+                    fps_ema = 0.92 * fps_ema + 0.08 * (1.0 / dt)
+                t_prev = t_now
+                self.actual_capture_fps = fps_ema
+                with self._condition:
+                    self._latest_frame = frame
+                    self._latest_frame_timestamp = t_now
+                    self._raw_frame_seq += 1
+                    self._condition.notify_all()
+                time.sleep(0.001)
+        finally:
+            # If release() was already called by the main thread while we were inside cap.read(),
+            # safely release the C++ VideoCapture handle here on the worker thread.
+            if getattr(self, "_released", False):
+                with self._cap_lock:
+                    if hasattr(self, "cap") and self.cap is not None and self.cap.isOpened():
+                        try:
+                            self.cap.release()
+                        except Exception:
+                            pass
 
     def read(self) -> Optional[np.ndarray]:
         """Read the next frame.
@@ -218,19 +234,29 @@ class FrameCapture:
         return self.cap.isOpened()
 
     def release(self):
-        """Release the video capture resource and background thread."""
+        """Release the video capture resource and background thread without C++ race conditions."""
+        if getattr(self, "_released", False):
+            return
+        self._released = True
         with self._condition:
             self._running = False
             self._condition.notify_all()
+
         if hasattr(self, "_thread") and self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=0.5)
-        if hasattr(self, "cap") and self.cap.isOpened():
+            self._thread.join(timeout=1.5)
+
+        # Only call self.cap.release() from the main thread if the worker thread has exited
+        # or if we can acquire _cap_lock without blocking on a hung C++ driver call.
+        acquired = self._cap_lock.acquire(timeout=0.2)
+        if acquired:
             try:
-                self.cap.release()
-            except Exception as exc:
-                logger.debug("Exception while releasing capture: %s", exc, exc_info=True)
-        if hasattr(self, "_thread") and self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=0.2)
+                if hasattr(self, "cap") and self.cap is not None and self.cap.isOpened():
+                    try:
+                        self.cap.release()
+                    except Exception as exc:
+                        logger.debug("Exception while releasing capture: %s", exc, exc_info=True)
+            finally:
+                self._cap_lock.release()
 
     def __enter__(self):
         return self

@@ -1,0 +1,67 @@
+pipeline:
+  id: pipeline_Thanos3541R_The_Overclocked_build_2791
+  name: pipeline_Thanos3541R_The_Overclocked_build_2791
+  stages:
+    - name: Build and Test
+      id: build_and_test
+      runtime: cloud
+      clone:
+        enabled: true
+      cache:
+        enabled: true
+      steps:
+        - name: Setup Python
+          id: setup_python
+          run:
+            shell: bash
+            script: |-
+              # Install Python 3.11 using pyenv
+              export PYENV_ROOT="$HOME/.pyenv"
+              export PATH="$PYENV_ROOT/bin:$PATH"
+
+              # Install Python 3.11
+              pyenv install -s 3.11
+              pyenv global 3.11
+
+              # Verify installation
+              eval "$(pyenv init -)"
+              python --version
+              pip --version
+        - name: Install System Dependencies
+          id: install_system_deps
+          run:
+            shell: bash
+            script: |-
+              sudo apt-get update
+              sudo apt-get install -y libgl1 libegl1 libgles2 libgl1-mesa-dri libglib2.0-0 libsm6 libxext6 libxrender-dev ffmpeg
+        - name: Install Dependencies
+          id: install_deps
+          run:
+            shell: bash
+            script: |-
+              export PYENV_ROOT="$HOME/.pyenv"
+              export PATH="$PYENV_ROOT/bin:$PATH"
+              eval "$(pyenv init -)"
+
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+        - name: Run Tests
+          id: run_tests
+          run:
+            shell: bash
+            env:
+              PYTHONPATH: .
+              QT_QPA_PLATFORM: offscreen
+            script: |-
+              export PYENV_ROOT="$HOME/.pyenv"
+              export PATH="$PYENV_ROOT/bin:$PATH"
+              eval "$(pyenv init -)"
+
+              mkdir -p .harness/reports
+              python -m pytest tests/ -v --tb=short --junitxml=.harness/reports/junit.xml
+            report:
+              type: junit
+              paths:
+                - .harness/reports/junit.xml
+  tags:
+    onboarding: "true"

@@ -1691,14 +1691,17 @@ class FeatureExtractor:
             invol_count += 1
         if features.pursuit_fragmentation_ratio > 0.20:
             invol_count += 1
-        if r_sluggish > 1.30:
+        if r_sluggish > 1.30 or (0.0 < features.blink_opening_velocity < 1.35):
+            invol_count += 1
+        if features.perclos > 0.15:
             invol_count += 1
 
         any_voluntary_flag = bool(
             features.voluntary_eye_widening or
             features.deliberate_blink_suppression or
             features.compensatory_stare_active or
-            features.rigid_head_stabilization
+            features.rigid_head_stabilization or
+            features.frontalis_compensation_active
         )
 
         bonus = 0.0
@@ -1711,8 +1714,10 @@ class FeatureExtractor:
                 bonus += 20.0
             if features.rigid_head_stabilization:
                 bonus += 15.0
+            if features.frontalis_compensation_active:
+                bonus += 20.0
 
-        if not any_voluntary_flag:
+        if not any_voluntary_flag or invol_count == 0:
             total_m_mask = 0.0
             detected = False
         else:
@@ -2169,8 +2174,14 @@ class FeatureExtractor:
             # 1. Binocular vergence & Lack of Convergence (LOC - DRE sign)
             # Gate on blink, extreme yaw (>20°), steep pitch (>15°), and eccentric gaze (>0.30)
             # where eyeball geometry naturally foreshortens the abducting eye
-            if self._blink_phase != "open" or abs(head_yaw) > 20.0 or abs(head_pitch) > 15.0 or abs(avg_iris_x) > 0.30:
-                features.vergence_angle_deg = self._last_features.vergence_angle_deg
+            if (
+                self._blink_phase != "open"
+                or (0.0 < features.ear_avg < self.blink_threshold)
+                or abs(head_yaw) > 20.0
+                or abs(head_pitch) > 15.0
+                or abs(avg_iris_x) > 0.30
+            ):
+                features.vergence_angle_deg = float(self._last_features.vergence_angle_deg)
                 features.lack_of_convergence = False
             else:
                 features.vergence_angle_deg, features.lack_of_convergence = \
@@ -2184,8 +2195,8 @@ class FeatureExtractor:
                             if len(self._vergence_cal_samples) >= 10:
                                 self._baseline_vergence_deg = float(np.median(self._vergence_cal_samples))
 
-                    features.vergence_angle_deg -= self._baseline_vergence_deg
-                    features.lack_of_convergence = bool(features.vergence_angle_deg < self.loc_vergence_threshold_deg)
+                features.vergence_angle_deg -= self._baseline_vergence_deg
+                features.lack_of_convergence = bool(features.vergence_angle_deg < self.loc_vergence_threshold_deg)
 
             # 2. Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842)
             features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase)

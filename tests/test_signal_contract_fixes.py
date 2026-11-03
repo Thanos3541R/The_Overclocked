@@ -532,3 +532,90 @@ def test_window_summary_includes_eyeball_tremor_hz_window():
     assert "eyeball_tremor_hz_window" in summary_names
     idx = summary_names.index("eyeball_tremor_hz_window")
     assert feat_2d[0, idx] > 4.0
+
+
+def test_vergence_does_not_accumulate_baseline_during_blinks():
+    """Verify vergence baseline is not subtracted repeatedly during blinks."""
+    from tests.test_alcohol_signals import make_full_landmarks
+    from pipeline.feature_extractor import FeatureExtractor
+
+    ext = FeatureExtractor(fps=30.0)
+
+    # 1. Feed 15 open-eye frames with slight constant baseline vergence offset
+    # (left_iris_x=0.10, right_iris_x=-0.02)
+    lm_open = make_full_landmarks(ear_val=0.30)
+    lm_open[468, 0] = 200.0 - 0.4
+    lm_open[473, 0] = 400.0 + 2.0
+
+    for i in range(15):
+        t = i * (1.0 / 30.0)
+        ext.compute(lm_open, timestamp=t, frame_id=i, face_valid=True, image_landmarks=lm_open)
+
+    # 2. Feed 30 closed-eye frames (ear_val=0.08)
+    lm_closed = make_full_landmarks(ear_val=0.08)
+    lm_closed[468, 0] = 200.0 - 0.4
+    lm_closed[473, 0] = 400.0 + 2.0
+
+    vergence_angles = []
+    for i in range(15, 45):
+        t = i * (1.0 / 30.0)
+        feat = ext.compute(lm_closed, timestamp=t, frame_id=i, face_valid=True, image_landmarks=lm_closed)
+        vergence_angles.append(feat.vergence_angle_deg)
+        assert abs(feat.vergence_angle_deg) < 5.0, (
+            f"Frame {i}: vergence ramped to {feat.vergence_angle_deg:.2f}° (expected abs < 5.0°)"
+        )
+
+    # Assert vergence remained constant across all 30 closed-eye frames
+    assert np.allclose(vergence_angles, vergence_angles[0], atol=1e-5), (
+        f"Vergence drifted during blink: min={min(vergence_angles):.2f}, max={max(vergence_angles):.2f}"
+    )
+
+
+def test_catatonic_stupor_and_confirmed_masking_unlock_open_eye_cap():
+    """Wide-eyed catatonic stupor with confirmed masking unlocks the 22% open-eye cap."""
+    from pipeline.classifier import ImpairmentClassifier
+    from pipeline.feature_extractor import FrameFeatures
+
+    classifier = ImpairmentClassifier()
+    feat = FrameFeatures(
+        face_valid=True,
+        ear_avg=0.35,
+        perclos=0.03,
+        blink_opening_velocity=1.06,
+        deliberate_blink_suppression=True,
+        stare_fixation_duration_s=6.5,
+        mar=0.35,
+        speech_active=False,
+        eyeball_tremor_hz=4.8,
+        eyelid_tremor_hz=3.8,
+        head_postural_sway=1.1,
+        masking_divergence_score=67.4,
+        masking_detected=True,
+    )
+    assessment = classifier.evaluate_temporal_stream(feat)
+    assert assessment.risk_score >= 50.0, f"Expected risk_score >= 50.0, got {assessment.risk_score}"
+    assert assessment.classification == "HIGH_RISK_INTOXICATED", f"Expected HIGH_RISK_INTOXICATED, got {assessment.classification}"
+
+
+def test_normal_sober_open_eye_webcam_stays_capped_below_mild_impairment():
+    """Normal awake webcam driver stays capped below 22% (SOBER) even with a single noisy low-FPS blink."""
+    from pipeline.classifier import ImpairmentClassifier
+    from pipeline.feature_extractor import FrameFeatures
+
+    classifier = ImpairmentClassifier()
+    feat = FrameFeatures(
+        face_valid=True,
+        ear_avg=0.31,
+        perclos=0.03,
+        blink_opening_velocity=1.15,
+        deliberate_blink_suppression=False,
+        mar=0.04,
+        eyeball_tremor_hz=0.5,
+        head_postural_sway=0.15,
+        masking_divergence_score=0.0,
+        masking_detected=False,
+    )
+    assessment = classifier.evaluate_temporal_stream(feat)
+    assert assessment.risk_score <= 22.0, f"Expected risk_score <= 22.0, got {assessment.risk_score}"
+    assert assessment.classification == "SOBER", f"Expected SOBER, got {assessment.classification}"
+

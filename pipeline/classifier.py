@@ -610,6 +610,34 @@ class ImpairmentClassifier:
                 f"Anti-Masking Alert: High discordance between conscious effort and involuntary decay ({masking_divergence:.1f}% M_mask)"
             )
 
+        # ── Catatonic / Narcotic Stupor Detection (Unblinking Wide-Eyed Intoxication) ──
+        # Catches severe intoxication where the subject stares without blinking for >6s
+        # (so blink_opening_velocity may still be 0.0 / uninitialized and PERCLOS is near 0),
+        # corroborated by involuntary ocular/eyelid micro-tremor, postural sway, and slack jaw.
+        slack_jaw_stupor = bool(features.mar >= 0.22 and not getattr(features, "speech_active", False) and not features.yawn_detected)
+        eye_trem_hz = float(getattr(features, "eyeball_tremor_hz", 0.0))
+        lid_trem_hz = float(getattr(features, "eyelid_tremor_hz", 0.0))
+        neuro_flutter = bool(
+            (eye_trem_hz >= 3.5 and lid_trem_hz >= 2.5)
+            or (eye_trem_hz >= 4.0 and features.head_postural_sway >= 0.55)
+        )
+        catatonic_stupor_score = 0.0
+        if (
+            features.deliberate_blink_suppression
+            and neuro_flutter
+            and not getattr(features, "highway_fixation_exempt", False)
+            and (slack_jaw_stupor or features.stare_fixation_duration_s >= 4.5 or features.compensatory_stare_active)
+        ):
+            catatonic_stupor_score = 42.0
+            if slack_jaw_stupor and features.head_postural_sway >= 0.60:
+                catatonic_stupor_score += 12.0  # 54.0% (High Risk when slack-jawed + swaying + fluttering)
+            if 0.0 < features.blink_opening_velocity < 1.35:
+                catatonic_stupor_score += 14.0  # 68.0% (Confirmed sluggish levator reopening)
+            marker_scores["catatonic_stupor"] = catatonic_stupor_score
+            indicators.append(
+                f"Catatonic Stupor / Unblinking Ocular Flutter ({eye_trem_hz:.1f}Hz iris, {features.head_postural_sway:.2f}° sway)"
+            )
+
         # ── Lockout & Risk Weighting (Section A Anchored) ──
         # Primary involuntary weights (unfakeable physiological signals)
         # Note: Single-camera VOR is demoted to 0.0 weight for lockout decisions (Tier 3 experimental proxy)
@@ -662,15 +690,34 @@ class ImpairmentClassifier:
 
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
-        # Real-time ML model fusion (rolling physical window)
+        # ── Confirmed Anti-Masking & Catatonic Stupor Evaluation ──
+        has_sluggish_blink = bool(0.0 < features.blink_opening_velocity < 1.35)
+        confirmed_anti_masking = bool(
+            (features.masking_detected or features.masking_divergence_score >= 40.0)
+            and (has_sluggish_blink or features.perclos >= 0.25)
+        )
         ml_prob = self._predict_ml_probability(features)
+        high_ml_with_masking = bool(
+            features.deliberate_blink_suppression
+            and has_sluggish_blink
+            and (ml_prob is not None and (ml_prob * 100.0) >= 45.0)
+        )
+        bypass_open_eye_cap = bool(
+            catatonic_stupor_score >= 35.0
+            or confirmed_anti_masking
+            or high_ml_with_masking
+            or features.gen_detected
+            or features.lack_of_convergence
+        )
+
+        # Real-time ML model fusion (rolling physical window)
         ml_prob_pct = None
         ml_active = False
         if ml_prob is not None:
             ml_prob_pct = round(ml_prob * 100.0, 1)
             ml_active = True
             marker_scores["ml_probability"] = ml_prob_pct
-            if live_alert_open_eyes and inv_risk < 20.0:
+            if live_alert_open_eyes and inv_risk < 20.0 and not bypass_open_eye_cap:
                 # Prevent YouTube domain shift from pushing an alert, wide-eyed sober webcam user into MILD/HIGH_RISK
                 inv_risk = float(min(22.0, 0.85 * inv_risk + 0.15 * (ml_prob * 100.0)))
             else:
@@ -679,9 +726,28 @@ class ImpairmentClassifier:
                 if ml_prob >= 0.50:
                     indicators.append(f"Trained ML Classifier Probability: {ml_prob * 100:.1f}%")
 
+        if confirmed_anti_masking:
+            ml_component = (ml_prob * 100.0) if ml_prob is not None else features.masking_divergence_score
+            mask_fused_risk = 0.65 * features.masking_divergence_score + 0.35 * max(ml_component, features.masking_divergence_score)
+            inv_risk = float(np.clip(max(inv_risk, mask_fused_risk), 0.0, 100.0))
+
+        if catatonic_stupor_score > 0.0:
+            ml_component = (ml_prob * 100.0) if ml_prob is not None else catatonic_stupor_score
+            stupor_fused = 0.65 * catatonic_stupor_score + 0.35 * max(ml_component, catatonic_stupor_score)
+            inv_risk = float(np.clip(max(inv_risk, stupor_fused), 0.0, 100.0))
+
+        if not bypass_open_eye_cap:
+            open_eye_desktop_guard = (
+                features.ear_avg >= self.sober_ear * 0.84
+                and features.perclos < 0.15
+                and features.mar < 0.22
+            )
+            if open_eye_desktop_guard:
+                inv_risk = min(inv_risk, 22.0)
+
         # Voluntary masking magnitude
         vol_keys = ["voluntary_eye_widening", "deliberate_blink_suppression", "compensatory_stare", "rigid_head_stabilization", "frontalis_compensation"]
-        vol_scores = [marker_scores[k] for k in vol_keys if marker_scores[k] > 0]
+        vol_scores = [marker_scores[k] for k in vol_keys if marker_scores.get(k, 0.0) > 0]
         vol_masking = float(np.mean(vol_scores)) if vol_scores else 0.0
 
         # Lockout Decision: Anchored on Section A Involuntary evidence + Anti-masking divergence
@@ -702,6 +768,7 @@ class ImpairmentClassifier:
             total_risk = inv_risk
 
         total_risk = float(np.clip(total_risk, 0.0, 100.0))
+        lockout_recommended = bool(classification == "HIGH_RISK_INTOXICATED")
 
         reason_str = "; ".join(indicators) if indicators else "No impairment indicators"
         return ImpairmentAssessment(

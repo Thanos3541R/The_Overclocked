@@ -59,8 +59,15 @@ pip install -r requirements.txt
 Connect any standard USB webcam or NIR camera and launch the live HUD:
 
 ```bash
-# Launch live camera feed with real-time HUD & telemetry
+# Launch live camera feed with real-time HUD & telemetry (default index 0)
 python main.py
+
+# Or select a specific camera index (0 = laptop webcam, 1 or 2 = external USB / virtual camera like Camo or DroidCam):
+python main.py --source 0
+python main.py --source 1
+
+# Or connect directly to an IP / network stream (e.g. DroidCam Wi-Fi video stream):
+python main.py --source "http://<PHONE_IP>:4747/video"
 
 # Or run on a pre-recorded video clip and save both CSV telemetry & annotated video:
 python main.py --source "path/to/clip.mp4" --output-csv "features.csv" --output "annotated_clip.mp4"
@@ -158,8 +165,8 @@ The pipeline processes raw camera frames through 10 strictly decoupled, zero-cop
 flowchart TD
     A["1. Capture & Sensor Ingestion\nDirectShow / MJPG / 940nm NIR / Auto-Exposure 0.75"] --> B["2. Lighting Preprocessing\nCLAHE (8x8) + Adaptive Gamma LUT"]
     B --> C["3. Kinematic Video Stabilizer\nSub-0.5ms Phase Correlation & Vibration Scorer"]
-    C --> D["4. Face Mesh & Adaptive ROI\nMediaPipe 478-pt Mesh + EMA Crop Zoom + 480px Inference Cap"]
-    D --> E["5. Split-Bandwidth 1-Euro Smoothing\n3 Decoupled Cutoff Profiles (<0.4ms vectorized)"]
+    C --> D["4. Face Mesh & Adaptive ROI\nMediaPipe 478-pt Mesh + EMA Crop Zoom + 640px Inference Cap"]
+    D --> E["5. Split-Bandwidth 1-Euro Smoothing\n4 Decoupled Cutoff Profiles (<0.4ms vectorized)"]
     E --> F["6. PnP 3D Head Pose Normalizer\n8-Point Skull Model + View-Ray Angle Compensation"]
     F --> G["7. Multi-Modal Gating\nHead Pose Limits + 5-pt Savitzky-Golay IMU + Voluntary Nod Gate"]
     G --> H["8. Feature Extraction Engine\n29 Core / 48 Extended Channels + Gated Vergence & Saccade VOR Guard"]
@@ -171,31 +178,38 @@ flowchart TD
 
 ## 🌟 Key Engineering Innovations
 
-### 1. High-Throughput Camera Engine & DirectShow Optimization (`pipeline/frame_capture.py`)
+### 1. High-Throughput Camera Engine & Thread-Safe Teardown (`pipeline/frame_capture.py`)
 - **DirectShow MJPG Stream Negotiation:** Negotiates `MJPG` fourcc and sets `CAP_PROP_BUFFERSIZE = 1` to eliminate buffer latency.
 - **Auto-Exposure Persistence Prevention:** Explicitly sets `CAP_PROP_AUTO_EXPOSURE = 0.75` on live cameras so webcams never remain stuck in dark manual exposure settings from previous sessions.
 - **Anti-Motion Blur Mode:** Optional `--anti-motion-blur` flag locks exposure to $-6$ ($1/64\text{ s}$) with fixed gain for high-speed night-driving scenarios.
-- **Asynchronous Worker Thread:** Uses condition variable notifications and yields the GIL cleanly with micro-sleeps to deliver steady 30–60 FPS capture.
+- **Thread-Safe Capture & Anti-Deadlock Teardown:** Uses a dedicated hardware mutex (`_cap_lock`) and `_released` flag to prevent concurrent C++ `cv2.VideoCapture` `.read()` and `.release()` race conditions, eliminating DirectShow driver deadlocks and "Not Responding" hangs on exit.
+- **Continuous GUI Event Pump:** Dedicated non-blocking message pump keeps Windows event queues active even when the camera drops frames, preventing window freezing.
 
-### 2. High-FPS MediaPipe Inference Scaling (`pipeline/face_mesh_detector.py`)
-- **Proportional 480px Inference Cap:** If frame width $w > 480$, frames are smoothly resized to $480 \times \text{round}(h \times \frac{480}{w})$ via `cv2.INTER_AREA` for MediaPipe detection, achieving $> 60\text{ FPS}$ pipeline throughput while remapping 3D landmarks back to native image coordinates with subpixel precision.
-- **Adaptive ROI Zoom Tracker:** Tracks the face bounding box using Exponential Moving Average (EMA, $\alpha=0.15$) and feeds a focused $2.0\times$ face crop directly into the detector, granting distant drivers an effective $\approx 8\times$ resolution boost.
-- **Quadrant Recovery Fallback:** Searches the driver's central quadrant ($[0.2W, 0.1H]$ to $[0.8W, 0.85H]$) if tracking is temporarily lost.
+### 2. High-FPS MediaPipe Tracking & Anatomical Mesh Validation (`pipeline/face_mesh_detector.py`)
+- **Proportional 640px Inference Cap:** If frame width $w > 640$, frames are smoothly resized to $640 \times \text{round}(h \times \frac{640}{w})$ via `cv2.INTER_AREA` for MediaPipe detection, preserving 78% more facial resolution than 480px for peripheral edge detection while sustaining $< 12\text{ ms}$ inference in C++ `RunningMode.VIDEO`.
+- **Stationary Full-Frame VIDEO Tracking Hierarchy:** `RunningMode.VIDEO` runs strictly on consistent full-frame coordinates, preventing MediaPipe C++ internal $[0, 1]$ bounding-box tracking jumps between crops and global space. On tracking loss, detection cascades to high-resolution `AdaptiveROITracker` crop, full-frame `RunningMode.IMAGE`, and driver quadrant recovery.
+- **Anatomical Topology & Scale-Collapse Validation:** Rejects distorted or folded meshes via bounding-box aspect ratio bounds ($0.38 \le \text{aspect} \le 2.50$), inter-ocular width ($dx > 5.0\text{ px}$, $\text{iod} \ge 0.18 \cdot bw$), vertical anatomical ordering (nose tip strictly between eye line and mouth line along face tilt), and single-frame scale bounds ($0.55 \le \text{scale} / \text{prev\_scale} \le 1.80$).
+- **Throttled No-Face Recovery:** When full-frame VIDEO mode detects no face, heavy image-mode fallbacks are throttled to initial acquisition and every 5th lost frame, slashing no-face latency from $\approx 100\text{ ms}$ down to $\approx 12\text{ ms}$.
+- **Idempotent Graph Teardown:** Ensures `close()` is idempotent and nulls out C++ handles to prevent double-destruction crashes during garbage collection and interpreter exit.
 
-### 3. Saccade Dynamics, Occlusion Guard & VOR Suppression (`pipeline/feature_extractor.py`)
+### 3. Split-Bandwidth 1-Euro Smoothing with Synchronized Eye Corners (`pipeline/one_euro_filter.py`)
+- **4-Bandwidth Vectorized Profiles:** Separates smoothing profiles for rigid structural/skull landmarks ($0.7\text{ Hz}$), eyelid margins ($2.0\text{ Hz}$ min cutoff, $\beta = 0.50$), irises ($1.5\text{ Hz}$, $\beta = 0.55$), and eye canthi corners ($1.5\text{ Hz}$, $\beta = 0.35$).
+- **Eye Corner Lag Elimination:** Decouples the 4 eye canthi anchors (`[33, 133, 263, 362]`) with responsive tracking parameters matching `skull_filter` and `eyelid_filter`. This guarantees horizontal eye corners move in lockstep with vertical eyelids during rapid head turns and scale adjustments, preventing horizontal corner lag from artificially inflating EAR ($> 0.45$).
+
+### 4. Saccade Dynamics, Occlusion Guard & VOR Suppression (`pipeline/feature_extractor.py`)
 - **Blink & Eyelid-Motion Occlusion Guard:** When eyelids are in closing, closed, or opening phases, iris tracking holds over without latching false saccades.
 - **Physical 2D Socket Translation Guard:** Distinguishes genuine head motion from stationary PnP Euler jitter. Vestibulo-Ocular Reflex (VOR) counter-rotation compensation requires physical 2D eye-socket translation ($\text{eye\_socket\_vel} > 0.30$) or high angular velocity ($\text{head\_vel} > 15.0^\circ/\text{s}$), preventing stationary gaze saccades from being suppressed.
 - **Conjugate Binocular Validation:** Uses `min(|dx_l|, |dx_r|)` during head rotations to eliminate false saccades caused by far-eye perspective corner compression.
 
-### 4. Pose-Compensated EAR & Bilateral Blink Verification (`pipeline/feature_extractor.py`)
+### 5. Pose-Compensated EAR & Bilateral Blink Verification (`pipeline/feature_extractor.py`)
 - **Unilateral Foreshortening Guard:** When $| \text{head\_yaw} | > 10^\circ$, one eye is wide open ($\ge \max(0.26, \text{eff\_blink\_threshold} \times 1.30)$), and there is severe inter-ocular asymmetry ($|\text{ear\_left} - \text{ear\_right}| > 0.09$), perspective compression on the far eye is guarded against triggering false blinks. Genuine bilateral blinks are 100% preserved.
 - **Blink FSM Un-foreshortened Ear Injection:** During head turns, un-foreshortened dominant eye EAR is fed into `_compute_blink_velocity` to prevent the state machine from entering false `"closing"` or `"closed"` phases.
 
-### 5. Resting Vergence Auto-Zeroing (`pipeline/feature_extractor.py`)
+### 6. Resting Vergence Auto-Zeroing (`pipeline/feature_extractor.py`)
 - **Individual Vergence Offset Calibration:** Measures resting vergence angle during forward gaze and auto-subtracts the learned baseline $\theta_{\text{base}}$.
 - **Blink Phase Guard:** Baseline subtraction is applied strictly within the `blink_phase == 'open'` execution branch. When eyelids are closed, held vergence does not accumulate repeated baseline subtractions.
 
-### 6. Zero-Blur Kinematic Video Stabilizer (`pipeline/stabilizer.py`)
+### 7. Zero-Blur Kinematic Video Stabilizer (`pipeline/stabilizer.py`)
 - **Landmark-Space Stabilization:** Operates exclusively in coordinate space without warping pixel arrays, preventing blur on eyelid margins and iris boundaries.
 - **Phase Correlation Engine:** Computes inter-frame cabin translation $(dx, dy)$ in $< 0.3\text{ ms}$.
 - **Chassis Vibration Extraction:** Isolates vehicle vibration ($3\text{--}15\text{ Hz}$) and road shocks ($> 12\text{ px}$), dynamically widening saccade deadzones under harsh road vibrations.
@@ -297,6 +311,7 @@ The_Overclocked/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml            # Automated GitHub Actions CI workflow (Python 3.10 & 3.11 with OpenGL support)
+├── .harness/                 # Harness CI/CD automated pipeline definition
 ├── models/
 │   ├── face_landmarker.task  # MediaPipe 478-point landmark bundle (auto-downloaded if missing)
 │   ├── involuntary_model.joblib       # Pre-trained ML model trained exclusively on involuntary markers
@@ -305,8 +320,8 @@ The_Overclocked/
 │   ├── frame_capture.py       # Polymorphic camera/video capture (DirectShow, MJPG, RGB & NIR, auto-exposure)
 │   ├── preprocessing.py       # CLAHE & adaptive Gamma LUT low-light enhancer
 │   ├── stabilizer.py          # Zero-blur kinematic video & chassis vibration stabilizer (<0.5ms)
-│   ├── face_mesh_detector.py  # MediaPipe Face Mesh with AdaptiveROITracker & 480px inference cap
-│   ├── one_euro_filter.py     # Vectorized 3-bandwidth temporal low-pass filter (<0.4ms)
+│   ├── face_mesh_detector.py  # MediaPipe Face Mesh with AdaptiveROITracker & 640px inference cap
+│   ├── one_euro_filter.py     # Vectorized 4-bandwidth temporal low-pass filter (<0.4ms)
 │   ├── pnp_normalizer.py      # Robust 8-point solvePnP pose estimation & camera calibration loader
 │   ├── head_pose_estimator.py # Head pose gating & tracking
 │   ├── imu_gate.py            # 5-point Savitzky-Golay quadratic IMU shock gate

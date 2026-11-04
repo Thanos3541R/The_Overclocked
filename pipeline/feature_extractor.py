@@ -159,6 +159,9 @@ class FrameFeatures:
     formant_f2_slope_hz_ms: float = 25.0
     voice_impairment_score: float = 0.0
     voice_slurred_detected: bool = False
+    voice_vad_active: bool = False
+    mic_active: bool = False
+    audio_rms: float = 0.0
 
 
 def _dist(p1: np.ndarray, p2: np.ndarray) -> float:
@@ -1967,6 +1970,9 @@ class FeatureExtractor:
                 features.formant_f2_slope_hz_ms = self._last_features.formant_f2_slope_hz_ms
                 features.voice_impairment_score = self._last_features.voice_impairment_score
                 features.voice_slurred_detected = self._last_features.voice_slurred_detected
+                features.voice_vad_active = self._last_features.voice_vad_active
+                features.mic_active = self._last_features.mic_active
+                features.audio_rms = self._last_features.audio_rms
                 return features
 
             if getattr(self, "_just_resumed_from_gate", False):
@@ -2327,7 +2333,12 @@ class FeatureExtractor:
             # ── Audio-Visual Voice Intoxication Extraction ──
             active_audio_ext = audio_extractor if audio_extractor is not None else self.audio_extractor
             if active_audio_ext is not None:
-                audio_feats = active_audio_ext.update(timestamp, visual_speech_active=features.speech_active)
+                lip_moving_for_audio = (
+                    features.speech_active
+                    or features.mar > 0.045
+                    or (len(self._mar_history) >= 5 and float(np.std(list(self._mar_history)[-15:])) > 0.005)
+                )
+                audio_feats = active_audio_ext.update(timestamp, visual_speech_active=lip_moving_for_audio)
                 features.audio_valid = audio_feats.audio_valid
                 features.vocal_jitter_pct = audio_feats.vocal_jitter_pct
                 features.vocal_shimmer_pct = audio_feats.vocal_shimmer_pct
@@ -2335,6 +2346,9 @@ class FeatureExtractor:
                 features.formant_f2_slope_hz_ms = audio_feats.formant_f2_slope_hz_ms
                 features.voice_impairment_score = audio_feats.voice_impairment_score
                 features.voice_slurred_detected = audio_feats.voice_slurred_detected
+                features.voice_vad_active = audio_feats.voice_vad_active
+                features.mic_active = audio_feats.mic_active
+                features.audio_rms = audio_feats.audio_rms
 
             self._last_features = features
             return features

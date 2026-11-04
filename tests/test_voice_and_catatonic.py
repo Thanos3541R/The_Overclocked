@@ -215,3 +215,28 @@ def test_bayesian_secondary_voice_assist_accelerates_convergence():
 
     assert not state_sv.lockout_confirmed, "Voice alone on a sober visual stream must never trigger lockout"
     assert state_sv.posterior_probability < 0.05, "Sober visual stream must maintain low posterior probability"
+
+
+def test_quiet_short_phrase_detection():
+    """Verify 0.5s spoken vowel burst (amp = 0.015, followed by 1.5s of silence in a 2.0s window).
+
+    With visual_speech_active=True, it must be properly detected (voice_vad_active is True,
+    audio_valid is True) and not drowned out by surrounding silence in the 2.0s buffer.
+    """
+    extractor = AudioIntoxicationExtractor(sample_rate=16000, window_sec=2.0)
+    sr = 16000
+    duration = 2.0
+    pcm = np.zeros(int(sr * duration), dtype=np.float32)
+
+    # 0.5s quiet voiced vowel burst (amplitude 0.015, F0 = 130 Hz)
+    burst_len = int(0.50 * sr)
+    t_burst = np.arange(burst_len) / sr
+    vowel_burst = 0.015 * np.sin(2 * np.pi * 130.0 * t_burst) + 0.007 * np.sin(2 * np.pi * 260.0 * t_burst)
+    st = int(0.50 * sr)
+    pcm[st : st + burst_len] = vowel_burst
+
+    feat = extractor.analyze_pcm_window(pcm, visual_speech_active=True)
+    assert feat.voice_vad_active is True, "0.5s quiet phrase must trigger voice_vad_active"
+    assert feat.audio_valid is True, "0.5s phrase with visual speech must be audio_valid"
+    assert feat.av_speech_gated is True, "av_speech_gated must be True when visual speech is active"
+

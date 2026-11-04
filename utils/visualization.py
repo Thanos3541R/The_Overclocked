@@ -787,12 +787,18 @@ class Visualizer:
             ])
 
             if getattr(features, "audio_valid", False):
-                status_v = "SLURRED" if getattr(features, "voice_slurred_detected", False) else "OK"
-                lines.append(
-                    f"Voice: {status_v} (Jit: {getattr(features, 'vocal_jitter_pct', 0.0):.1f}% | Shm: {getattr(features, 'vocal_shimmer_pct', 0.0):.1f}% | HNR: {getattr(features, 'vocal_hnr_db', 0.0):.1f}dB | F2: {getattr(features, 'formant_f2_slope_hz_ms', 0.0):.0f} Hz/ms)"
-                )
+                v_status = "SLURRED" if getattr(features, "voice_slurred_detected", False) else "OK"
+                v_color = (0, 0, 255) if getattr(features, "voice_slurred_detected", False) else (0, 255, 128)
+                lines.append((
+                    f"Voice: {v_status} ({features.voice_impairment_score:.0f}% | Jit:{features.vocal_jitter_pct:.1f}% F2:{features.formant_f2_slope_hz_ms:.0f})",
+                    v_color
+                ))
+            elif getattr(features, "voice_vad_active", False):
+                lines.append(("Voice: DETECTED (LIP GATE)", (0, 210, 255)))
+            elif getattr(features, "mic_active", False):
+                lines.append(("Voice: LISTENING (SILENT)", (180, 180, 180)))
             else:
-                lines.append("Voice: SILENT")
+                lines.append(("Voice: NO MIC (pip install sounddevice)", (0, 140, 255)))
 
             if getattr(features, "voice_slurred_detected", False):
                 lines.append("[SLURRED SPEECH]")
@@ -817,13 +823,18 @@ class Visualizer:
 
         if lines:
             line_height = 22
-            max_tw = max(cv2.getTextSize(text, font, scale, thickness)[0][0] for text in lines)
+            raw_texts = [item[0] if isinstance(item, tuple) else item for item in lines]
+            max_tw = max(cv2.getTextSize(text, font, scale, thickness)[0][0] for text in raw_texts)
             box_x1 = max(0, x - 4)
             box_y1 = max(0, y_offset - 16)
             box_x2 = min(frame.shape[1], x + max_tw + 6)
             box_y2 = min(frame.shape[0], y_offset + (len(lines) - 1) * line_height + 6)
             cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), bg_color, -1)
 
-            for i, text in enumerate(lines):
+            for i, item in enumerate(lines):
+                if isinstance(item, tuple):
+                    text, line_color = item
+                else:
+                    text, line_color = item, color
                 y = y_offset + i * line_height
-                cv2.putText(frame, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)
+                cv2.putText(frame, text, (x, y), font, scale, line_color, thickness, cv2.LINE_AA)

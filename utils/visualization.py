@@ -794,9 +794,10 @@ class Visualizer:
                     v_color
                 ))
             elif getattr(features, "voice_vad_active", False):
-                lines.append(("Voice: DETECTED (LIP GATE)", (0, 210, 255)))
+                lines.append((f"Voice: DETECTED (LIP GATE | lvl:{getattr(features, 'audio_rms', 0.0)*1000:.1f})", (0, 210, 255)))
             elif getattr(features, "mic_active", False):
-                lines.append(("Voice: LISTENING (SILENT)", (180, 180, 180)))
+                rms_lvl = getattr(features, "audio_rms", 0.0) * 1000.0
+                lines.append((f"Voice: LISTENING (SILENT | lvl:{rms_lvl:.1f})", (180, 180, 180)))
             else:
                 lines.append(("Voice: NO MIC (pip install sounddevice)", (0, 140, 255)))
 

@@ -50,13 +50,22 @@ class AudioIntoxicationExtractor:
         source_path: Optional[str] = None,
         enable_live_mic: bool = False,
         hardware_serial_mode: bool = False,
+        device: Optional[int] = None,
     ):
         self.sample_rate = int(sample_rate)
         self.window_sec = float(window_sec)
         self.source_path = source_path
         self.enable_live_mic = enable_live_mic
         self.hardware_serial_mode = hardware_serial_mode
+        self.device = device
         self.mic_active: bool = False
+
+        self._candidate_devices: List[int] = []
+        self._current_device_index: Optional[int] = None
+        self._silent_check_start: float = -1.0
+        self._noise_floor_rms: float = 0.0005
+        self._last_valid_features: Optional[AudioFeatures] = None
+        self._last_valid_timestamp: float = -999.0
 
         self._buffer_len = int(self.sample_rate * self.window_sec)
         self._pcm_buffer: collections.deque = collections.deque(maxlen=self._buffer_len)
@@ -163,7 +172,7 @@ class AudioIntoxicationExtractor:
         return arr
 
     def _init_live_mic(self) -> None:
-        """Initialize non-blocking sounddevice microphone input stream."""
+        """Initialize non-blocking sounddevice microphone input stream with smart device selection."""
         try:
             try:
                 import sounddevice as sd  # type: ignore
@@ -177,25 +186,140 @@ class AudioIntoxicationExtractor:
                 self.mic_active = False
                 return
 
-            def _mic_cb(indata, frames, time_info, status):
-                if indata is not None and len(indata) > 0:
-                    self.push_pcm_chunk(indata[:, 0])
+            devices = sd.query_devices()
+            print("[DMS-Audio] Available audio input devices:")
+            for idx, dev in enumerate(devices):
+                if dev.get("max_input_channels", 0) > 0:
+                    api = ""
+                    try:
+                        api = f" ({sd.query_hostapis(dev.get('hostapi', 0)).get('name', '')})"
+                    except Exception:
+                        pass
+                    print(f"  [{idx}] {dev.get('name', 'Unknown')}{api} | inputs: {dev.get('max_input_channels')}, default SR: {dev.get('default_samplerate')} Hz")
 
-            self._mic_stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="float32",
-                callback=_mic_cb,
-            )
-            self._mic_stream.start()
-            self.mic_active = True
-            print(f"[DMS-Audio] Live microphone active ({self.sample_rate} Hz mono)")
-            logger.info("Live microphone input stream started @ %d Hz", self.sample_rate)
+            if self.device is not None:
+                self._candidate_devices = [int(self.device)]
+            else:
+                default_in = -1
+                try:
+                    default_in = sd.default.device[0]
+                except Exception:
+                    pass
+
+                scored_devs = []
+                for idx, d in enumerate(devices):
+                    if d.get("max_input_channels", 0) <= 0:
+                        continue
+                    name = d.get("name", "").lower()
+                    score = 0
+                    api_name = ""
+                    try:
+                        api_name = sd.query_hostapis(d.get("hostapi", 0)).get("name", "").lower()
+                    except Exception:
+                        pass
+
+                    # Prefer WASAPI/MME/DirectSound over exclusive WDM-KS
+                    if "wdm-ks" in api_name:
+                        score -= 40
+                    elif "wasapi" in api_name:
+                        score += 15
+                    elif "mme" in api_name or "directsound" in api_name:
+                        score += 10
+
+                    # Deprioritize virtual/loopback names
+                    if any(v in name for v in ("droidcam", "iriun", "camo", "virtual", "stereo mix", "vb-audio", "mapper")):
+                        score -= 50
+
+                    # Prioritize physical microphone names
+                    if any(p in name for p in ("microphone array", "realtek", "intel", "amd", "usb", "headset", "external", "mic")):
+                        score += 20
+
+                    # Default device bonus only if not virtual
+                    if idx == default_in and not any(v in name for v in ("droidcam", "iriun", "camo", "virtual", "stereo mix", "vb-audio", "mapper")):
+                        score += 10
+
+                    scored_devs.append((score, idx))
+
+                scored_devs.sort(key=lambda x: x[0], reverse=True)
+                self._candidate_devices = [idx for _, idx in scored_devs]
+
+            if not self._candidate_devices:
+                print("[DMS-Audio] WARNING: No valid audio input devices detected.")
+                self._mic_stream = None
+                self.mic_active = False
+                return
+
+            self._open_candidate_mic(self._candidate_devices[0])
+
         except Exception as exc:
             print(f"[DMS-Audio] WARNING: Could not open live mic stream: {exc}")
             logger.warning("Could not open live mic stream (sounddevice): %s", exc)
             self._mic_stream = None
             self.mic_active = False
+
+    def _open_candidate_mic(self, dev_index: int) -> bool:
+        """Open or switch input stream to candidate device index."""
+        try:
+            import sounddevice as sd  # type: ignore
+            if self._mic_stream is not None:
+                try:
+                    self._mic_stream.stop()
+                    self._mic_stream.close()
+                except Exception:
+                    pass
+                self._mic_stream = None
+
+            dev_info = sd.query_devices(dev_index)
+            native_sr = int(dev_info.get("default_samplerate", self.sample_rate))
+            if native_sr <= 0:
+                native_sr = self.sample_rate
+            blocksize = max(64, int(native_sr * 0.05))  # 50 ms blocks
+
+            def _mic_cb(indata, frames, time_info, status):
+                if indata is not None and len(indata) > 0:
+                    mono = indata[:, 0].astype(np.float32, copy=True)
+                    if native_sr != self.sample_rate:
+                        num_samples = int(round(len(mono) * self.sample_rate / native_sr))
+                        if num_samples > 0:
+                            mono = np.interp(
+                                np.linspace(0.0, 1.0, num_samples, endpoint=False),
+                                np.linspace(0.0, 1.0, len(mono), endpoint=False),
+                                mono,
+                            ).astype(np.float32)
+                    with self._lock:
+                        self._pcm_buffer.extend(mono.tolist())
+
+            self._mic_stream = sd.InputStream(
+                device=dev_index,
+                samplerate=native_sr,
+                channels=1,
+                dtype="float32",
+                blocksize=blocksize,
+                callback=_mic_cb,
+            )
+            self._mic_stream.start()
+            self._current_device_index = dev_index
+            self.mic_active = True
+            print(f"[DMS-Audio] Selected input device [{dev_index}]: {dev_info.get('name', 'Unknown')} @ {native_sr} Hz (resampling to {self.sample_rate} Hz mono)")
+            logger.info("Live microphone input stream started on device %d @ %d Hz", dev_index, native_sr)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to open mic device %d: %s", dev_index, exc)
+            return False
+
+    def _switch_to_next_mic(self) -> None:
+        """Switch to next candidate microphone device if current stream is silent or dithered."""
+        if len(self._candidate_devices) <= 1:
+            return
+        curr_idx = self._current_device_index
+        if curr_idx in self._candidate_devices:
+            curr_pos = self._candidate_devices.index(curr_idx)
+            next_idx = self._candidate_devices[(curr_pos + 1) % len(self._candidate_devices)]
+        else:
+            next_idx = self._candidate_devices[0]
+
+        print(f"[DMS-Audio] Input device appears muted/virtual (RMS < 0.00005); switching to next mic device [{next_idx}]...")
+        self._open_candidate_mic(next_idx)
 
     def _empty_or_held(
         self,
@@ -225,18 +349,15 @@ class AudioIntoxicationExtractor:
             self._last_dsp_timestamp = -1.0
             self._last_computed_result = None
             self._last_speech_active = False
-            self._last_dsp_timestamp = -1.0
-            self._last_computed_result = None
-            self._last_speech_active = False
+            self._last_valid_features = None
+            self._last_valid_timestamp = -999.0
+            self._silent_check_start = -1.0
 
     def push_pcm_chunk(self, pcm_samples: np.ndarray) -> None:
         """Push raw 16 kHz PCM chunk into internal thread-safe ring buffer."""
         samples = self._to_mono_float32(pcm_samples)
         with self._lock:
             self._pcm_buffer.extend(samples.tolist())
-            self._last_dsp_timestamp = -1.0
-            self._last_computed_result = None
-            self._last_speech_active = False
 
     def push_hardware_telemetry(
         self,
@@ -258,6 +379,40 @@ class AudioIntoxicationExtractor:
             self._last_dsp_timestamp = -1.0
             self._last_computed_result = None
             self._last_speech_active = False
+
+    def _finalize_result(self, res: AudioFeatures, timestamp: float) -> AudioFeatures:
+        """Apply 1.5s speech hold and dither fallback monitoring."""
+        if res.audio_valid:
+            self._last_valid_features = res
+            self._last_valid_timestamp = timestamp
+        elif (
+            self._mic_stream is not None
+            and self._last_valid_features is not None
+            and 0.0 <= (timestamp - self._last_valid_timestamp) <= 1.50
+        ):
+            import dataclasses
+            res = dataclasses.replace(
+                self._last_valid_features,
+                audio_rms=res.audio_rms,
+                mic_active=self.mic_active,
+            )
+
+        # Check for digital dither / muted device fallback
+        if self._mic_stream is not None and len(self._candidate_devices) > 1:
+            curr_rms = res.audio_rms
+            if curr_rms < 0.00005:
+                if self._silent_check_start < 0:
+                    self._silent_check_start = timestamp
+                elif (timestamp - self._silent_check_start) >= 4.0:
+                    self._silent_check_start = timestamp
+                    self._switch_to_next_mic()
+            else:
+                self._silent_check_start = -1.0
+
+        self._last_features = res
+        self._last_dsp_timestamp = timestamp
+        self._last_computed_result = res
+        return res
 
     def update(self, timestamp: float, visual_speech_active: bool) -> AudioFeatures:
         """Update voice intoxication analysis for the current video timestamp.
@@ -336,10 +491,7 @@ class AudioIntoxicationExtractor:
             else:
                 pcm = self._audio_track[start_sample:]
             res = self.analyze_pcm_window(pcm, visual_speech_active=visual_speech_active, timestamp=timestamp)
-            self._last_features = res
-            self._last_dsp_timestamp = timestamp
-            self._last_computed_result = res
-            return res
+            return self._finalize_result(res, timestamp)
 
         # Mode B: Live Ring Buffer
         with self._lock:
@@ -351,16 +503,10 @@ class AudioIntoxicationExtractor:
 
         if len(pcm) >= int(0.25 * self.sample_rate):
             res = self.analyze_pcm_window(pcm, visual_speech_active=visual_speech_active, timestamp=timestamp)
-            self._last_features = res
-            self._last_dsp_timestamp = timestamp
-            self._last_computed_result = res
-            return res
+            return self._finalize_result(res, timestamp)
 
         res = self._empty_or_held(rms=0.0)
-        self._last_features = res
-        self._last_dsp_timestamp = timestamp
-        self._last_computed_result = res
-        return res
+        return self._finalize_result(res, timestamp)
 
     def analyze_pcm_window(
         self,
@@ -398,8 +544,16 @@ class AudioIntoxicationExtractor:
         active_rms = float(np.percentile(frame_rms_list, 85)) if frame_rms_list else 0.0
         rms = float(np.sqrt(np.mean(arr ** 2)))
 
-        if active_rms < 0.0025 and rms < 0.0015:
-            return self._empty_or_held(rms=rms)
+        if not visual_speech_active:
+            self._noise_floor_rms = float(0.95 * self._noise_floor_rms + 0.05 * rms)
+
+        if self._mic_stream is not None:
+            min_active_rms = max(0.0004, min(0.0025, self._noise_floor_rms * 2.5))
+            if active_rms < min_active_rms and rms < (min_active_rms * 0.6):
+                return self._empty_or_held(rms=rms)
+        else:
+            if active_rms < 0.0025 and rms < 0.0015:
+                return self._empty_or_held(rms=rms)
 
         # 2. Automatic Gain Normalization (AGN)
         peak_95 = float(np.percentile(np.abs(arr), 95))

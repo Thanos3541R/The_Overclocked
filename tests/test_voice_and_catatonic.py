@@ -240,3 +240,34 @@ def test_quiet_short_phrase_detection():
     assert feat.audio_valid is True, "0.5s phrase with visual speech must be audio_valid"
     assert feat.av_speech_gated is True, "av_speech_gated must be True when visual speech is active"
 
+
+def test_live_mic_speech_hold_hysteresis():
+    """Verify 1.5s speech hold smoothly maintains valid voice features across pauses in live mic mode."""
+    extractor = AudioIntoxicationExtractor(sample_rate=16000, window_sec=2.0)
+    # Mock live stream object to enable live hold mode
+    extractor._mic_stream = object()
+    extractor.mic_active = True
+
+    sr = 16000
+    t = np.arange(sr) / sr
+    burst = 0.05 * np.sin(2 * np.pi * 130.0 * t) + 0.02 * np.sin(2 * np.pi * 260.0 * t)
+    extractor.push_pcm_chunk(burst)
+
+    # Frame 0: Spoken word detected
+    res0 = extractor.update(timestamp=1.0, visual_speech_active=True)
+    assert res0.audio_valid is True, "Spoken word must be audio_valid"
+
+    # Frame 1: Speaker pauses for 0.4s (within 1.5s hold)
+    with extractor._lock:
+        extractor._pcm_buffer.clear()
+        extractor._pcm_buffer.extend(np.zeros(int(0.30 * sr), dtype=np.float32).tolist())
+    extractor._last_dsp_timestamp = -1.0
+    res1 = extractor.update(timestamp=1.4, visual_speech_active=False)
+    assert res1.audio_valid is True, "Hold hysteresis must keep voice valid during 0.4s inter-syllable pause"
+
+    # Frame 2: Speaker silent past 1.5s (timestamp=3.1s, dt=2.1s > 1.5s)
+    extractor._last_dsp_timestamp = -1.0
+    res2 = extractor.update(timestamp=3.1, visual_speech_active=False)
+    assert res2.audio_valid is False, "Hold hysteresis must expire after 1.5s of silence"
+
+

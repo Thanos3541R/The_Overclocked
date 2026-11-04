@@ -114,6 +114,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-audio", action="store_true",
         help="Disable audio extraction / microphone capture")
+    parser.add_argument(
+        "--audio-device", type=int, default=None,
+        help="Optional sounddevice microphone device index (default: auto-detect)")
     return parser.parse_args()
 
 
@@ -288,6 +291,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 window_sec=getattr(config, "audio_window_sec", 2.0),
                 source_path=source if is_video_file else None,
                 enable_live_mic=(not is_video_file and not getattr(args, "no_audio", False)),
+                device=getattr(args, "audio_device", None),
             )
         except Exception as exc:
             logger.warning("Failed to initialize AudioIntoxicationExtractor: %s", exc)

@@ -195,11 +195,12 @@ def extract_video_features(video_path: str,
     if getattr(config, "enable_voice_detection", True):
         try:
             from pipeline.audio_extractor import AudioIntoxicationExtractor
+            is_video_file = isinstance(video_path, str) and os.path.isfile(video_path)
             audio_extractor = AudioIntoxicationExtractor(
                 sample_rate=getattr(config, "audio_sample_rate", 16000),
                 window_sec=getattr(config, "audio_window_sec", 2.0),
-                source_path=video_path if not is_cam else None,
-                enable_live_mic=is_cam,
+                source_path=video_path if is_video_file else None,
+                enable_live_mic=not is_video_file,
             )
         except Exception:
             audio_extractor = None

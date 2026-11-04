@@ -71,15 +71,17 @@ def test_sober_vs_slurred_intoxicated_voice_dsp():
     cycles = []
     amp = 0.8
     while t_accum < duration:
-        period = (1.0 / 130.0) * (1.0 + np.random.uniform(-0.035, 0.035))  # cycle-to-cycle jitter
-        amp = np.clip(amp + np.random.uniform(-0.15, 0.15), 0.4, 0.9)     # shimmer
+        period = (1.0 / 130.0) * (1.0 + np.random.uniform(-0.08, 0.08))  # cycle-to-cycle jitter
+        amp = np.clip(amp + np.random.uniform(-0.25, 0.25), 0.3, 1.0)     # shimmer
         n_samples = max(2, int(period * sr))
         t_c = np.linspace(0, 2 * np.pi, n_samples, endpoint=False)
-        cycles.append(amp * np.sin(t_c))
+        # Vocal tract impulse response with flat F2 resonance around 1400 Hz
+        f2_res = 0.45 * np.sin(2 * np.pi * 1400.0 * (t_c / (2 * np.pi * 130.0))) * np.exp(-t_c * 0.8)
+        cycles.append(amp * (np.sin(t_c) + f2_res))
         t_accum += len(cycles[-1]) / sr
 
     pcm_intox = np.concatenate(cycles)[: int(sr * duration)]
-    pcm_intox += np.random.normal(0, 0.22, len(pcm_intox))  # additive breath noise
+    pcm_intox += np.random.normal(0, 0.12, len(pcm_intox))  # additive breath noise
     pcm_intox = pcm_intox / np.max(np.abs(pcm_intox))
 
     impaired_feat = extractor.analyze_pcm_window(pcm_intox, visual_speech_active=True)

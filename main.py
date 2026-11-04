@@ -282,11 +282,12 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     if getattr(config, "enable_voice_detection", True) and not getattr(args, "no_audio", False):
         try:
             from pipeline.audio_extractor import AudioIntoxicationExtractor
+            is_video_file = isinstance(source, str) and os.path.isfile(source)
             audio_extractor = AudioIntoxicationExtractor(
                 sample_rate=getattr(config, "audio_sample_rate", 16000),
                 window_sec=getattr(config, "audio_window_sec", 2.0),
-                source_path=source if isinstance(source, str) and os.path.isfile(source) else None,
-                enable_live_mic=not (isinstance(source, str) and os.path.isfile(source)),
+                source_path=source if is_video_file else None,
+                enable_live_mic=(not is_video_file and not getattr(args, "no_audio", False)),
             )
         except Exception as exc:
             logger.warning("Failed to initialize AudioIntoxicationExtractor: %s", exc)

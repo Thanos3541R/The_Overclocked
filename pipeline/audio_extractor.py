@@ -66,6 +66,9 @@ class AudioIntoxicationExtractor:
         self._injected_telemetry: Optional[Dict[str, Any]] = None
         self._last_features: AudioFeatures = AudioFeatures()
         self._last_valid_time: float = -999.0
+        self._last_dsp_timestamp: float = -1.0
+        self._last_computed_result: Optional[AudioFeatures] = None
+        self._last_speech_active: bool = False
 
         if self.source_path is not None:
             self._load_source_audio(self.source_path)
@@ -174,11 +177,24 @@ class AudioIntoxicationExtractor:
             logger.warning("Could not open live mic stream (sounddevice): %s", exc)
             self._mic_stream = None
 
+    def reset(self) -> None:
+        """Reset audio ring buffer and DSP cache."""
+        with self._lock:
+            self._pcm_buffer.clear()
+            self._injected_telemetry = None
+            self._last_features = AudioFeatures()
+            self._last_dsp_timestamp = -1.0
+            self._last_computed_result = None
+            self._last_speech_active = False
+
     def push_pcm_chunk(self, pcm_samples: np.ndarray) -> None:
         """Push raw 16 kHz PCM chunk into internal thread-safe ring buffer."""
         samples = self._to_mono_float32(pcm_samples)
         with self._lock:
             self._pcm_buffer.extend(samples.tolist())
+            self._last_dsp_timestamp = -1.0
+            self._last_computed_result = None
+            self._last_speech_active = False
 
     def push_hardware_telemetry(
         self,
@@ -197,6 +213,9 @@ class AudioIntoxicationExtractor:
                 "f2_slope_hz_ms": float(f2_slope_hz_ms),
                 "vad_active": bool(vad_active),
             }
+            self._last_dsp_timestamp = -1.0
+            self._last_computed_result = None
+            self._last_speech_active = False
 
     def update(self, timestamp: float, visual_speech_active: bool) -> AudioFeatures:
         """Update voice intoxication analysis for the current video timestamp.
@@ -224,6 +243,8 @@ class AudioIntoxicationExtractor:
                     voice_slurred_detected=False,
                 )
                 self._last_features = features
+                self._last_dsp_timestamp = timestamp
+                self._last_computed_result = features
                 return features
 
             jitter = telem.get("jitter_pct", 0.0)
@@ -251,7 +272,34 @@ class AudioIntoxicationExtractor:
                 voice_slurred_detected=slurred,
             )
             self._last_features = features
+            self._last_dsp_timestamp = timestamp
+            self._last_computed_result = features
             return features
+
+        # Lip-sync check: if driver mouth is closed, return silent result immediately
+        if not visual_speech_active:
+            features = AudioFeatures(
+                audio_valid=False,
+                voice_vad_active=False,
+                av_speech_gated=False,
+                voice_impairment_score=0.0,
+                voice_slurred_detected=False,
+            )
+            self._last_features = features
+            self._last_dsp_timestamp = timestamp
+            self._last_computed_result = features
+            self._last_speech_active = False
+            return features
+
+        # 10 Hz DSP Throttling (0.10s interval): return cached result if within interval and speech was already active
+        if (
+            self._last_computed_result is not None
+            and getattr(self, "_last_speech_active", False)
+            and 0.0 <= (timestamp - self._last_dsp_timestamp) < 0.10
+        ):
+            return self._last_computed_result
+
+        self._last_speech_active = True
 
         # Mode A: Synchronized Video/Audio Track
         if self._audio_track is not None and len(self._audio_track) > 0:
@@ -262,7 +310,11 @@ class AudioIntoxicationExtractor:
                 pcm = self._audio_track[start_sample:end_sample]
             else:
                 pcm = self._audio_track[start_sample:]
-            return self.analyze_pcm_window(pcm, visual_speech_active=visual_speech_active)
+            res = self.analyze_pcm_window(pcm, visual_speech_active=visual_speech_active)
+            self._last_features = res
+            self._last_dsp_timestamp = timestamp
+            self._last_computed_result = res
+            return res
 
         # Mode B: Live Ring Buffer
         with self._lock:
@@ -273,15 +325,23 @@ class AudioIntoxicationExtractor:
                 pcm = np.array([], dtype=np.float32)
 
         if len(pcm) >= int(0.25 * self.sample_rate):
-            return self.analyze_pcm_window(pcm, visual_speech_active=visual_speech_active)
+            res = self.analyze_pcm_window(pcm, visual_speech_active=visual_speech_active)
+            self._last_features = res
+            self._last_dsp_timestamp = timestamp
+            self._last_computed_result = res
+            return res
 
-        return AudioFeatures(
+        res = AudioFeatures(
             audio_valid=False,
             voice_vad_active=False,
             av_speech_gated=False,
             voice_impairment_score=0.0,
             voice_slurred_detected=False,
         )
+        self._last_features = res
+        self._last_dsp_timestamp = timestamp
+        self._last_computed_result = res
+        return res
 
     def analyze_pcm_window(self, pcm: np.ndarray, visual_speech_active: bool) -> AudioFeatures:
         """Pure NumPy / SciPy DSP acoustic analysis engine on a PCM chunk.
@@ -363,18 +423,15 @@ class AudioIntoxicationExtractor:
 
             if best_r > 0.35:
                 # Sub-sample parabolic interpolation around peak
-                k_star = float(best_k)
                 if (best_k - 1) in r_lags and (best_k + 1) in r_lags:
-                    y0 = r_lags[best_k - 1]
-                    y1 = r_lags[best_k]
-                    y2 = r_lags[best_k + 1]
-                    denom_p = 2.0 * (2.0 * y1 - y0 - y2)
-                    if abs(denom_p) > 1e-6:
-                        delta = (y2 - y0) / denom_p
-                        if abs(delta) < 1.0:
-                            k_star += delta
+                    y0, y1, y2 = float(r_lags[best_k - 1]), float(r_lags[best_k]), float(r_lags[best_k + 1])
+                    denom = y0 - 2.0 * y1 + y2
+                    frac = 0.5 * (y0 - y2) / denom if abs(denom) > 1e-9 else 0.0
+                    precise_lag = float(best_k) + float(np.clip(frac, -0.5, 0.5))
+                else:
+                    precise_lag = float(best_k)
 
-                pitch_periods.append(k_star / self.sample_rate)
+                pitch_periods.append(precise_lag / self.sample_rate)
                 amplitudes.append(float(np.ptp(frame)))
                 r_peaks.append(best_r)
 
@@ -382,9 +439,15 @@ class AudioIntoxicationExtractor:
                 w_frame = frame * hanning_win
                 spec = np.abs(np.fft.rfft(w_frame))
                 spec_f2 = spec[f2_mask]
-                sum_spec = np.sum(spec_f2)
-                if sum_spec > 1e-6:
-                    centroid = float(np.sum(f2_subfreqs * spec_f2) / sum_spec)
+                if len(spec_f2) > 0:
+                    pwr_f2 = spec_f2 ** 2
+                    thresh = np.percentile(pwr_f2, 75.0)
+                    peak_mask = pwr_f2 >= thresh
+                    sum_pwr = np.sum(pwr_f2[peak_mask])
+                    if sum_pwr > 1e-6:
+                        centroid = float(np.sum(f2_subfreqs[peak_mask] * pwr_f2[peak_mask]) / sum_pwr)
+                    else:
+                        centroid = 1500.0
                 else:
                     centroid = 1500.0
                 f2_centroids.append((idx, centroid))
@@ -435,7 +498,7 @@ class AudioIntoxicationExtractor:
                 dt_ms = (idx2 - idx1) * 20.0
                 if dt_ms > 0:
                     slopes.append(abs(f2 - f1) / dt_ms)
-            formant_f2_slope_hz_ms = float(np.mean(slopes)) if slopes else 25.0
+            formant_f2_slope_hz_ms = float(np.percentile(slopes, 90.0)) if slopes else 25.0
         else:
             formant_f2_slope_hz_ms = 25.0
 

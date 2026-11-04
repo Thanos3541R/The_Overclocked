@@ -786,6 +786,16 @@ class Visualizer:
                 f"Valid: {features.face_valid}" + (f" ({features.gating_reason})" if features.gating_reason else ""),
             ])
 
+            if getattr(features, "audio_valid", False):
+                status_v = "SLURRED" if getattr(features, "voice_slurred_detected", False) else "OK"
+                lines.append(
+                    f"Voice: {status_v} (Jit: {getattr(features, 'vocal_jitter_pct', 0.0):.1f}% | Shm: {getattr(features, 'vocal_shimmer_pct', 0.0):.1f}% | HNR: {getattr(features, 'vocal_hnr_db', 0.0):.1f}dB | F2: {getattr(features, 'formant_f2_slope_hz_ms', 0.0):.0f} Hz/ms)"
+                )
+            else:
+                lines.append("Voice: SILENT")
+
+            if getattr(features, "voice_slurred_detected", False):
+                lines.append("[SLURRED SPEECH]")
             if getattr(features, "imu_gated", False):
                 lines.append(">>> IMU GATED / SHOCK <<<")
             if features.saccade_detected:

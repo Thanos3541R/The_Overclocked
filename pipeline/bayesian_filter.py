@@ -122,12 +122,69 @@ class BayesianEvidenceAccumulator:
             status_summary=status
         )
 
-    def update(self, assessment: ImpairmentAssessment, timestamp: float) -> BayesianState:
+    def _compute_frame_llr(
+        self,
+        assessment: ImpairmentAssessment,
+        dt: float = 0.033,
+        features: Optional[Any] = None,
+    ) -> float:
+        """Compute instantaneous log-likelihood ratio update based on involuntary evidence.
+
+        Args:
+            assessment: ImpairmentAssessment from classifier.
+            dt: Time delta in seconds.
+            features: Optional FrameFeatures dataclass.
+
+        Returns:
+            delta_l: Change in accumulated log-odds.
+        """
+        inv_risk = getattr(assessment, "involuntary_risk_score", 0.0)
+        marker_scores = getattr(assessment, "marker_scores", {})
+
+        # Scale log-likelihood delta per second:
+        # Strong impairment (inv_risk >= 50%): positive log-odds increment (+0.8 to +2.5 / sec)
+        # Ambiguous / mild (30% <= inv_risk < 50%): small positive (+0.2 to +0.8 / sec)
+        # Sober / healthy (inv_risk < 30%): negative decay toward prior (-decay_rate / sec)
+        if inv_risk >= 50.0:
+            evidence_rate = 1.0 + (inv_risk - 50.0) / 50.0 * 1.5  # up to +2.5 / s
+            # Extra weight if hard physiological reflex breakdown is confirmed (GEN or severe ptosis)
+            if marker_scores.get("gen", 0.0) >= 80.0:
+                evidence_rate += 1.0
+            if marker_scores.get("lack_of_convergence", 0.0) >= 70.0:
+                evidence_rate += 0.5
+            delta_l = evidence_rate * dt
+        elif inv_risk >= 30.0:
+            evidence_rate = 0.2 + (inv_risk - 30.0) / 20.0 * 0.6  # +0.2 to +0.8 / s
+            delta_l = evidence_rate * dt
+        else:
+            # Sober observation: evidence decays toward initial log odds
+            delta_l = -self.decay_rate_per_sec * dt
+
+        # Secondary Voice Intoxication Corroboration
+        feat_obj = features if features is not None else assessment
+        audio_valid = getattr(feat_obj, "audio_valid", False)
+        voice_slurred = getattr(feat_obj, "voice_slurred_detected", False)
+        voice_score = float(getattr(feat_obj, "voice_impairment_score", marker_scores.get("voice_intoxication", 0.0)))
+
+        # Acoustic log-odds boost: accelerates evidence accumulation alongside visual signs
+        # without ever being able to lock out a visually sober driver on its own (inv_risk < 20.0)
+        if audio_valid and voice_slurred and inv_risk >= 20.0:
+            delta_l += 0.35 * (voice_score / 100.0)
+
+        return delta_l
+
+    def update(
+        self,
+        assessment: ImpairmentAssessment,
+        timestamp: float,
+        features: Optional[Any] = None,
+    ) -> BayesianState:
         """Update Bayesian evidence with assessment from the current frame/window.
 
         Args:
             assessment: Diagnostic output from ImpairmentClassifier.
             timestamp: Current timestamp in seconds.
+            features: Optional FrameFeatures from FeatureExtractor.
 
         Returns:
             BayesianState dataclass.
@@ -142,27 +199,7 @@ class BayesianEvidenceAccumulator:
             dt = max(1e-4, min(1.0, timestamp - self._last_timestamp))
             self._last_timestamp = timestamp
 
-        # Compute instantaneous log-likelihood ratio update based on involuntary evidence
-        inv_risk = assessment.involuntary_risk_score
-
-        # Scale log-likelihood delta per second:
-        # Strong impairment (inv_risk >= 50%): positive log-odds increment (+0.8 to +2.5 / sec)
-        # Ambiguous / mild (25% <= inv_risk < 50%): small positive (+0.1 to +0.5 / sec)
-        # Sober / healthy (inv_risk < 20%): negative decay toward prior (-decay_rate / sec)
-        if inv_risk >= 50.0:
-            evidence_rate = 1.0 + (inv_risk - 50.0) / 50.0 * 1.5  # up to +2.5 / s
-            # Extra weight if hard physiological reflex breakdown is confirmed (GEN or severe ptosis)
-            if assessment.marker_scores.get("gen", 0.0) >= 80.0:
-                evidence_rate += 1.0
-            if assessment.marker_scores.get("lack_of_convergence", 0.0) >= 70.0:
-                evidence_rate += 0.5
-            delta_l = evidence_rate * dt
-        elif inv_risk >= 30.0:
-            evidence_rate = 0.2 + (inv_risk - 30.0) / 20.0 * 0.6  # +0.2 to +0.8 / s
-            delta_l = evidence_rate * dt
-        else:
-            # Sober observation: evidence decays toward initial log odds
-            delta_l = -self.decay_rate_per_sec * dt
+        delta_l = self._compute_frame_llr(assessment, dt=dt, features=features)
 
         # Update log-odds (bounded to avoid numerical issues and enable recovery)
         self.log_odds = float(np.clip(self.log_odds + delta_l, self.initial_log_odds - 1.0, 12.0))

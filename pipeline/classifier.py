@@ -63,6 +63,7 @@ class ImpairmentAssessment:
     starter_lockout: bool = StarterLockout.ALLOW
     throttle_state: int = ThrottleState.NORMAL
     reason: str = ""
+    active_markers: List[str] = field(default_factory=list)
 
 
 class ImpairmentClassifier:
@@ -418,6 +419,40 @@ class ImpairmentClassifier:
 
         marker_scores = {}
         indicators = []
+        active_markers: List[str] = []
+
+        catatonic_stare_detected = bool(
+            (getattr(features, "compensatory_stare_active", False) or getattr(features, "deliberate_blink_suppression", False))
+            and (
+                getattr(features, "stare_fixation_duration_s", 0.0) >= 3.5
+                or (0.0 < getattr(features, "gaze_yaw_dispersion", 1.0) < 0.028)
+            )
+            and getattr(features, "blink_opening_velocity", 0.0) < 1.50
+        )
+        sluggish_blink_detected = bool(
+            0.0 < getattr(features, "blink_opening_velocity", 0.0) < 1.45
+        )
+
+        if getattr(features, "gen_detected", False):
+            active_markers.append("gen")
+        if getattr(features, "lack_of_convergence", False):
+            active_markers.append("lack_of_convergence")
+        if getattr(features, "microsleep_detected", False):
+            active_markers.append("microsleep")
+        if getattr(features, "deliberate_blink_suppression", False):
+            active_markers.append("deliberate_blink_suppression")
+        if getattr(features, "compensatory_stare_active", False):
+            active_markers.append("compensatory_stare")
+        if getattr(features, "rigid_head_stabilization", False):
+            active_markers.append("rigid_head_stabilization")
+        if getattr(features, "frontalis_compensation_active", False):
+            active_markers.append("frontalis_compensation")
+        if getattr(features, "masking_detected", False):
+            active_markers.append("masking_detected")
+        if sluggish_blink_detected:
+            active_markers.append("sluggish_blink")
+        if catatonic_stare_detected:
+            active_markers.append("catatonic_stare_stupor")
 
         # 1. Gaze-Evoked Nystagmus (GEN — Romano et al. 2017)
         if features.gen_detected:
@@ -670,8 +705,25 @@ class ImpairmentClassifier:
                 inv_risk += 3.0
                 indicators.append(f"Depressed autonomic HRV (RMSSD={features.rppg_hrv_rmssd_ms:.1f}ms, BPM={features.rppg_pulse_bpm:.0f})")
 
+        # ── Catatonic Stupor Floor against ML Bias ──
+        stupor_floor = 0.0
+        if catatonic_stare_detected:
+            stupor_floor = 62.0 if (sluggish_blink_detected or (0.0 < getattr(features, "gaze_yaw_dispersion", 1.0) < 0.020)) else 48.0
+            inv_risk = max(inv_risk, stupor_floor)
+            if not any("catatonic" in ind.lower() for ind in indicators):
+                indicators.append(
+                    f"Catatonic Stare Stupor (fixation={getattr(features, 'stare_fixation_duration_s', 0.0):.1f}s, yaw_disp={getattr(features, 'gaze_yaw_dispersion', 0.0):.3f})"
+                )
+
         # Check if live driver currently exhibits healthy, alert open eyes with zero hard impairment signs
-        live_alert_open_eyes = (
+        sober_attentive_guard = bool(
+            features.ear_avg >= 0.26
+            and features.perclos < 0.10
+            and not catatonic_stare_detected
+            and not sluggish_blink_detected
+            and not getattr(features, "masking_detected", False)
+        )
+        live_alert_open_eyes = bool(
             features.ear_avg > 0.0
             and features.ear_avg >= self.sober_ear * 0.84
             and features.perclos < 0.12
@@ -679,6 +731,9 @@ class ImpairmentClassifier:
             and not features.gen_detected
             and not features.lack_of_convergence
             and features.pursuit_fragmentation_ratio <= 0.20
+            and not catatonic_stare_detected
+            and not sluggish_blink_detected
+            and not getattr(features, "masking_detected", False)
         )
 
         # Ingress alert: only floor at 55.0 if driver is NOT currently showing live alert open eyes
@@ -703,13 +758,18 @@ class ImpairmentClassifier:
             and (ml_prob is not None and (ml_prob * 100.0) >= 45.0)
         )
         bypass_open_eye_cap = bool(
-            catatonic_stupor_score >= 35.0
+            catatonic_stare_detected
+            or sluggish_blink_detected
+            or getattr(features, "masking_detected", False)
+            or catatonic_stupor_score >= 35.0
             or confirmed_anti_masking
             or high_ml_with_masking
             or features.gen_detected
             or features.lack_of_convergence
+            or not sober_attentive_guard
         )
 
+        heuristic_risk = inv_risk
         # Real-time ML model fusion (rolling physical window)
         ml_prob_pct = None
         ml_active = False
@@ -723,6 +783,8 @@ class ImpairmentClassifier:
             else:
                 ml_weight = 0.25 if (inv_risk < 15.0 and features.perclos < 0.10) else 0.40
                 inv_risk = float(np.clip((1.0 - ml_weight) * inv_risk + ml_weight * (ml_prob * 100.0), 0.0, 100.0))
+                if catatonic_stare_detected:
+                    inv_risk = max(inv_risk, 0.85 * heuristic_risk, stupor_floor)
                 if ml_prob >= 0.50:
                     indicators.append(f"Trained ML Classifier Probability: {ml_prob * 100:.1f}%")
 
@@ -738,12 +800,28 @@ class ImpairmentClassifier:
 
         if not bypass_open_eye_cap:
             open_eye_desktop_guard = (
-                features.ear_avg >= self.sober_ear * 0.84
+                sober_attentive_guard
+                and features.ear_avg >= self.sober_ear * 0.84
                 and features.perclos < 0.15
                 and features.mar < 0.22
             )
             if open_eye_desktop_guard:
                 inv_risk = min(inv_risk, 22.0)
+
+        # ── Secondary Voice Corroboration (AV-VAD Gated) ──
+        if getattr(features, "audio_valid", False):
+            voice_score = float(getattr(features, "voice_impairment_score", 0.0))
+            marker_scores["voice_intoxication"] = round(voice_score, 1)
+            if getattr(features, "voice_slurred_detected", False):
+                voice_boost = float(min(15.0, 0.20 * voice_score))
+                inv_risk = float(np.clip(inv_risk + voice_boost, 0.0, 100.0))
+                if "slurred_voice_dysarthria" not in active_markers:
+                    active_markers.append("slurred_voice_dysarthria")
+                indicators.append(
+                    f"Acoustic dysarthria / slurred speech (voice score: {voice_score:.1f}%)"
+                )
+        else:
+            marker_scores["voice_intoxication"] = 0.0
 
         # Voluntary masking magnitude
         vol_keys = ["voluntary_eye_widening", "deliberate_blink_suppression", "compensatory_stare", "rigid_head_stabilization", "frontalis_compensation"]
@@ -790,6 +868,7 @@ class ImpairmentClassifier:
             starter_lockout=StarterLockout.LOCK if lockout_recommended else StarterLockout.ALLOW,
             throttle_state=ThrottleState.LIMITED if (lockout_recommended or classification in ("MILD_IMPAIRMENT", "HIGH_RISK_INTOXICATED")) else ThrottleState.NORMAL,
             reason=reason_str,
+            active_markers=list(active_markers),
         )
 
     @staticmethod

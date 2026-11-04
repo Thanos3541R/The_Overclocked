@@ -109,6 +109,15 @@ class PipelineConfig:
     continuous_vibration_duration_s: float = 0.5  # duration (s) to activate continuous vibration mode  # [PLACEHOLDER]
     max_freeze_duty_cycle: float = 0.25           # maximum freeze duty cycle over rolling 2.0s window  # [PLACEHOLDER]
 
+    # ── Voice Intoxication & Dysarthria Module ──
+    enable_voice_detection: bool = True
+    audio_sample_rate: int = 16000
+    audio_window_sec: float = 2.0
+    vocal_jitter_threshold_pct: float = 1.25
+    vocal_shimmer_threshold_pct: float = 4.20
+    vocal_hnr_min_db: float = 12.0
+    formant_f2_min_slope_hz_ms: float = 12.0
+
     # ── Output ──
     save_csv: bool = True
     csv_output_path: str = "output_features.csv"
@@ -133,3 +142,4 @@ class PipelineConfig:
 
 # Default configuration instance
 DEFAULT_CONFIG = PipelineConfig()
+DMSConfig = PipelineConfig

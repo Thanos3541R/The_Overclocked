@@ -191,6 +191,19 @@ def extract_video_features(video_path: str,
     calibrator = PersonalBaselineCalibrator(calibration_duration_sec=30.0, fps=fps)
     bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 
+    audio_extractor = None
+    if getattr(config, "enable_voice_detection", True):
+        try:
+            from pipeline.audio_extractor import AudioIntoxicationExtractor
+            audio_extractor = AudioIntoxicationExtractor(
+                sample_rate=getattr(config, "audio_sample_rate", 16000),
+                window_sec=getattr(config, "audio_window_sec", 2.0),
+                source_path=video_path if not is_cam else None,
+                enable_live_mic=is_cam,
+            )
+        except Exception:
+            audio_extractor = None
+
     frame_records: List[Dict[str, Any]] = []
     classifications: List[str] = []
     lockout_triggers = 0
@@ -291,6 +304,7 @@ def extract_video_features(video_path: str,
                     frame=frame,
                     image_landmarks=smooth_landmarks,
                     vibration_score=eff_vibration,
+                    audio_extractor=audio_extractor,
                 )
 
                 # Online Personal Baseline Auto-Calibration
@@ -313,6 +327,7 @@ def extract_video_features(video_path: str,
                     gating_reason='no_face',
                     frame=frame,
                     vibration_score=stabilizer.vibration_score,
+                    audio_extractor=audio_extractor,
                 )
 
             # 5. Temporal classification and anti-masking assessment
@@ -320,7 +335,7 @@ def extract_video_features(video_path: str,
             classifications.append(assessment.classification)
 
             # 6. Sequential Bayesian Evidence Accumulation (ISO 26262 ASIL-B/D)
-            b_state = bayesian_filter.update(assessment, timestamp)
+            b_state = bayesian_filter.update(assessment, timestamp, features=features)
 
             if assessment.lockout_recommended:
                 lockout_triggers += 1
@@ -397,6 +412,14 @@ def extract_video_features(video_path: str,
                 'bayesian_posterior': round(b_state.posterior_probability, 4),
                 'bayesian_sustained_s': round(b_state.sustained_high_confidence_s, 2),
                 'bayesian_lockout_confirmed': bool(b_state.lockout_confirmed),
+                # Voice Intoxication Biomarkers
+                'audio_valid': bool(getattr(features, 'audio_valid', False)),
+                'vocal_jitter_pct': round(getattr(features, 'vocal_jitter_pct', 0.0), 3),
+                'vocal_shimmer_pct': round(getattr(features, 'vocal_shimmer_pct', 0.0), 3),
+                'vocal_hnr_db': round(getattr(features, 'vocal_hnr_db', 0.0), 2),
+                'formant_f2_slope_hz_ms': round(getattr(features, 'formant_f2_slope_hz_ms', 0.0), 2),
+                'voice_impairment_score': round(getattr(features, 'voice_impairment_score', 0.0), 2),
+                'voice_slurred_detected': bool(getattr(features, 'voice_slurred_detected', False)),
             }
             frame_records.append(rec)
 
@@ -419,6 +442,11 @@ def extract_video_features(video_path: str,
         if 'detector' in locals() and hasattr(detector, "close"):
             try:
                 detector.close()
+            except Exception:
+                pass
+        if 'audio_extractor' in locals() and audio_extractor is not None:
+            try:
+                audio_extractor.close()
             except Exception:
                 pass
         if not headless:
@@ -516,6 +544,11 @@ def extract_video_features(video_path: str,
             'max_compensatory_stare_duration_s': round(max_stare_duration, 2),
             'rigid_head_stabilization_frames': rigid_head_frames,
             'frontalis_compensation_frames': frontalis_compensation_frames,
+        },
+        'voice_intoxication_biomarkers': {
+            'audio_valid_frames': sum(1 for r in valid_records if r.get('audio_valid')),
+            'slurred_speech_frames': sum(1 for r in valid_records if r.get('voice_slurred_detected', False)),
+            'mean_voice_impairment_score': round(float(np.mean([r['voice_impairment_score'] for r in valid_records if r.get('audio_valid')])), 1) if any(r.get('audio_valid') for r in valid_records) else 0.0,
         },
         'classification_breakdown': {
             'sober_frames': sober_count,

@@ -151,6 +151,15 @@ class FrameFeatures:
     speech_active: bool = False
     highway_fixation_exempt: bool = False
 
+    # ── Voice Intoxication Biomarkers (AV-VAD Gated) ──
+    audio_valid: bool = False
+    vocal_jitter_pct: float = 0.0
+    vocal_shimmer_pct: float = 0.0
+    vocal_hnr_db: float = 20.0
+    formant_f2_slope_hz_ms: float = 25.0
+    voice_impairment_score: float = 0.0
+    voice_slurred_detected: bool = False
+
 
 def _dist(p1: np.ndarray, p2: np.ndarray) -> float:
     """Euclidean distance between two points."""
@@ -363,6 +372,7 @@ class FeatureExtractor:
         self.sway_window_sec = sway_window_sec
         sway_buffer_size = int(self.sway_window_sec * fps)
         self._head_pose_history: Deque[Tuple[float, float, float]] = deque(maxlen=max(sway_buffer_size, 1))
+        self.audio_extractor: Optional[Any] = None
 
         # ── Facial Flushing State (Section A) ──
         self._smoothed_flushing: float = 1.0
@@ -1854,7 +1864,8 @@ class FeatureExtractor:
                 gating_reason: str = "",
                 frame: Optional[np.ndarray] = None,
                 image_landmarks: Optional[np.ndarray] = None,
-                vibration_score: float = 0.0) -> FrameFeatures:
+                vibration_score: float = 0.0,
+                audio_extractor: Optional[Any] = None) -> FrameFeatures:
         """Compute all features for a single frame.
 
         Args:
@@ -1949,6 +1960,13 @@ class FeatureExtractor:
                 features.sunglasses_occluded = self._last_features.sunglasses_occluded
                 features.speech_active = self._last_features.speech_active
                 features.highway_fixation_exempt = self._last_features.highway_fixation_exempt
+                features.audio_valid = self._last_features.audio_valid
+                features.vocal_jitter_pct = self._last_features.vocal_jitter_pct
+                features.vocal_shimmer_pct = self._last_features.vocal_shimmer_pct
+                features.vocal_hnr_db = self._last_features.vocal_hnr_db
+                features.formant_f2_slope_hz_ms = self._last_features.formant_f2_slope_hz_ms
+                features.voice_impairment_score = self._last_features.voice_impairment_score
+                features.voice_slurred_detected = self._last_features.voice_slurred_detected
                 return features
 
             if getattr(self, "_just_resumed_from_gate", False):
@@ -2305,6 +2323,18 @@ class FeatureExtractor:
             self._prev_head_roll = head_roll
             self._prev_head_timestamp = timestamp
             self._prev_timestamp = timestamp
+
+            # ── Audio-Visual Voice Intoxication Extraction ──
+            active_audio_ext = audio_extractor if audio_extractor is not None else self.audio_extractor
+            if active_audio_ext is not None:
+                audio_feats = active_audio_ext.update(timestamp, visual_speech_active=features.speech_active)
+                features.audio_valid = audio_feats.audio_valid
+                features.vocal_jitter_pct = audio_feats.vocal_jitter_pct
+                features.vocal_shimmer_pct = audio_feats.vocal_shimmer_pct
+                features.vocal_hnr_db = audio_feats.vocal_hnr_db
+                features.formant_f2_slope_hz_ms = audio_feats.formant_f2_slope_hz_ms
+                features.voice_impairment_score = audio_feats.voice_impairment_score
+                features.voice_slurred_detected = audio_feats.voice_slurred_detected
 
             self._last_features = features
             return features

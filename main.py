@@ -111,6 +111,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fast-capture", action="store_true",
         help="Fast camera capture mode (640x480 @ 60 FPS)")
+    parser.add_argument(
+        "--no-audio", action="store_true",
+        help="Disable audio extraction / microphone capture")
     return parser.parse_args()
 
 
@@ -275,6 +278,19 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
         max_freeze_duty_cycle=config.max_freeze_duty_cycle,
     )
     stabilizer = KinematicStabilizer()
+    audio_extractor = None
+    if getattr(config, "enable_voice_detection", True) and not getattr(args, "no_audio", False):
+        try:
+            from pipeline.audio_extractor import AudioIntoxicationExtractor
+            audio_extractor = AudioIntoxicationExtractor(
+                sample_rate=getattr(config, "audio_sample_rate", 16000),
+                window_sec=getattr(config, "audio_window_sec", 2.0),
+                source_path=source if isinstance(source, str) and os.path.isfile(source) else None,
+                enable_live_mic=not (isinstance(source, str) and os.path.isfile(source)),
+            )
+        except Exception as exc:
+            logger.warning("Failed to initialize AudioIntoxicationExtractor: %s", exc)
+            audio_extractor = None
     model_path = getattr(args, "model_path", None)
     if model_path is None:
         candidates = [
@@ -482,9 +498,10 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     gating_reason="no_face",
                     frame=frame,
                     vibration_score=stabilizer.vibration_score,
+                    audio_extractor=audio_extractor,
                 )
                 assessment = classifier.evaluate_temporal_stream(features)
-                bayesian_state = bayesian_filter.update(assessment, timestamp)
+                bayesian_state = bayesian_filter.update(assessment, timestamp, features=features)
                 if csv_logger is not None:
                     csv_logger.log(features, assessment=assessment, bayesian_state=bayesian_state)
 
@@ -597,6 +614,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 frame=frame,
                 image_landmarks=smooth_landmarks,
                 vibration_score=eff_vibration,
+                audio_extractor=audio_extractor,
             )
 
             # ── Online Personal Baseline Auto-Calibration ──
@@ -606,7 +624,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     calibrator.apply_to(extractor, classifier, pose_gate=pose_gate)
 
             assessment = classifier.evaluate_temporal_stream(features)
-            bayesian_state = bayesian_filter.update(assessment, timestamp)
+            bayesian_state = bayesian_filter.update(assessment, timestamp, features=features)
 
             # ── Output ──
             if csv_logger is not None:
@@ -701,7 +719,9 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 print(f"[DMS] CSV saved to: {csv_logger.filepath}")
             except Exception:
                 pass
-        # 3. Release camera & MediaPipe C++ graphs
+        # 3. Release camera & MediaPipe C++ graphs & audio extractor
+        if audio_extractor is not None:
+            audio_extractor.close()
         capture.release()
         detector.close()
 

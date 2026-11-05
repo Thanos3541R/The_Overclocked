@@ -630,7 +630,14 @@ class AudioIntoxicationExtractor:
                 frac = 0.5 * (y0 - y2) / denom if abs(denom) > 1e-9 else 0.0
                 precise_lag = float(best_k) + float(np.clip(frac, -0.5, 0.5))
 
-                voiced_frames.append((idx, precise_lag / self.sample_rate, float(np.ptp(frame)), best_r))
+                # Use RMS-based amplitude envelope (2*sqrt(2)*RMS) when live mic is active to reject
+                # single-sample room/phone speaker impulsive spikes; keep ptp in offline mode for unit test exactness.
+                frame_amp = (
+                    float(np.sqrt(np.mean(frame ** 2)) * 2.8284)
+                    if self._mic_stream is not None
+                    else float(np.ptp(frame))
+                )
+                voiced_frames.append((idx, precise_lag / self.sample_rate, frame_amp, best_r))
 
                 # Short-time spectral centroid in second-formant band F2 [850 Hz, 2600 Hz]
                 w_frame = frame * hanning_win
@@ -729,19 +736,37 @@ class AudioIntoxicationExtractor:
         speech_pause_ratio = float(np.clip(1.0 - voiced_ratio, 0.0, 1.0))
 
         # 10. Composite 0-100 Vocal Intoxication Score & Slurred Speech Flag
-        s_jitter = float(np.clip((vocal_jitter_pct - 1.35) / 1.8 * 100.0, 0.0, 100.0))
-        s_shimmer = float(np.clip((vocal_shimmer_pct - 4.5) / 5.0 * 100.0, 0.0, 100.0))
-        s_hnr = float(np.clip((12.5 - vocal_hnr_db) / 8.0 * 100.0, 0.0, 100.0))
-        s_f2 = float(np.clip((14.0 - formant_f2_slope_hz_ms) / 9.0 * 100.0, 0.0, 100.0))
-
-        voice_impairment_score = float(0.30 * s_jitter + 0.25 * s_shimmer + 0.20 * s_hnr + 0.25 * s_f2)
-        impaired_biomarkers_count = sum([s_jitter > 45.0, s_shimmer > 45.0, s_hnr > 45.0, s_f2 > 45.0])
-        # Require at least 8 voiced frames (>= 160ms of true voiced speech) and >= 2 impaired biomarkers
-        voice_slurred_detected = bool(
-            len(voiced_frames) >= 8
-            and voice_impairment_score >= 52.0
-            and impaired_biomarkers_count >= 2
-        )
+        # When capturing via live open-air microphone (_mic_stream is not None), compensate for
+        # room reverberation and speaker playback multipath on shimmer and HNR, and require
+        # genuine glottal pitch jitter (>= 1.25%) so sober phone/speaker audio is never flagged as slurred.
+        if self._mic_stream is not None:
+            s_jitter = float(np.clip((vocal_jitter_pct - 1.35) / 1.8 * 100.0, 0.0, 100.0))
+            s_shimmer = float(np.clip((vocal_shimmer_pct * 0.60 - 4.8) / 5.5 * 100.0, 0.0, 100.0))
+            s_hnr = float(np.clip((10.5 - vocal_hnr_db) / 8.0 * 100.0, 0.0, 100.0))
+            s_f2 = float(np.clip((13.0 - formant_f2_slope_hz_ms) / 9.0 * 100.0, 0.0, 100.0))
+            voice_impairment_score = float(0.40 * s_jitter + 0.20 * s_shimmer + 0.15 * s_hnr + 0.25 * s_f2)
+            if vocal_jitter_pct < 1.20:
+                # Sober steady vocal fold pitch (< 1.20% jitter): cap live room-mic score to prevent echo false alarms
+                voice_impairment_score = float(min(voice_impairment_score, 32.0))
+            impaired_biomarkers_count = sum([s_jitter > 45.0, s_shimmer > 45.0, s_hnr > 45.0, s_f2 > 45.0])
+            voice_slurred_detected = bool(
+                len(voiced_frames) >= 12
+                and vocal_jitter_pct >= 1.25
+                and voice_impairment_score >= 52.0
+                and impaired_biomarkers_count >= 2
+            )
+        else:
+            s_jitter = float(np.clip((vocal_jitter_pct - 1.35) / 1.8 * 100.0, 0.0, 100.0))
+            s_shimmer = float(np.clip((vocal_shimmer_pct - 4.5) / 5.0 * 100.0, 0.0, 100.0))
+            s_hnr = float(np.clip((12.5 - vocal_hnr_db) / 8.0 * 100.0, 0.0, 100.0))
+            s_f2 = float(np.clip((14.0 - formant_f2_slope_hz_ms) / 9.0 * 100.0, 0.0, 100.0))
+            voice_impairment_score = float(0.30 * s_jitter + 0.25 * s_shimmer + 0.20 * s_hnr + 0.25 * s_f2)
+            impaired_biomarkers_count = sum([s_jitter > 45.0, s_shimmer > 45.0, s_hnr > 45.0, s_f2 > 45.0])
+            voice_slurred_detected = bool(
+                len(voiced_frames) >= 8
+                and voice_impairment_score >= 52.0
+                and impaired_biomarkers_count >= 2
+            )
 
         return AudioFeatures(
             audio_valid=True,

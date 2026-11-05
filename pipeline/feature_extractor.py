@@ -882,6 +882,20 @@ class FeatureExtractor:
                     if inst_up > self._last_blink_opening_vel:
                         self._last_blink_opening_vel = float(min(inst_up, 6.0))
 
+            # If eyes have been wide open and alert for > 4.5s since last blink,
+            # gradually recover stale low-FPS sub-normal upstroke velocity toward 1.85 EAR/s
+            # so a single 15-FPS partial blink does not permanently lock sluggish_blink_detected.
+            if (
+                0.0 < self._last_blink_opening_vel < 1.80
+                and ear_avg >= max(0.27, self._open_ear_baseline * 0.88)
+                and self._last_blink_time > 0.0
+                and (timestamp - self._last_blink_time) > 4.5
+                and (self._stare_start_time is None or (timestamp - self._stare_start_time) < 3.0)
+            ):
+                self._last_blink_opening_vel = float(
+                    min(1.85, self._last_blink_opening_vel + 0.25 * dt)
+                )
+
             # Keep _last_blink_opening_vel strictly equal to the last completed blink's
             # measured upstroke velocity (no artificial +0.15*dt upward drift during open eyes).
             if (d_ear < -0.010 or d_inst < -0.010) and ear_avg < min(0.28, self._open_ear_baseline * 0.95):
@@ -942,8 +956,8 @@ class FeatureExtractor:
                     if self._opening_velocities:
                         self._last_blink_opening_vel = float(
                             np.max(self._opening_velocities))
-                    if dt >= 0.042 and ear_avg >= self._open_ear_baseline * 0.85:
-                        chord_up_vel = (ear_avg - self._min_closed_ear) / 0.085
+                    if dt >= 0.030 and ear_avg >= self._open_ear_baseline * 0.82:
+                        chord_up_vel = (ear_avg - self._min_closed_ear) / max(0.075, min(0.110, 1.6 * dt))
                         self._last_blink_opening_vel = max(self._last_blink_opening_vel, min(chord_up_vel, 2.6))
                 else:
                     self._blink_phase = "opening"
@@ -970,8 +984,8 @@ class FeatureExtractor:
                     self._last_blink_opening_vel = float(
                         np.max(self._opening_velocities))
 
-                if dt >= 0.042 and ear_avg >= self._open_ear_baseline * 0.85:
-                    chord_up_vel = (ear_avg - self._min_closed_ear) / 0.085
+                if dt >= 0.030 and ear_avg >= self._open_ear_baseline * 0.82:
+                    chord_up_vel = (ear_avg - self._min_closed_ear) / max(0.075, min(0.110, 1.6 * dt))
                     self._last_blink_opening_vel = max(self._last_blink_opening_vel, min(chord_up_vel, 2.6))
 
                 self._blink_phase = "open"
@@ -2334,15 +2348,17 @@ class FeatureExtractor:
             active_audio_ext = audio_extractor if audio_extractor is not None else self.audio_extractor
             if active_audio_ext is not None:
                 recent_mars = [m for _, m in list(self._mar_history)[-15:]]
-                # Require genuine dynamic lip articulation (cadence or clear mouth opening + variance),
-                # never triggering on static slightly-parted lips or sub-pixel landmark noise.
+                open_lip_frames = sum(1 for m in recent_mars if m > 0.12)
+                # Strict lip-sync gate: require confirmed speech_active cadence OR sustained multi-frame
+                # mouth articulation (never triggering on a closed mouth or a brief 1-2 frame jaw shift).
                 lip_moving_for_audio = bool(
                     features.speech_active
                     or (
-                        features.mar > 0.09
-                        and len(recent_mars) >= 6
-                        and float(np.std(recent_mars)) > 0.018
-                        and float(np.ptp(recent_mars)) > 0.050
+                        features.mar > 0.14
+                        and len(recent_mars) >= 8
+                        and open_lip_frames >= 5
+                        and float(np.std(recent_mars)) > 0.028
+                        and float(np.ptp(recent_mars)) > 0.065
                     )
                 )
                 audio_feats = active_audio_ext.update(timestamp, visual_speech_active=lip_moving_for_audio)

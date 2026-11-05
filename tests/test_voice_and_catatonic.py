@@ -342,3 +342,48 @@ def test_voice_remains_strictly_secondary_when_visually_sober():
     assert assessment.risk_score < 25.0
 
 
+def test_desktop_screen_stare_with_normal_gaze_dispersion_stays_sober():
+    """Verify staring at a desktop monitor (gaze_yaw_dispersion=0.055, ear_avg=0.32, perclos=0.04)
+    with a single low-FPS blink (0.70 EAR/s) does NOT false-lock into HIGH_RISK_INTOXICATED.
+    """
+    clf = ImpairmentClassifier()
+    for _ in range(60):
+        features = FrameFeatures(
+            face_valid=True,
+            ear_avg=0.32,
+            perclos=0.04,
+            compensatory_stare_active=True,
+            deliberate_blink_suppression=True,
+            stare_fixation_duration_s=9.5,
+            gaze_yaw_dispersion=0.055,
+            blink_opening_velocity=0.70,
+            speech_active=False,
+            head_postural_sway=0.50,
+            masking_divergence_score=60.0,
+            masking_detected=True,
+        )
+        assessment = clf.evaluate_temporal_stream(features)
+    assert assessment.classification == "SOBER", f"Expected SOBER on alert desktop stare, got {assessment.classification} (risk={assessment.risk_score}%)"
+    assert assessment.risk_score < 25.0
+
+
+def test_live_mic_sober_phone_audio_rejected_when_jitter_is_low():
+    """Verify live mic mode does not flag slurred speech when vocal jitter is sober (<1.2%),
+    even if room echo/phone speaker distorts shimmer and HNR.
+    """
+    extractor = AudioIntoxicationExtractor(sample_rate=16000, window_sec=1.0)
+    extractor._mic_stream = object()  # simulate active live mic stream
+    extractor.mic_active = True
+
+    sr = 16000
+    t = np.arange(sr) / sr
+    # Steady 130 Hz fundamental (sober jitter < 0.8%) but with amplitude modulation & room noise
+    env = 0.6 + 0.35 * np.sin(2 * np.pi * 8.0 * t)
+    pcm = env * (0.8 * np.sin(2 * np.pi * 130.0 * t) + 0.3 * np.sin(2 * np.pi * 260.0 * t))
+    pcm += np.random.normal(0, 0.08, len(pcm))
+
+    feat = extractor.analyze_pcm_window(pcm.astype(np.float32), visual_speech_active=True)
+    assert not feat.voice_slurred_detected, "Live mic must not flag sober low-jitter speech as slurred due to room/speaker shimmer"
+    assert feat.voice_impairment_score <= 35.0
+
+

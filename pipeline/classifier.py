@@ -424,14 +424,24 @@ class ImpairmentClassifier:
         sluggish_blink_detected = bool(
             0.0 < getattr(features, "blink_opening_velocity", 0.0) < 1.45
         )
-        # Catatonic stare requires EITHER a confirmed slow blink (0 < vel < 1.50) OR
-        # extreme pinpoint gaze freeze (0 < gaze_yaw_dispersion < 0.022 with stare >= 5.5s and low sway).
-        # Uninitialized blink_opening_velocity == 0.0 with normal desktop gaze dispersion (>= 0.025) MUST NOT trigger!
+        # Catatonic stare requires EITHER a confirmed slow blink paired with pinpoint gaze freeze
+        # (0 < gaze_yaw_dispersion < 0.028) OR extreme pinpoint gaze freeze (0 < gaze_yaw_dispersion < 0.022
+        # with stare >= 5.5s and low sway). Normal desktop screen viewing (gaze_yaw_dispersion >= 0.030
+        # with wide-open eyes EAR >= 0.28 and low PERCLOS < 0.08) MUST NOT trigger catatonic stupor!
         blink_vel_val = float(getattr(features, "blink_opening_velocity", 0.0))
         gaze_disp_val = float(getattr(features, "gaze_yaw_dispersion", 1.0))
         stare_dur_val = float(getattr(features, "stare_fixation_duration_s", 0.0))
+        is_alert_desktop_gaze = bool(
+            features.ear_avg >= 0.28
+            and features.perclos < 0.08
+            and gaze_disp_val >= 0.028
+            and not features.gen_detected
+            and not features.lack_of_convergence
+            and not features.microsleep_detected
+        )
         catatonic_stare_detected = bool(
-            (getattr(features, "compensatory_stare_active", False) or getattr(features, "deliberate_blink_suppression", False))
+            not is_alert_desktop_gaze
+            and (getattr(features, "compensatory_stare_active", False) or getattr(features, "deliberate_blink_suppression", False))
             and (
                 (0.0 < blink_vel_val < 1.50 and (stare_dur_val >= 3.5 or (0.0 < gaze_disp_val < 0.028)))
                 or (
@@ -756,7 +766,10 @@ class ImpairmentClassifier:
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
         # ── Confirmed Anti-Masking & Catatonic Stupor Evaluation ──
-        has_sluggish_blink = bool(0.0 < features.blink_opening_velocity < 1.35)
+        has_sluggish_blink = bool(
+            0.0 < features.blink_opening_velocity < 1.35
+            and not (features.ear_avg >= 0.29 and features.perclos < 0.07 and gaze_disp_val >= 0.035)
+        )
         confirmed_anti_masking = bool(
             (features.masking_detected or features.masking_divergence_score >= 40.0)
             and (has_sluggish_blink or features.perclos >= 0.25)
@@ -769,14 +782,14 @@ class ImpairmentClassifier:
         )
         bypass_open_eye_cap = bool(
             catatonic_stare_detected
-            or sluggish_blink_detected
-            or getattr(features, "masking_detected", False)
+            or has_sluggish_blink
+            or (getattr(features, "masking_detected", False) and not is_alert_desktop_gaze)
             or catatonic_stupor_score >= 35.0
             or confirmed_anti_masking
             or high_ml_with_masking
             or features.gen_detected
             or features.lack_of_convergence
-            or not sober_attentive_guard
+            or (not sober_attentive_guard and not is_alert_desktop_gaze)
         )
 
         heuristic_risk = inv_risk

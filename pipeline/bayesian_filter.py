@@ -61,6 +61,7 @@ class BayesianEvidenceAccumulator:
 
         # High-water / sustained timing tracking
         self._sustained_time_s: float = 0.0
+        self._sober_recovery_time_s: float = 0.0
         self._last_timestamp: Optional[float] = None
         self._lockout_armed: bool = False
 
@@ -68,6 +69,7 @@ class BayesianEvidenceAccumulator:
         """Reset filter back to baseline prior."""
         self.log_odds = self.initial_log_odds
         self._sustained_time_s = 0.0
+        self._sober_recovery_time_s = 0.0
         self._last_timestamp = None
         self._lockout_armed = False
 
@@ -156,6 +158,9 @@ class BayesianEvidenceAccumulator:
         elif inv_risk >= 30.0:
             evidence_rate = 0.2 + (inv_risk - 30.0) / 20.0 * 0.6  # +0.2 to +0.8 / s
             delta_l = evidence_rate * dt
+        elif inv_risk < 12.0 and getattr(assessment, "classification", "SOBER") == "SOBER":
+            # Crisp alert sober physiology: faster recovery decay so transient spikes clear promptly
+            delta_l = -max(self.decay_rate_per_sec, 1.25) * dt
         else:
             # Sober observation: evidence decays toward initial log odds
             delta_l = -self.decay_rate_per_sec * dt

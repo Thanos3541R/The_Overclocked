@@ -167,9 +167,9 @@ class BayesianEvidenceAccumulator:
         voice_score = float(getattr(feat_obj, "voice_impairment_score", marker_scores.get("voice_intoxication", 0.0)))
 
         # Acoustic log-odds boost: accelerates evidence accumulation alongside visual signs
-        # without ever being able to lock out a visually sober driver on its own (inv_risk < 20.0)
-        if audio_valid and voice_slurred and inv_risk >= 20.0:
-            delta_l += 0.35 * (voice_score / 100.0)
+        # without ever being able to lock out a visually sober driver on its own (inv_risk < 25.0)
+        if audio_valid and voice_slurred and inv_risk >= 25.0:
+            delta_l += 0.35 * (voice_score / 100.0) * dt
 
         return delta_l
 

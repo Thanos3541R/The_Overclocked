@@ -71,8 +71,8 @@ def test_sober_vs_slurred_intoxicated_voice_dsp():
     cycles = []
     amp = 0.8
     while t_accum < duration:
-        period = (1.0 / 130.0) * (1.0 + np.random.uniform(-0.08, 0.08))  # cycle-to-cycle jitter
-        amp = np.clip(amp + np.random.uniform(-0.25, 0.25), 0.3, 1.0)     # shimmer
+        period = (1.0 / 130.0) * (1.0 + np.random.uniform(-0.15, 0.15))  # cycle-to-cycle jitter
+        amp = np.clip(amp + np.random.uniform(-0.35, 0.35), 0.25, 1.0)     # shimmer
         n_samples = max(2, int(period * sr))
         t_c = np.linspace(0, 2 * np.pi, n_samples, endpoint=False)
         # Vocal tract impulse response with flat F2 resonance around 1400 Hz
@@ -81,7 +81,7 @@ def test_sober_vs_slurred_intoxicated_voice_dsp():
         t_accum += len(cycles[-1]) / sr
 
     pcm_intox = np.concatenate(cycles)[: int(sr * duration)]
-    pcm_intox += np.random.normal(0, 0.12, len(pcm_intox))  # additive breath noise
+    pcm_intox += np.random.normal(0, 0.20, len(pcm_intox))  # additive breath noise
     pcm_intox = pcm_intox / np.max(np.abs(pcm_intox))
 
     impaired_feat = extractor.analyze_pcm_window(pcm_intox, visual_speech_active=True)
@@ -242,7 +242,7 @@ def test_quiet_short_phrase_detection():
 
 
 def test_live_mic_speech_hold_hysteresis():
-    """Verify 1.5s speech hold smoothly maintains valid voice features across pauses in live mic mode."""
+    """Verify 0.6s speech hold smoothly maintains valid voice features across pauses in live mic mode while mouth is active."""
     extractor = AudioIntoxicationExtractor(sample_rate=16000, window_sec=2.0)
     # Mock live stream object to enable live hold mode
     extractor._mic_stream = object()
@@ -257,17 +257,88 @@ def test_live_mic_speech_hold_hysteresis():
     res0 = extractor.update(timestamp=1.0, visual_speech_active=True)
     assert res0.audio_valid is True, "Spoken word must be audio_valid"
 
-    # Frame 1: Speaker pauses for 0.4s (within 1.5s hold)
+    # Frame 1: Speaker pauses for 0.4s (within 0.6s hold, mouth still active)
     with extractor._lock:
         extractor._pcm_buffer.clear()
         extractor._pcm_buffer.extend(np.zeros(int(0.30 * sr), dtype=np.float32).tolist())
     extractor._last_dsp_timestamp = -1.0
-    res1 = extractor.update(timestamp=1.4, visual_speech_active=False)
+    res1 = extractor.update(timestamp=1.4, visual_speech_active=True)
     assert res1.audio_valid is True, "Hold hysteresis must keep voice valid during 0.4s inter-syllable pause"
 
-    # Frame 2: Speaker silent past 1.5s (timestamp=3.1s, dt=2.1s > 1.5s)
+    # Frame 2: Speaker silent past 0.6s (timestamp=3.1s, dt=2.1s > 0.6s)
     extractor._last_dsp_timestamp = -1.0
     res2 = extractor.update(timestamp=3.1, visual_speech_active=False)
-    assert res2.audio_valid is False, "Hold hysteresis must expire after 1.5s of silence"
+    assert res2.audio_valid is False, "Hold hysteresis must expire after 0.6s of silence"
+
+
+def test_ambient_noise_and_sober_hello_never_trigger_slurred():
+    """Verify quiet room noise (RMS ~ 0.0015) and a brief sober 'hello' never trigger slurred speech."""
+    extractor = AudioIntoxicationExtractor(sample_rate=16000, window_sec=2.0)
+    extractor._mic_stream = object()
+    extractor.mic_active = True
+
+    sr = 16000
+    # 1. Quiet ambient room noise (RMS ~ 0.0015)
+    np.random.seed(7)
+    quiet_noise = np.random.normal(0, 0.0015, sr * 2).astype(np.float32)
+    res_noise = extractor.analyze_pcm_window(quiet_noise, visual_speech_active=True)
+    assert res_noise.audio_valid is False
+    assert res_noise.voice_impairment_score == 0.0
+    assert res_noise.voice_slurred_detected is False
+
+    # 2. Short 0.4s sober "hello" pitch glide (135 Hz -> 145 Hz) in 2.0s buffer
+    pcm_hello = np.zeros(sr * 2, dtype=np.float32)
+    t_h = np.arange(int(0.40 * sr)) / sr
+    f0_glide = np.linspace(135.0, 145.0, len(t_h))
+    phase = 2 * np.pi * np.cumsum(f0_glide) / sr
+    hello_wave = 0.08 * (np.sin(phase) + 0.5 * np.sin(2 * phase) + 0.25 * np.sin(3 * phase))
+    pcm_hello[int(0.5 * sr) : int(0.9 * sr)] = hello_wave.astype(np.float32)
+
+    res_hello = extractor.analyze_pcm_window(pcm_hello, visual_speech_active=True)
+    assert res_hello.audio_valid is True
+    assert res_hello.voice_impairment_score < 25.0, f"Sober hello scored {res_hello.voice_impairment_score:.1f}%"
+    assert res_hello.voice_slurred_detected is False
+
+
+def test_uninitialized_blink_velocity_does_not_trigger_catatonic_stare():
+    """Verify a user staring at the desktop screen before their first blink (blink_opening_velocity=0.0)
+    with normal gaze_yaw_dispersion (0.047) stays SOBER and does not trigger catatonic_stare_detected.
+    """
+    clf = ImpairmentClassifier()
+    features = FrameFeatures(
+        face_valid=True,
+        ear_avg=0.35,
+        perclos=0.0,
+        blink_opening_velocity=0.0,
+        gaze_yaw_dispersion=0.047,
+        stare_fixation_duration_s=9.2,
+        compensatory_stare_active=True,
+        deliberate_blink_suppression=True,
+        head_postural_sway=1.4,
+        speech_active=False,
+    )
+    assessment = clf.evaluate_temporal_stream(features)
+    assert "catatonic_stare_stupor" not in assessment.active_markers
+    assert assessment.classification == "SOBER", f"Expected SOBER, got {assessment.classification} (risk={assessment.risk_score})"
+    assert assessment.risk_score <= 22.0
+
+
+def test_voice_remains_strictly_secondary_when_visually_sober():
+    """Verify even 100% slurred voice cannot flip a visually sober user (inv_risk < 22%) to intoxicated."""
+    clf = ImpairmentClassifier()
+    features = FrameFeatures(
+        face_valid=True,
+        ear_avg=0.33,
+        perclos=0.02,
+        blink_opening_velocity=2.4,
+        gaze_yaw_dispersion=0.05,
+        speech_active=True,
+        audio_valid=True,
+        voice_impairment_score=100.0,
+        voice_slurred_detected=True,
+    )
+    assessment = clf.evaluate_temporal_stream(features)
+    assert assessment.classification == "SOBER", f"Voice alone must not override sober visual state, got {assessment.classification}"
+    assert assessment.risk_score < 25.0
 
 

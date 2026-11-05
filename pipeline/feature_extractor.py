@@ -2334,10 +2334,16 @@ class FeatureExtractor:
             active_audio_ext = audio_extractor if audio_extractor is not None else self.audio_extractor
             if active_audio_ext is not None:
                 recent_mars = [m for _, m in list(self._mar_history)[-15:]]
+                # Require genuine dynamic lip articulation (cadence or clear mouth opening + variance),
+                # never triggering on static slightly-parted lips or sub-pixel landmark noise.
                 lip_moving_for_audio = bool(
                     features.speech_active
-                    or features.mar > 0.045
-                    or (len(recent_mars) >= 5 and float(np.std(recent_mars)) > 0.006)
+                    or (
+                        features.mar > 0.09
+                        and len(recent_mars) >= 6
+                        and float(np.std(recent_mars)) > 0.018
+                        and float(np.ptp(recent_mars)) > 0.050
+                    )
                 )
                 audio_feats = active_audio_ext.update(timestamp, visual_speech_active=lip_moving_for_audio)
                 features.audio_valid = audio_feats.audio_valid

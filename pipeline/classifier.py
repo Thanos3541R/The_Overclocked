@@ -421,16 +421,26 @@ class ImpairmentClassifier:
         indicators = []
         active_markers: List[str] = []
 
+        sluggish_blink_detected = bool(
+            0.0 < getattr(features, "blink_opening_velocity", 0.0) < 1.45
+        )
+        # Catatonic stare requires EITHER a confirmed slow blink (0 < vel < 1.50) OR
+        # extreme pinpoint gaze freeze (0 < gaze_yaw_dispersion < 0.022 with stare >= 5.5s and low sway).
+        # Uninitialized blink_opening_velocity == 0.0 with normal desktop gaze dispersion (>= 0.025) MUST NOT trigger!
+        blink_vel_val = float(getattr(features, "blink_opening_velocity", 0.0))
+        gaze_disp_val = float(getattr(features, "gaze_yaw_dispersion", 1.0))
+        stare_dur_val = float(getattr(features, "stare_fixation_duration_s", 0.0))
         catatonic_stare_detected = bool(
             (getattr(features, "compensatory_stare_active", False) or getattr(features, "deliberate_blink_suppression", False))
             and (
-                getattr(features, "stare_fixation_duration_s", 0.0) >= 3.5
-                or (0.0 < getattr(features, "gaze_yaw_dispersion", 1.0) < 0.028)
+                (0.0 < blink_vel_val < 1.50 and (stare_dur_val >= 3.5 or (0.0 < gaze_disp_val < 0.028)))
+                or (
+                    blink_vel_val == 0.0
+                    and stare_dur_val >= 5.5
+                    and (0.0 < gaze_disp_val < 0.022)
+                    and float(getattr(features, "head_postural_sway", 0.0)) < 0.35
+                )
             )
-            and getattr(features, "blink_opening_velocity", 0.0) < 1.50
-        )
-        sluggish_blink_detected = bool(
-            0.0 < getattr(features, "blink_opening_velocity", 0.0) < 1.45
         )
 
         if getattr(features, "gen_detected", False):
@@ -808,15 +818,20 @@ class ImpairmentClassifier:
             if open_eye_desktop_guard:
                 inv_risk = min(inv_risk, 22.0)
 
-        # ── Secondary Voice Corroboration (AV-VAD Gated) ──
+        # ── Secondary Voice Corroboration (AV-VAD Gated & Visually Anchored) ──
         if getattr(features, "audio_valid", False):
             voice_score = float(getattr(features, "voice_impairment_score", 0.0))
             marker_scores["voice_intoxication"] = round(voice_score, 1)
             if getattr(features, "voice_slurred_detected", False):
-                voice_boost = float(min(15.0, 0.20 * voice_score))
-                inv_risk = float(np.clip(inv_risk + voice_boost, 0.0, 100.0))
                 if "slurred_voice_dysarthria" not in active_markers:
                     active_markers.append("slurred_voice_dysarthria")
+                # Strictly secondary: only boost inv_risk if primary visual impairment evidence is already >= 22.0%
+                if inv_risk >= 40.0:
+                    voice_boost = float(min(15.0, 0.20 * voice_score))
+                    inv_risk = float(np.clip(inv_risk + voice_boost, 0.0, 100.0))
+                elif inv_risk >= 22.0:
+                    voice_boost = float(min(10.0, 0.12 * voice_score))
+                    inv_risk = float(np.clip(inv_risk + voice_boost, 0.0, 100.0))
                 indicators.append(
                     f"Acoustic dysarthria / slurred speech (voice score: {voice_score:.1f}%)"
                 )

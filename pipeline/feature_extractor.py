@@ -22,7 +22,7 @@ import threading
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, List, Optional, Tuple
+from typing import Any, Deque, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

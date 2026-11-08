@@ -176,7 +176,7 @@ class AudioIntoxicationExtractor:
         try:
             try:
                 import sounddevice as sd  # type: ignore
-            except ImportError:
+            except (ImportError, OSError):
                 sd = None
 
             if sd is None:

@@ -104,7 +104,7 @@ def infer_subject_id(
     else:
         should_split = bool(split_compilations)
 
-    if should_split and part_num is not None and (part_num // 6) > 0:
+    if should_split and part_num is not None and (part_num // 6) > 0 and "person" not in sub_id:
         sub_id = f"{sub_id}_grp{part_num // 6:02d}"
 
     return sub_id

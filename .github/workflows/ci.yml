@@ -27,7 +27,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1 libegl1 libgles2 libgl1-mesa-dri libglib2.0-0 libsm6 libxext6 libxrender-dev ffmpeg
+          sudo apt-get install -y libgl1 libegl1 libgles2 libgl1-mesa-dri libglib2.0-0 libsm6 libxext6 libxrender-dev ffmpeg libportaudio2 portaudio19-dev libasound2
 
       - name: Install dependencies
         run: |
@@ -40,6 +40,7 @@ jobs:
         env:
           PYTHONPATH: .
           QT_QPA_PLATFORM: offscreen
+          SDL_AUDIODRIVER: dummy
         run: |
           set -o pipefail
           python -m pytest tests/ -v --tb=short 2>&1 | tee pytest_output.log

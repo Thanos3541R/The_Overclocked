@@ -14,7 +14,7 @@ Key Functional Principles:
      (99.9% certainty) is sustained continuously for >= 15.0 seconds.
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 import numpy as np
 
 from pipeline.classifier import ImpairmentAssessment

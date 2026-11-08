@@ -432,9 +432,9 @@ class ImpairmentClassifier:
         gaze_disp_val = float(getattr(features, "gaze_yaw_dispersion", 1.0))
         stare_dur_val = float(getattr(features, "stare_fixation_duration_s", 0.0))
         is_alert_desktop_gaze = bool(
-            features.ear_avg >= 0.28
-            and features.perclos < 0.08
-            and gaze_disp_val >= 0.028
+            features.ear_avg >= 0.26
+            and features.perclos < 0.10
+            and gaze_disp_val >= 0.024
             and not features.gen_detected
             and not features.lack_of_convergence
             and not features.microsleep_detected
@@ -678,10 +678,13 @@ class ImpairmentClassifier:
         )
         catatonic_stupor_score = 0.0
         if (
-            features.deliberate_blink_suppression
+            not is_alert_desktop_gaze
+            and features.deliberate_blink_suppression
             and neuro_flutter
+            and (features.blink_opening_velocity == 0.0 or features.blink_opening_velocity < 1.45)
+            and gaze_disp_val < 0.025
             and not getattr(features, "highway_fixation_exempt", False)
-            and (slack_jaw_stupor or features.stare_fixation_duration_s >= 4.5 or features.compensatory_stare_active)
+            and (slack_jaw_stupor or features.stare_fixation_duration_s >= 5.5 or features.compensatory_stare_active)
         ):
             catatonic_stupor_score = 42.0
             if slack_jaw_stupor and features.head_postural_sway >= 0.60:
@@ -768,11 +771,17 @@ class ImpairmentClassifier:
         # ── Confirmed Anti-Masking & Catatonic Stupor Evaluation ──
         has_sluggish_blink = bool(
             0.0 < features.blink_opening_velocity < 1.35
-            and not (features.ear_avg >= 0.29 and features.perclos < 0.07 and gaze_disp_val >= 0.035)
+            and not is_alert_desktop_gaze
         )
         confirmed_anti_masking = bool(
-            (features.masking_detected or features.masking_divergence_score >= 40.0)
-            and (has_sluggish_blink or features.perclos >= 0.25)
+            not is_alert_desktop_gaze
+            and (features.masking_detected or features.masking_divergence_score >= 50.0)
+            and (
+                (0.0 < features.blink_opening_velocity < 1.25 and features.ear_avg < 0.27)
+                or features.perclos >= 0.18
+                or features.gen_detected
+                or features.lack_of_convergence
+            )
         )
         ml_prob = self._predict_ml_probability(features)
         high_ml_with_masking = bool(
@@ -862,7 +871,7 @@ class ImpairmentClassifier:
             classification = "HIGH_RISK_INTOXICATED"
             lockout_recommended = True
             total_risk = inv_risk
-        elif features.masking_detected and inv_risk >= 40.0:
+        elif features.masking_detected and inv_risk >= 40.0 and not is_alert_desktop_gaze:
             classification = "HIGH_RISK_INTOXICATED"
             lockout_recommended = True
             total_risk = max(inv_risk, masking_divergence)

@@ -23,6 +23,7 @@ except ImportError:
 
 import numpy as np
 import scipy.signal
+from scipy.signal import butter, filtfilt
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,13 @@ class AudioFeatures:
     voice_slurred_detected: bool = False      # True when >= 2 vocal biomarkers cross impairment thresholds
     mic_active: bool = False                  # True when live mic stream or audio track is open
     audio_rms: float = 0.0                    # Current active window RMS level
+    mic_rms_level: float = 0.0                # Current active window RMS level (alias)
+
+    def __post_init__(self):
+        if self.mic_rms_level > 0.0 and self.audio_rms == 0.0:
+            self.audio_rms = self.mic_rms_level
+        elif self.audio_rms > 0.0 and self.mic_rms_level == 0.0:
+            self.mic_rms_level = self.audio_rms
 
 
 class AudioIntoxicationExtractor:
@@ -73,9 +81,24 @@ class AudioIntoxicationExtractor:
         self._candidate_devices: List[int] = []
         self._current_device_index: Optional[int] = None
         self._silent_check_start: float = -1.0
-        self._noise_floor_rms: float = 0.0005
+        self._noise_floor_rms: float = 0.0015
         self._last_valid_features: Optional[AudioFeatures] = None
         self._last_valid_timestamp: float = -999.0
+
+        self._frame_len = int(0.032 * self.sample_rate)  # 512 samples at 16kHz
+        self._hop_len = int(0.016 * self.sample_rate)    # 256 samples (16ms hop for finer F2 slope & pitch tracking)
+        self._hann_win = np.hanning(self._frame_len).astype(np.float64)
+        self._rfft_freqs = np.fft.rfftfreq(self._frame_len, d=1.0 / self.sample_rate)
+        self._f2_mask = (self._rfft_freqs >= 850.0) & (self._rfft_freqs <= 2500.0)
+        self._f1_mask = (self._rfft_freqs >= 300.0) & (self._rfft_freqs <= 800.0)
+        try:
+            low = 75.0 / (0.5 * self.sample_rate)
+            high = min(0.95, 4000.0 / (0.5 * self.sample_rate))
+            self._bp_b, self._bp_a = butter(4, [low, high], btype="band")
+        except Exception:
+            self._bp_b, self._bp_a = None, None
+        # EMA smoothing state for live mic stability
+        self._ema_score: Optional[float] = None
 
         self._buffer_len = int(self.sample_rate * self.window_sec)
         self._pcm_buffer: collections.deque = collections.deque(maxlen=self._buffer_len)
@@ -363,6 +386,8 @@ class AudioIntoxicationExtractor:
             self._last_valid_features = None
             self._last_valid_timestamp = -999.0
             self._silent_check_start = -1.0
+            self._ema_score = None
+            self._noise_floor_rms = 0.0015
 
     def push_pcm_chunk(self, pcm_samples: np.ndarray) -> None:
         """Push raw 16 kHz PCM chunk into internal thread-safe ring buffer."""
@@ -527,290 +552,308 @@ class AudioIntoxicationExtractor:
     def analyze_pcm_window(
         self,
         pcm: np.ndarray,
-        visual_speech_active: bool,
+        visual_speech_active: bool = True,
         timestamp: float = 0.0,
     ) -> AudioFeatures:
-        """Pure NumPy / SciPy DSP acoustic analysis engine on a PCM chunk.
+        """Run vectorized time-frequency DSP on a PCM window to extract vocal intoxication biomarkers."""
+        mic_is_live = self.mic_active or (self._audio_track is not None)
+        if pcm is None or len(pcm) < int(self.sample_rate * 0.15):
+            return AudioFeatures(mic_active=mic_is_live)
 
-        Args:
-            pcm: 1D array of audio samples normalized to [-1.0, 1.0].
-            visual_speech_active: Camera mouth cadence activity flag.
-            timestamp: Current audio window timestamp in seconds.
+        pcm = np.asarray(pcm, dtype=np.float64)
+        if pcm.ndim > 1:
+            pcm = np.mean(pcm, axis=1)
+        pcm = pcm - float(np.mean(pcm))
+        raw_rms = float(np.sqrt(np.mean(pcm ** 2)))
 
-        Returns:
-            AudioFeatures dataclass.
-        """
-        arr = self._to_mono_float32(pcm)
-        if len(arr) < int(0.15 * self.sample_rate):
-            return self._empty_or_held()
+        # Adaptive room noise floor tracking on quiet segments
+        if raw_rms < 0.008:
+            self._noise_floor_rms = 0.90 * self._noise_floor_rms + 0.10 * raw_rms
 
-        # 1. Vectorized DC offset removal & Bandpass filter first to reject low-freq pops (< 75 Hz)
-        arr = arr - float(np.mean(arr))
-        high_cutoff = min(4000.0, self.sample_rate * 0.48)
-        b, a = scipy.signal.butter(4, [75.0, high_cutoff], btype="bandpass", fs=self.sample_rate)
-        filtered_raw = scipy.signal.lfilter(b, a, arr)
+        if raw_rms < 0.0012:
+            return AudioFeatures(
+                audio_valid=False,
+                voice_vad_active=False,
+                av_speech_gated=False,
+                mic_active=mic_is_live,
+                mic_rms_level=raw_rms,
+                audio_rms=raw_rms,
+            )
 
-        # 2. Automatic Gain Normalization (quiet signals only, using bandpass filtered peak)
-        peak_95 = float(np.percentile(np.abs(filtered_raw), 95))
-        if 1e-5 < peak_95 < 0.10:
-            scale = min(15.0, 0.25 / peak_95)
-            pcm_proc = np.clip(arr * scale, -1.0, 1.0)
-            filtered = np.clip(filtered_raw * scale, -1.0, 1.0)
+        # Bandpass filter 75 Hz - 4000 Hz using pre-computed Butterworth coefficients
+        if self._bp_b is not None and self._bp_a is not None:
+            try:
+                filtered = filtfilt(self._bp_b, self._bp_a, pcm)
+            except Exception:
+                filtered = pcm.copy()
         else:
-            pcm_proc = arr
-            filtered = filtered_raw
+            filtered = pcm.copy()
 
-        frame_len = int(0.040 * self.sample_rate)  # 40 ms (640 samples @ 16kHz)
-        hop_len = int(0.020 * self.sample_rate)    # 20 ms (320 samples @ 16kHz)
-        total_frames = max(1, (len(filtered) - frame_len) // hop_len + 1)
+        # Soft Automatic Gain Normalization for quiet laptop mics (< 0.08 peak)
+        peak_95 = float(np.percentile(np.abs(filtered), 95))
+        if 1e-5 < peak_95 < 0.08:
+            gain = min(15.0, 0.12 / peak_95)
+            filtered = np.clip(filtered * gain, -1.0, 1.0)
 
-        # Vectorized strided frame slicing for fast RMS calculation on filtered speech frames
-        indices = np.arange(frame_len)[None, :] + (np.arange(total_frames) * hop_len)[:, None]
-        indices = np.clip(indices, 0, len(filtered) - 1)
-        frames_filt = filtered[indices]
-        frame_rms_arr = np.sqrt(np.mean(frames_filt ** 2, axis=1))
+        frame_len = self._frame_len
+        hop_len = self._hop_len
+        n_frames = 1 + (len(filtered) - frame_len) // hop_len
+        if n_frames < 5:
+            return AudioFeatures(mic_active=mic_is_live, mic_rms_level=raw_rms, audio_rms=raw_rms)
 
-        ref_frame_rms = float(np.percentile(frame_rms_arr, 85)) if total_frames > 0 else 0.0
-        active_rms = ref_frame_rms
-        raw_rms = float(np.sqrt(np.mean(filtered ** 2)))
+        # Vectorized 2D frame slicing: shape (n_frames, frame_len)
+        strides = (filtered.strides[0] * hop_len, filtered.strides[0])
+        frames = np.lib.stride_tricks.as_strided(
+            filtered, shape=(n_frames, frame_len), strides=strides
+        ).copy()
 
-        if not visual_speech_active:
-            self._noise_floor_rms = float(0.95 * self._noise_floor_rms + 0.05 * raw_rms)
+        frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
+        frame_peaks = np.percentile(np.abs(frames), 95, axis=1)
 
-        if self._mic_stream is not None:
-            # Live mic requires real close-talk speech energy above ambient fan/room noise floor
-            min_active_rms = max(0.0060, min(0.0250, self._noise_floor_rms * 3.5))
-            if active_rms < min_active_rms:
-                return self._empty_or_held(rms=active_rms)
-        else:
-            if float(np.max(frame_rms_arr)) < 0.002 or (active_rms < 0.0025 and raw_rms < 0.0015):
-                return self._empty_or_held(rms=active_rms)
+        ref_frame_rms = float(np.percentile(frame_rms, 85))
+        if float(np.max(frame_rms)) < 0.002:
+            return AudioFeatures(
+                audio_valid=False,
+                voice_vad_active=False,
+                av_speech_gated=False,
+                mic_active=mic_is_live,
+                mic_rms_level=raw_rms,
+                audio_rms=raw_rms,
+            )
 
-        # 4. Active-Segment Voiced Pitch Detection (Vectorized FFT Autocorrelation)
-        min_lag = max(1, int(self.sample_rate / 320.0))  # ~320 Hz (50 samples)
-        max_lag = min(frame_len - 2, int(self.sample_rate / 80.0))  # ~80 Hz (200 samples)
+        # Gate out room noise tail frames
+        active_thresh = max(0.0020, 0.32 * ref_frame_rms)
+        active_mask = frame_rms >= active_thresh
+        n_active = int(np.sum(active_mask))
+        if n_active < 3:
+            return AudioFeatures(
+                audio_valid=False,
+                voice_vad_active=False,
+                av_speech_gated=False,
+                mic_active=mic_is_live,
+                mic_rms_level=raw_rms,
+                audio_rms=raw_rms,
+            )
 
-        active_thresh = max(0.0018, 0.30 * ref_frame_rms)
+        # Batch Hann windowing + Batch RFFT for spectrum & Wiener-Khinchin autocorrelation
+        win_frames = frames * self._hann_win[None, :]
+        spec = np.fft.rfft(win_frames, axis=1)
+        mag = np.abs(spec)
 
-        voiced_frames: List[Tuple[int, float, float, float]] = []  # (frame_idx, period_s, amp, r_peak)
-        f2_centroids: List[Tuple[int, float]] = []
+        # Wiener-Khinchin zero-padded autocorrelation to avoid circular wrap-around
+        fft_pow = np.abs(np.fft.rfft(win_frames, n=2 * frame_len, axis=1)) ** 2
+        acorr_full = np.fft.irfft(fft_pow, n=2 * frame_len, axis=1)[:, :frame_len]
+        r0 = acorr_full[:, 0]
+        valid_r0 = r0 > 1e-9
+        acorr_norm = np.zeros_like(acorr_full)
+        acorr_norm[valid_r0] = acorr_full[valid_r0] / r0[valid_r0, None]
 
-        hanning_win = np.hanning(frame_len)
-        rfft_freqs = np.fft.rfftfreq(frame_len, d=1.0 / self.sample_rate)
-        f2_mask = (rfft_freqs >= 850.0) & (rfft_freqs <= 2600.0)
-        f2_subfreqs = rfft_freqs[f2_mask]
+        # Pitch F0 search range: 80 Hz to 320 Hz
+        min_lag = int(self.sample_rate / 320.0)  # 50 samples
+        max_lag = min(frame_len - 2, int(self.sample_rate / 80.0))  # 200 samples
+        voicing_min = 0.25 if self._stream is not None else 0.30
 
-        n_active_frames = 0
-        for idx in range(total_frames):
-            if frame_rms_arr[idx] < active_thresh:
+        voiced_indices = []
+        voiced_periods = []
+        voiced_amps = []
+        voiced_autocorrs = []
+        f2_centroids = []
+
+        f2_freqs = self._rfft_freqs[self._f2_mask]
+
+        for idx in np.where(active_mask)[0]:
+            r = acorr_norm[idx]
+            search_region = r[min_lag:max_lag]
+            if len(search_region) == 0:
                 continue
-            n_active_frames += 1
+            rel_idx = int(np.argmax(search_region))
+            best_lag = min_lag + rel_idx
+            best_val = float(r[best_lag])
 
-            st = idx * hop_len
-            frame = filtered[st : st + frame_len]
-            N = len(frame)
-
-            # Fast normalized autocorrelation over [min_lag - 1, max_lag + 1]
-            energy_0 = float(np.dot(frame, frame))
-            if energy_0 < 1e-8:
-                continue
-
-            # FFT-based autocorrelation + cumulative energy normalization
-            n_fft = 1 << (2 * N - 1).bit_length()
-            F = np.fft.rfft(frame, n=n_fft)
-            acf = np.fft.irfft(F * np.conj(F), n=n_fft)[:N]
-            sq = frame ** 2
-            cum_sq = np.cumsum(sq)
-            # For lag k: dot(s0, s0) = cum_sq[N - 1 - k], dot(sk, sk) = energy_0 - cum_sq[k - 1]
-            k_arr = np.arange(min_lag - 1, max_lag + 2)
-            e0_arr = cum_sq[N - 1 - k_arr]
-            ek_arr = energy_0 - cum_sq[k_arr - 1]
-            denom_arr = np.sqrt(np.maximum(0.0, e0_arr * ek_arr)) + 1e-10
-            r_vals = acf[k_arr] / denom_arr
-
-            # Search within [min_lag, max_lag] (indices 1 to -1 of r_vals)
-            search_r = r_vals[1:-1]
-            if len(search_r) == 0:
-                continue
-            best_rel = int(np.argmax(search_r))
-            best_r = float(search_r[best_rel])
-            best_k = min_lag + best_rel
-
-            # Voicing gate: accept fundamental pitch lag peaks with lower threshold on live mic
-            r_thresh = 0.25 if self._stream is not None else 0.30
-            if best_r >= r_thresh:
-                y0 = float(r_vals[best_rel])
-                y1 = float(r_vals[best_rel + 1])
-                y2 = float(r_vals[best_rel + 2])
-                denom = y0 - 2.0 * y1 + y2
-                frac = 0.5 * (y0 - y2) / denom if abs(denom) > 1e-9 else 0.0
-                precise_lag = float(best_k) + float(np.clip(frac, -0.5, 0.5))
-
-                # Use RMS-based amplitude envelope (2*sqrt(2)*RMS) when live mic is active to reject
-                # single-sample room/phone speaker impulsive spikes; keep ptp in offline mode for unit test exactness.
-                frame_amp = (
-                    float(np.sqrt(np.mean(frame ** 2)) * 2.8284)
-                    if self._mic_stream is not None
-                    else float(np.ptp(frame))
-                )
-                voiced_frames.append((idx, precise_lag / self.sample_rate, frame_amp, best_r))
-
-                # Short-time spectral centroid in second-formant band F2 [850 Hz, 2600 Hz]
-                w_frame = frame * hanning_win
-                spec = np.abs(np.fft.rfft(w_frame))
-                spec_f2 = spec[f2_mask]
-                if len(spec_f2) > 0:
-                    pwr_f2 = spec_f2 ** 2
-                    thresh = np.percentile(pwr_f2, 75.0)
-                    peak_mask = pwr_f2 >= thresh
-                    sum_pwr = float(np.sum(pwr_f2[peak_mask]))
-                    if sum_pwr > 1e-6:
-                        centroid = float(np.sum(f2_subfreqs[peak_mask] * pwr_f2[peak_mask]) / sum_pwr)
-                    else:
-                        centroid = 1500.0
+            if best_val >= voicing_min:
+                if 0 < best_lag < len(r) - 1:
+                    y0, y1, y2 = float(r[best_lag - 1]), float(r[best_lag]), float(r[best_lag + 1])
+                    denom = y0 - 2.0 * y1 + y2
+                    frac = 0.5 * (y0 - y2) / denom if abs(denom) > 1e-9 else 0.0
+                    precise_lag = float(best_lag) + float(np.clip(frac, -0.5, 0.5))
                 else:
-                    centroid = 1500.0
-                f2_centroids.append((idx, centroid))
+                    precise_lag = float(best_lag)
 
-        voiced_ratio = len(voiced_frames) / float(max(1, n_active_frames))
+                voiced_indices.append(int(idx))
+                voiced_periods.append(precise_lag / self.sample_rate)
+                voiced_amps.append(float(frame_peaks[idx]))
+                voiced_autocorrs.append(min(0.995, best_val))
+
+                # Dominant F2 formant peak tracking in [850, 2500] Hz
+                f2_mag = mag[idx, self._f2_mask]
+                f2_weights = f2_mag ** 2
+                w_sum = float(np.sum(f2_weights))
+                if w_sum > 1e-9:
+                    f2_centroids.append(float(np.sum(f2_freqs * f2_weights) / w_sum))
+
+        voiced_ratio = len(voiced_periods) / max(1, n_active)
         if self._stream is not None:
-            voice_vad_active = bool(len(voiced_frames) >= 3 and voiced_ratio >= 0.15)
+            voice_vad_active = bool(len(voiced_periods) >= 4 and voiced_ratio >= 0.18)
         else:
-            voice_vad_active = bool(len(voiced_frames) >= 5 and voiced_ratio >= 0.25)
+            voice_vad_active = bool(len(voiced_periods) >= 5 and voiced_ratio >= 0.25)
 
-        # 5. Audio-Visual Lip-Sync Gate (av_speech_gated)
-        voiced_autocorrs = [vf[3] for vf in voiced_frames]
+        speech_pause_ratio = float(np.clip(1.0 - (n_active / max(1, n_frames)), 0.0, 1.0))
+
+        if not voice_vad_active:
+            return AudioFeatures(
+                audio_valid=False,
+                voice_vad_active=False,
+                av_speech_gated=False,
+                speech_pause_ratio=speech_pause_ratio,
+                mic_active=mic_is_live,
+                mic_rms_level=raw_rms,
+                audio_rms=raw_rms,
+            )
+
+        active_rms = float(np.mean(frame_rms[active_mask]))
         if self._stream is not None:
-            mean_ac = float(np.mean(voiced_autocorrs)) if voiced_autocorrs else 0.0
             av_speech_gated = bool(
-                voice_vad_active
-                and (
-                    visual_speech_active
-                    or (active_rms >= 0.005 and len(voiced_frames) >= 5 and mean_ac >= 0.38)
-                )
+                visual_speech_active
+                or (active_rms >= 0.006 and len(voiced_periods) >= 6 and float(np.mean(voiced_autocorrs)) >= 0.40)
             )
         else:
             av_speech_gated = bool(visual_speech_active and voice_vad_active)
 
         if not av_speech_gated:
-            return self._empty_or_held(
-                rms=active_rms,
-                voice_vad_active=voice_vad_active,
+            return AudioFeatures(
+                audio_valid=False,
+                voice_vad_active=True,
                 av_speech_gated=False,
-                speech_pause_ratio=float(np.clip(1.0 - voiced_ratio, 0.0, 1.0)),
+                speech_pause_ratio=speech_pause_ratio,
+                mic_active=mic_is_live,
+                mic_rms_level=raw_rms,
+                audio_rms=raw_rms,
             )
 
-        # 6. Contiguous-Track Vocal Jitter (%) & Shimmer (%)
-        # Only evaluate contiguous voiced frame pairs (idx2 - idx1 == 1) without octave jumps (|dT|/T < 0.14)
-        contiguous_dT: List[float] = []
-        contiguous_T: List[float] = []
-        contiguous_dA: List[float] = []
-        contiguous_A: List[float] = []
+        periods = np.array(voiced_periods, dtype=np.float64)
+        amps = np.array(voiced_amps, dtype=np.float64)
+        v_idx = np.array(voiced_indices, dtype=np.int32)
+        mean_period = float(np.mean(periods))
+        mean_amp = float(np.mean(amps))
 
-        for j in range(len(voiced_frames) - 1):
-            idx1, t1, a1, _ = voiced_frames[j]
-            idx2, t2, a2, _ = voiced_frames[j + 1]
-            if (idx2 - idx1) == 1:
-                mean_pair_t = 0.5 * (t1 + t2)
-                rel_dt = abs(t2 - t1) / max(1e-6, mean_pair_t)
-                # Reject octave doubling/halving jumps (> 14% period jump in 20ms is pitch shift, not glottal jitter)
-                if rel_dt < 0.14:
-                    contiguous_dT.append(abs(t2 - t1))
-                    contiguous_T.append(mean_pair_t)
-                    contiguous_dA.append(abs(a2 - a1))
-                    contiguous_A.append(0.5 * (a1 + a2))
+        # 1. Clinical Vocal Jitter (%):
+        # Only compare contiguous/near-contiguous voiced frames (gap <= 2 hops) and reject octave jumps (>18%)
+        # Use 3-point local RAP (Relative Average Perturbation) when possible so expressive syllable prosody
+        # is not misclassified as pathological jitter!
+        adj_diffs = []
+        for k in range(1, len(periods)):
+            if (v_idx[k] - v_idx[k - 1]) <= 2:
+                rel_step = abs(periods[k] - periods[k - 1]) / max(1e-6, mean_period)
+                if rel_step < 0.18:
+                    if k + 1 < len(periods) and (v_idx[k + 1] - v_idx[k]) <= 2:
+                        local_avg = (periods[k - 1] + periods[k] + periods[k + 1]) / 3.0
+                        adj_diffs.append(abs(periods[k] - local_avg))
+                    else:
+                        adj_diffs.append(0.65 * abs(periods[k] - periods[k - 1]))
+        if len(adj_diffs) >= 2 and mean_period > 1e-6:
+            raw_jitter = float(np.median(adj_diffs) / mean_period) * 100.0
+        elif len(periods) >= 2 and mean_period > 1e-6:
+            raw_jitter = float(np.median(np.abs(np.diff(periods))) / mean_period) * 100.0
+        else:
+            raw_jitter = 0.35
+        jitter_pct = float(np.clip(raw_jitter, 0.05, 10.0))
 
-        if len(contiguous_T) >= 3:
-            vocal_jitter_pct = float((np.median(contiguous_dT) / max(1e-6, np.mean(contiguous_T))) * 100.0)
-            vocal_shimmer_pct = float((np.median(contiguous_dA) / max(1e-6, np.mean(contiguous_A))) * 100.0)
-        elif len(voiced_frames) >= 2:
-            T_all = np.array([vf[1] for vf in voiced_frames], dtype=np.float64)
-            A_all = np.array([vf[2] for vf in voiced_frames], dtype=np.float64)
-            # Filter out octave jumps via median deviation
-            med_T = float(np.median(T_all))
-            valid_t = T_all[np.abs(T_all - med_T) / max(1e-6, med_T) < 0.15]
-            if len(valid_t) >= 2:
-                vocal_jitter_pct = float((np.median(np.abs(np.diff(valid_t))) / max(1e-6, np.mean(valid_t))) * 100.0)
+        # 2. Clinical Vocal Shimmer (%):
+        # Detrend slow phrase-level volume fade-out using local 3-point APQ3 perturbation on contiguous frames
+        amp_diffs = []
+        for k in range(1, len(amps)):
+            if (v_idx[k] - v_idx[k - 1]) <= 2:
+                if k + 1 < len(amps) and (v_idx[k + 1] - v_idx[k]) <= 2:
+                    local_amp = (amps[k - 1] + amps[k] + amps[k + 1]) / 3.0
+                    amp_diffs.append(abs(amps[k] - local_amp))
+                else:
+                    amp_diffs.append(0.65 * abs(amps[k] - amps[k - 1]))
+        if len(amp_diffs) >= 2 and mean_amp > 1e-6:
+            raw_shimmer = float(np.median(amp_diffs) / mean_amp) * 100.0
+        elif len(amps) >= 2 and mean_amp > 1e-6:
+            raw_shimmer = float(np.median(np.abs(np.diff(amps))) / mean_amp) * 100.0
+        else:
+            raw_shimmer = 1.5
+        shimmer_pct = float(np.clip(raw_shimmer, 0.1, 25.0))
+
+        # 3. Harmonics-to-Noise Ratio (HNR in dB) with live-mic room acoustics compensation:
+        mean_r = float(np.percentile(voiced_autocorrs, 70))
+        raw_hnr = 10.0 * np.log10(mean_r / max(1e-4, 1.0 - mean_r))
+        # On live laptop mics, room reflections slightly lower raw autocorrelation compared to synthetic waves
+        if self._stream is not None:
+            raw_hnr += 3.0
+        hnr_db = float(np.clip(raw_hnr, 0.0, 35.0))
+
+        # 4. Formant F2 Transition Velocity (Hz/ms):
+        hop_ms = (hop_len / self.sample_rate) * 1000.0  # 16.0 ms
+        if len(f2_centroids) >= 5:
+            smooth_f2 = scipy.signal.medfilt(f2_centroids, 3)
+            diffs = np.abs(np.diff(smooth_f2))
+            active_transitions = diffs[diffs > 5.0]
+            if len(active_transitions) > 0:
+                raw_slope = float(np.percentile(active_transitions, 65) / hop_ms)
             else:
-                vocal_jitter_pct = 0.5
-            vocal_shimmer_pct = float((np.median(np.abs(np.diff(A_all))) / max(1e-6, np.mean(A_all))) * 100.0)
+                raw_slope = float(np.mean(diffs) / hop_ms)
+            f2_slope = float(np.clip(raw_slope * 2.0, 2.0, 45.0))
         else:
-            vocal_jitter_pct = 0.0
-            vocal_shimmer_pct = 0.0
+            f2_slope = 22.0
 
-        # 7. Harmonics-to-Noise Ratio (dB)
-        r_peaks = [vf[3] for vf in voiced_frames]
-        if r_peaks:
-            mean_r = float(np.clip(np.percentile(r_peaks, 75), 0.01, 0.99))
-            vocal_hnr_db = float(10.0 * np.log10(mean_r / (1.0 - mean_r)))
+        # 5. Composite Vocal Intoxication Score (0-100):
+        s_jitter = float(np.clip((jitter_pct - 1.15) / 1.50 * 100.0, 0.0, 100.0))
+        s_shimmer = float(np.clip((shimmer_pct - 3.80) / 4.50 * 100.0, 0.0, 100.0))
+        s_hnr = float(np.clip((13.5 - hnr_db) / 6.00 * 100.0, 0.0, 100.0))
+        s_f2 = float(np.clip((15.0 - f2_slope) / 8.00 * 100.0, 0.0, 100.0))
+
+        raw_score = float(np.clip(
+            0.35 * s_f2 + 0.25 * s_jitter + 0.20 * s_shimmer + 0.20 * s_hnr,
+            0.0,
+            100.0,
+        ))
+
+        # Sober steady pitch guard: if vocal jitter is low (< 1.15%), driver has precise neuromuscular glottal control
+        if jitter_pct < 1.15:
+            raw_score = min(raw_score, 22.0)
+
+        # Temporal EMA smoothing on live mic mode so a single syllable never spikes the HUD
+        if self._stream is not None:
+            if self._ema_score is None:
+                self._ema_score = raw_score
+            else:
+                self._ema_score = 0.45 * raw_score + 0.55 * self._ema_score
+            score = float(self._ema_score)
         else:
-            vocal_hnr_db = 20.0
+            score = raw_score
 
-        # 8. Formant F2 Transition Velocity (Hz/ms)
-        # Note: Short single-vowel bursts (< 12 voiced frames, e.g., brief "hello" or "ah") naturally have
-        # steady F2; only penalize flat F2 slope on multi-syllable phrases (>= 15 voiced frames).
-        if len(f2_centroids) >= 15:
-            slopes = []
-            for j in range(len(f2_centroids) - 1):
-                idx1, f1 = f2_centroids[j]
-                idx2, f2 = f2_centroids[j + 1]
-                dt_ms = (idx2 - idx1) * 20.0
-                if 0 < dt_ms <= 60.0:
-                    slopes.append(abs(f2 - f1) / dt_ms)
-            formant_f2_slope_hz_ms = float(np.percentile(slopes, 90.0)) if slopes else 22.0
+        abnormal_count = sum([
+            jitter_pct > 1.35,
+            shimmer_pct > 4.20,
+            hnr_db < 11.5,
+            f2_slope < 12.0,
+        ])
+        if self._stream is not None:
+            slurred = bool(len(voiced_periods) >= 8 and jitter_pct >= 1.25 and abnormal_count >= 2 and score >= 45.0)
         else:
-            formant_f2_slope_hz_ms = 22.0
+            slurred = bool(len(voiced_periods) >= 5 and abnormal_count >= 2 and score >= 45.0)
 
-        # 9. Unvoiced micro-pause fraction
-        speech_pause_ratio = float(np.clip(1.0 - voiced_ratio, 0.0, 1.0))
-
-        # 10. Composite 0-100 Vocal Intoxication Score & Slurred Speech Flag
-        # When capturing via live open-air microphone (_mic_stream is not None), compensate for
-        # room reverberation and speaker playback multipath on shimmer and HNR, and require
-        # genuine glottal pitch jitter (>= 1.25%) so sober phone/speaker audio is never flagged as slurred.
-        if self._mic_stream is not None:
-            s_jitter = float(np.clip((vocal_jitter_pct - 1.35) / 1.8 * 100.0, 0.0, 100.0))
-            s_shimmer = float(np.clip((vocal_shimmer_pct * 0.60 - 4.8) / 5.5 * 100.0, 0.0, 100.0))
-            s_hnr = float(np.clip((10.5 - vocal_hnr_db) / 8.0 * 100.0, 0.0, 100.0))
-            s_f2 = float(np.clip((13.0 - formant_f2_slope_hz_ms) / 9.0 * 100.0, 0.0, 100.0))
-            voice_impairment_score = float(0.40 * s_jitter + 0.20 * s_shimmer + 0.15 * s_hnr + 0.25 * s_f2)
-            if vocal_jitter_pct < 1.20:
-                # Sober steady vocal fold pitch (< 1.20% jitter): cap live room-mic score to prevent echo false alarms
-                voice_impairment_score = float(min(voice_impairment_score, 32.0))
-            impaired_biomarkers_count = sum([s_jitter > 45.0, s_shimmer > 45.0, s_hnr > 45.0, s_f2 > 45.0])
-            voice_slurred_detected = bool(
-                len(voiced_frames) >= 12
-                and vocal_jitter_pct >= 1.25
-                and voice_impairment_score >= 52.0
-                and impaired_biomarkers_count >= 2
-            )
-        else:
-            s_jitter = float(np.clip((vocal_jitter_pct - 1.35) / 1.8 * 100.0, 0.0, 100.0))
-            s_shimmer = float(np.clip((vocal_shimmer_pct - 4.5) / 5.0 * 100.0, 0.0, 100.0))
-            s_hnr = float(np.clip((12.5 - vocal_hnr_db) / 8.0 * 100.0, 0.0, 100.0))
-            s_f2 = float(np.clip((14.0 - formant_f2_slope_hz_ms) / 9.0 * 100.0, 0.0, 100.0))
-            voice_impairment_score = float(0.30 * s_jitter + 0.25 * s_shimmer + 0.20 * s_hnr + 0.25 * s_f2)
-            impaired_biomarkers_count = sum([s_jitter > 45.0, s_shimmer > 45.0, s_hnr > 45.0, s_f2 > 45.0])
-            voice_slurred_detected = bool(
-                len(voiced_frames) >= 8
-                and voice_impairment_score >= 52.0
-                and impaired_biomarkers_count >= 2
-            )
-
-        return AudioFeatures(
+        result = AudioFeatures(
             audio_valid=True,
             voice_vad_active=True,
             av_speech_gated=True,
-            vocal_jitter_pct=vocal_jitter_pct,
-            vocal_shimmer_pct=vocal_shimmer_pct,
-            vocal_hnr_db=vocal_hnr_db,
-            formant_f2_slope_hz_ms=formant_f2_slope_hz_ms,
-            speech_pause_ratio=speech_pause_ratio,
-            voice_impairment_score=voice_impairment_score,
-            voice_slurred_detected=voice_slurred_detected,
-            mic_active=self.mic_active,
-            audio_rms=active_rms,
+            vocal_jitter_pct=round(jitter_pct, 3),
+            vocal_shimmer_pct=round(shimmer_pct, 3),
+            vocal_hnr_db=round(hnr_db, 2),
+            formant_f2_slope_hz_ms=round(f2_slope, 2),
+            speech_pause_ratio=round(speech_pause_ratio, 3),
+            voice_impairment_score=round(score, 2),
+            voice_slurred_detected=slurred,
+            mic_active=mic_is_live,
+            mic_rms_level=round(raw_rms, 4),
+            audio_rms=round(raw_rms, 4),
         )
+
+        self._last_valid_features = result
+        self._last_valid_time = timestamp
+        return result
 
     def close(self) -> None:
         """Release live microphone stream and hardware resources cleanly."""

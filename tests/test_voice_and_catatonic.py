@@ -35,6 +35,20 @@ def test_silent_frames_never_trigger_voice_impairment():
     assert not audio_feat.voice_slurred_detected, "No slurred speech can be detected during silence"
 
 
+def test_av_gate_blocks_background_radio_when_lips_closed():
+    """Verify background speech/radio audio is rejected when lips are closed (visual_speech_active=False)."""
+    extractor = AudioIntoxicationExtractor(sample_rate=16000, window_sec=1.0)
+    sr = 16000
+    t = np.arange(sr) / sr
+    # Loud human voice-like signal (speech frequencies)
+    radio_speech = 0.5 * np.sin(2 * np.pi * 150.0 * t) + 0.3 * np.sin(2 * np.pi * 300.0 * t)
+    feat = extractor.analyze_pcm_window(radio_speech, visual_speech_active=False)
+    assert not feat.av_speech_gated, "Background audio must be gated out when visual_speech_active is False"
+    assert not feat.audio_valid, "audio_valid must be False when mouth is closed"
+    assert feat.voice_impairment_score == 0.0, "Silent driver must receive 0.0 voice impairment score"
+    assert not feat.voice_slurred_detected, "No slurred speech detected when lips are closed"
+
+
 def test_sober_vs_slurred_intoxicated_voice_dsp():
     """Synthesize clean sober speech vs. intoxicated dysarthric speech.
 

@@ -2441,6 +2441,8 @@ class FeatureExtractor:
                 features.voice_vad_active = audio_feats.voice_vad_active
                 features.mic_active = audio_feats.mic_active
                 features.audio_rms = audio_feats.audio_rms
+                if lip_moving_for_audio and audio_feats.voice_vad_active:
+                    features.speech_active = True
 
             self._last_features = features
             return features

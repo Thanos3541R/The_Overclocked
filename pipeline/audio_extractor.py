@@ -170,10 +170,10 @@ class AudioIntoxicationExtractor:
         try:
             try:
                 import sounddevice as sd  # type: ignore
-            except (ImportError, OSError):
+            except Exception:
                 sd = None
 
-            if sd is None:
+            if sd is None or getattr(sd, "InputStream", None) is None:
                 print("[DMS-Audio] WARNING: 'sounddevice' not installed! Run: pip install sounddevice")
                 logger.warning("'sounddevice' not installed. Live microphone disabled.")
                 self._mic_stream = None
@@ -251,10 +251,18 @@ class AudioIntoxicationExtractor:
             self._mic_stream = None
             self.mic_active = False
 
+    _start_live_mic = _init_live_mic
+
     def _open_candidate_mic(self, dev_index: int) -> bool:
         """Open or switch input stream to candidate device index."""
         try:
-            import sounddevice as sd  # type: ignore
+            try:
+                import sounddevice as sd  # type: ignore
+            except Exception:
+                sd = None
+            if sd is None or getattr(sd, "InputStream", None) is None:
+                return False
+
             if self._mic_stream is not None:
                 try:
                     self._mic_stream.stop()
@@ -467,10 +475,11 @@ class AudioIntoxicationExtractor:
             self._last_speech_active = visual_speech_active
             return features
 
-        # 10 Hz DSP Throttling (0.10s interval): return cached result if within interval and visual speech unchanged
+        # 10 Hz DSP Throttling (0.10s interval): return cached result if within interval, visual speech active and valid
         if (
-            self._last_computed_result is not None
-            and getattr(self, "_last_speech_active", False) == visual_speech_active
+            visual_speech_active
+            and self._last_computed_result is not None
+            and self._last_computed_result.audio_valid
             and 0.0 <= (timestamp - self._last_dsp_timestamp) < 0.10
         ):
             return self._last_computed_result
@@ -493,7 +502,10 @@ class AudioIntoxicationExtractor:
         with self._lock:
             buf_len = len(self._pcm_buffer)
             if buf_len >= int(0.25 * self.sample_rate):
-                pcm = np.array(self._pcm_buffer, dtype=np.float32)
+                if self._stream is not None and buf_len > int(1.2 * self.sample_rate):
+                    pcm = np.array(self._pcm_buffer, dtype=np.float32)[-int(1.2 * self.sample_rate):]
+                else:
+                    pcm = np.array(self._pcm_buffer, dtype=np.float32)
             else:
                 pcm = np.array([], dtype=np.float32)
 
@@ -570,7 +582,7 @@ class AudioIntoxicationExtractor:
         max_lag = min(frame_len - 2, int(self.sample_rate / 80.0))  # ~80 Hz (200 samples)
 
         max_frame_rms = float(np.max(frame_rms_arr)) if total_frames > 0 else 0.0
-        active_thresh = max(0.002, 0.25 * max_frame_rms)
+        active_thresh = max(0.0018, 0.30 * max_frame_rms)
 
         voiced_frames: List[Tuple[int, float, float, float]] = []  # (frame_idx, period_s, amp, r_peak)
         f2_centroids: List[Tuple[int, float]] = []
@@ -616,8 +628,9 @@ class AudioIntoxicationExtractor:
             best_r = float(search_r[best_rel])
             best_k = min_lag + best_rel
 
-            # Voicing gate: require clear periodic glottal harmonic structure (best_r > 0.52)
-            if best_r > 0.52:
+            # Voicing gate: accept fundamental pitch lag peaks with lower threshold on live mic
+            r_thresh = 0.25 if self._stream is not None else 0.30
+            if best_r >= r_thresh:
                 y0 = float(r_vals[best_rel])
                 y1 = float(r_vals[best_rel + 1])
                 y2 = float(r_vals[best_rel + 2])
@@ -652,11 +665,24 @@ class AudioIntoxicationExtractor:
                 f2_centroids.append((idx, centroid))
 
         voiced_ratio = len(voiced_frames) / float(max(1, n_active_frames))
-        voice_vad_active = bool(len(voiced_frames) >= 5 and voiced_ratio >= 0.25)
+        if self._stream is not None:
+            voice_vad_active = bool(len(voiced_frames) >= 3 and voiced_ratio >= 0.15)
+        else:
+            voice_vad_active = bool(len(voiced_frames) >= 5 and voiced_ratio >= 0.25)
 
-        # 5. Strict Audio-Visual Lip-Sync Gate (av_speech_gated)
-        # Never bypass visual_speech_active: prevents background room noise or passengers from triggering voice risk
-        av_speech_gated = bool(voice_vad_active and visual_speech_active)
+        # 5. Audio-Visual Lip-Sync Gate (av_speech_gated)
+        voiced_autocorrs = [vf[3] for vf in voiced_frames]
+        if self._stream is not None:
+            mean_ac = float(np.mean(voiced_autocorrs)) if voiced_autocorrs else 0.0
+            av_speech_gated = bool(
+                voice_vad_active
+                and (
+                    visual_speech_active
+                    or (active_rms >= 0.005 and len(voiced_frames) >= 5 and mean_ac >= 0.38)
+                )
+            )
+        else:
+            av_speech_gated = bool(visual_speech_active and voice_vad_active)
 
         if not av_speech_gated:
             return self._empty_or_held(

@@ -15,10 +15,20 @@ Critical implementation details:
 import logging
 import os
 import shutil
+import sys
 import time
+import types
 import urllib.request
 import cv2
 import numpy as np
+try:
+    import sounddevice as _sd  # noqa: F401
+except Exception:
+    _dummy_sd = types.ModuleType("sounddevice")
+    _dummy_sd.InputStream = None
+    _dummy_sd.PortAudioError = Exception
+    sys.modules["sounddevice"] = _dummy_sd
+
 try:
     import mediapipe as mp
 except ImportError as exc:

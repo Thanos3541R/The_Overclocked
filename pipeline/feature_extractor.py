@@ -403,6 +403,7 @@ class FeatureExtractor:
         # Phase 9: Highway fixation exemption and speech/yawn cadence tracking
         self._highway_fixation_exempt: bool = False
         self._mar_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(2.0 * fps), 15))
+        self._last_lip_active_time: float = -10.0
 
     def reset(self) -> None:
         """Clear rolling deques, histories, and previous-frame temporal tracking state.
@@ -479,6 +480,7 @@ class FeatureExtractor:
             self._raw_ear_var_history.clear()
             self._highway_fixation_exempt = False
             self._mar_history.clear()
+            self._last_lip_active_time = -10.0
 
     @property
     def _vergence_baseline(self) -> float:
@@ -2350,18 +2352,15 @@ class FeatureExtractor:
             active_audio_ext = audio_extractor if audio_extractor is not None else self.audio_extractor
             if active_audio_ext is not None:
                 recent_mars = [m for _, m in list(self._mar_history)[-15:]]
-                open_lip_frames = sum(1 for m in recent_mars if m > 0.12)
-                # Strict lip-sync gate: require confirmed speech_active cadence OR sustained multi-frame
-                # mouth articulation (never triggering on a closed mouth or a brief 1-2 frame jaw shift).
-                lip_moving_for_audio = bool(
+                raw_lip_moving = bool(
                     features.speech_active
-                    or (
-                        features.mar > 0.14
-                        and len(recent_mars) >= 8
-                        and open_lip_frames >= 5
-                        and float(np.std(recent_mars)) > 0.028
-                        and float(np.ptp(recent_mars)) > 0.065
-                    )
+                    or features.mar > 0.035
+                    or (len(recent_mars) >= 5 and float(np.std(recent_mars)) > 0.004)
+                )
+                if raw_lip_moving:
+                    self._last_lip_active_time = timestamp
+                lip_moving_for_audio = bool(
+                    raw_lip_moving or (0.0 <= (timestamp - self._last_lip_active_time) <= 1.5)
                 )
                 audio_feats = active_audio_ext.update(timestamp, visual_speech_active=lip_moving_for_audio)
                 features.audio_valid = audio_feats.audio_valid

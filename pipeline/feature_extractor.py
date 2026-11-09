@@ -404,6 +404,8 @@ class FeatureExtractor:
         self._highway_fixation_exempt: bool = False
         self._mar_history: Deque[Tuple[float, float]] = deque(maxlen=max(int(2.0 * fps), 15))
         self._last_lip_active_time: float = -10.0
+        self._vor_ratios: Deque[float] = deque(maxlen=30)
+        self._iris_x_history: Deque[float] = deque(maxlen=max(int(2.0 * fps), 30))
 
     def reset(self) -> None:
         """Clear rolling deques, histories, and previous-frame temporal tracking state.
@@ -481,6 +483,8 @@ class FeatureExtractor:
             self._highway_fixation_exempt = False
             self._mar_history.clear()
             self._last_lip_active_time = -10.0
+            self._vor_ratios.clear()
+            self._iris_x_history.clear()
 
     @property
     def _vergence_baseline(self) -> float:
@@ -1069,15 +1073,53 @@ class FeatureExtractor:
         head_vel = d_yaw / dt   # deg/s
 
         if blink_phase == "open" and self._prev_iris_x is not None:
-            eye_vel = (avg_iris_x - self._prev_iris_x) * self.deg_per_iris_unit / dt  # deg/s
+            d_iris_deg = (avg_iris_x - self._prev_iris_x) * self.deg_per_iris_unit
+            eye_vel = d_iris_deg / dt  # deg/s
 
-            if self.vor_min_head_speed <= abs(head_vel) <= self.vor_max_head_speed:
+            if abs(d_yaw) > 0.45 and abs(d_yaw) < 8.0:
+                if abs(d_iris_deg) > 0.20:
+                    ratio = -d_iris_deg / d_yaw
+                    ratio_clamped = float(np.clip(ratio, -0.5, 2.5))
+                    self._vor_ratios.append(ratio_clamped)
+                    self._smoothed_vor_gain = float(np.median(self._vor_ratios))
+                elif abs(d_iris_deg) <= 0.15 and abs(d_yaw) > 1.5:
+                    # Significant head rotation with zero eye counter-rotation = depressed VOR
+                    self._vor_ratios.append(0.0)
+                    self._smoothed_vor_gain = float(np.median(self._vor_ratios))
+            elif self.vor_min_head_speed <= abs(head_vel) <= self.vor_max_head_speed:
                 raw_gain = -(eye_vel / head_vel)
                 if raw_gain > 0.05:
                     clamped_gain = float(np.clip(raw_gain, 0.0, 2.0))
                     self._smoothed_vor_gain = 0.85 * self._smoothed_vor_gain + 0.15 * clamped_gain
 
         return float(self._smoothed_vor_gain)
+
+    def _compute_gaze_nystagmus(self, iris_x: Optional[float] = None) -> float:
+        """Compute gaze nystagmus power in 2.0-6.0 Hz band with linear detrending and Hann window."""
+        if iris_x is not None:
+            self._iris_x_history.append(float(iris_x))
+        if len(self._iris_x_history) < 15:
+            return 0.0
+
+        arr = np.array(self._iris_x_history, dtype=np.float64)
+        x_idx = np.arange(len(arr), dtype=np.float64)
+        slope, intercept = np.polyfit(x_idx, arr, 1)
+        sig = (arr - (slope * x_idx + intercept)) * np.hanning(len(arr))
+        if np.std(sig) < 0.002:
+            return 0.0
+
+        fft_vals = np.abs(np.fft.rfft(sig))
+        freqs = np.fft.rfftfreq(len(sig), d=1.0 / self._fps)
+        band_mask = (freqs >= 2.0) & (freqs <= 6.0)
+        if not np.any(band_mask):
+            return 0.0
+        return float(np.sum(fft_vals[band_mask]))
+
+    def _compute_smooth_pursuit_fragmentation(self, saccade_vel: float = 0.0, timestamp: float = 0.0) -> float:
+        """Compute smooth pursuit fragmentation ratio, filtering out sub-pixel fixation noise."""
+        if 4.0 < saccade_vel < 45.0:
+            return self._compute_pursuit_fragmentation(saccade_vel > self.saccade_offset_velocity, timestamp)
+        return self._compute_pursuit_fragmentation(False, timestamp)
 
     def _compute_gen(self, avg_iris_x: float, timestamp: float,
                      head_vel_deg_s: float = 0.0,
@@ -1498,12 +1540,33 @@ class FeatureExtractor:
         reversals = int(np.sum(adjacent_valid & ((signs[:-1] * signs[1:]) < 0)))
         return reversals
 
-    def _compute_eyelid_tremor(self, ear_avg: float, timestamp: float, blink_phase: str, vibration_score: float = 0.0) -> float:
+    def _compute_eyelid_tremor(
+        self,
+        ear_avg: float,
+        timestamp: float,
+        blink_phase: str,
+        vibration_score: float = 0.0,
+        prev_ear: Optional[float] = None,
+        prev_ts: Optional[float] = None,
+    ) -> float:
         """Track high-frequency palpebral micro-flutter (3-15 Hz).
 
         Zero-crossing oscillation of first-order EAR differences during open-eye fixation.
         """
         if blink_phase != "open":
+            return 0.0
+
+        p_ear = prev_ear if prev_ear is not None else self._prev_ear_avg
+        p_ts = prev_ts if prev_ts is not None else self._prev_ear_timestamp
+        ear_change = 0.0
+        dt = 1.0 / self._fps
+        if p_ear is not None and p_ts is not None:
+            dt_raw = timestamp - p_ts
+            if 1e-6 < dt_raw < 0.25:
+                dt = dt_raw
+                ear_change = abs(ear_avg - p_ear)
+
+        if dt > 1e-6 and (ear_change / dt) > 0.80:
             return 0.0
 
         self._ear_tremor_history.append((timestamp, ear_avg))
@@ -2176,6 +2239,8 @@ class FeatureExtractor:
                 if unilateral_foreshortening
                 else features.ear_avg
             )
+            prev_ear_for_tremor = self._prev_ear_avg
+            prev_ts_for_tremor = self._prev_ear_timestamp
             features.blink_closing_velocity, features.blink_opening_velocity = \
                 self._compute_blink_velocity(fsm_ear, timestamp)
             features.blink_phase = self._blink_phase
@@ -2301,6 +2366,8 @@ class FeatureExtractor:
                 self._compute_eyelid_tremor(
                     features.ear_avg, timestamp, self._blink_phase,
                     vibration_score=float(vibration_score),
+                    prev_ear=prev_ear_for_tremor,
+                    prev_ts=prev_ts_for_tremor,
                 )
             features.eyeball_tremor_hz = \
                 self._compute_eyeball_tremor(

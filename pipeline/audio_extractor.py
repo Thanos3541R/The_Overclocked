@@ -10,8 +10,16 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from typing import Any, Dict, List, Optional, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from process_guard import run_monitored_subprocess
+except ImportError:
+    def run_monitored_subprocess(cmd, timeout=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False):
+        return subprocess.run(cmd, stdout=stdout, stderr=stderr, timeout=timeout, check=check)
 
 import numpy as np
 import scipy.signal
@@ -139,7 +147,7 @@ class AudioIntoxicationExtractor:
                     "-vn", "-ac", "1", "-ar", str(self.sample_rate),
                     "-f", "s16le", "-acodec", "pcm_s16le", "-"
                 ]
-                proc = subprocess.run(
+                proc = run_monitored_subprocess(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False
                 )
                 if proc.returncode == 0 and len(proc.stdout) >= 640:
@@ -536,24 +544,38 @@ class AudioIntoxicationExtractor:
         if len(arr) < int(0.15 * self.sample_rate):
             return self._empty_or_held()
 
-        # 1. Vectorized DC offset removal & Active frame energy
+        # 1. Vectorized DC offset removal & Bandpass filter first to reject low-freq pops (< 75 Hz)
         arr = arr - float(np.mean(arr))
+        high_cutoff = min(4000.0, self.sample_rate * 0.48)
+        b, a = scipy.signal.butter(4, [75.0, high_cutoff], btype="bandpass", fs=self.sample_rate)
+        filtered_raw = scipy.signal.lfilter(b, a, arr)
+
+        # 2. Automatic Gain Normalization (quiet signals only, using bandpass filtered peak)
+        peak_95 = float(np.percentile(np.abs(filtered_raw), 95))
+        if 1e-5 < peak_95 < 0.10:
+            scale = min(15.0, 0.25 / peak_95)
+            pcm_proc = np.clip(arr * scale, -1.0, 1.0)
+            filtered = np.clip(filtered_raw * scale, -1.0, 1.0)
+        else:
+            pcm_proc = arr
+            filtered = filtered_raw
+
         frame_len = int(0.040 * self.sample_rate)  # 40 ms (640 samples @ 16kHz)
         hop_len = int(0.020 * self.sample_rate)    # 20 ms (320 samples @ 16kHz)
-        total_frames = max(1, (len(arr) - frame_len) // hop_len + 1)
+        total_frames = max(1, (len(filtered) - frame_len) // hop_len + 1)
 
-        # Vectorized strided frame slicing for fast RMS calculation
+        # Vectorized strided frame slicing for fast RMS calculation on filtered speech frames
         indices = np.arange(frame_len)[None, :] + (np.arange(total_frames) * hop_len)[:, None]
-        indices = np.clip(indices, 0, len(arr) - 1)
-        frames_raw = arr[indices]
-        frame_rms_arr = np.sqrt(np.mean(frames_raw ** 2, axis=1))
-        frame_rms_list = frame_rms_arr.tolist()
+        indices = np.clip(indices, 0, len(filtered) - 1)
+        frames_filt = filtered[indices]
+        frame_rms_arr = np.sqrt(np.mean(frames_filt ** 2, axis=1))
 
-        active_rms = float(np.percentile(frame_rms_arr, 85)) if total_frames > 0 else 0.0
-        rms = float(np.sqrt(np.mean(arr ** 2)))
+        ref_frame_rms = float(np.percentile(frame_rms_arr, 85)) if total_frames > 0 else 0.0
+        active_rms = ref_frame_rms
+        raw_rms = float(np.sqrt(np.mean(filtered ** 2)))
 
         if not visual_speech_active:
-            self._noise_floor_rms = float(0.95 * self._noise_floor_rms + 0.05 * rms)
+            self._noise_floor_rms = float(0.95 * self._noise_floor_rms + 0.05 * raw_rms)
 
         if self._mic_stream is not None:
             # Live mic requires real close-talk speech energy above ambient fan/room noise floor
@@ -561,28 +583,14 @@ class AudioIntoxicationExtractor:
             if active_rms < min_active_rms:
                 return self._empty_or_held(rms=active_rms)
         else:
-            if active_rms < 0.0025 and rms < 0.0015:
+            if float(np.max(frame_rms_arr)) < 0.002 or (active_rms < 0.0025 and raw_rms < 0.0015):
                 return self._empty_or_held(rms=active_rms)
-
-        # 2. Automatic Gain Normalization (quiet signals only)
-        peak_95 = float(np.percentile(np.abs(arr), 95))
-        if 1e-5 < peak_95 < 0.10:
-            scale = min(15.0, 0.25 / peak_95)
-            pcm_proc = np.clip(arr * scale, -1.0, 1.0)
-        else:
-            pcm_proc = arr
-
-        # 3. Bandpass filter to speech band [75 Hz, 4000 Hz]
-        high_cutoff = min(4000.0, self.sample_rate * 0.48)
-        b, a = scipy.signal.butter(4, [75.0, high_cutoff], btype="bandpass", fs=self.sample_rate)
-        filtered = scipy.signal.lfilter(b, a, pcm_proc)
 
         # 4. Active-Segment Voiced Pitch Detection (Vectorized FFT Autocorrelation)
         min_lag = max(1, int(self.sample_rate / 320.0))  # ~320 Hz (50 samples)
         max_lag = min(frame_len - 2, int(self.sample_rate / 80.0))  # ~80 Hz (200 samples)
 
-        max_frame_rms = float(np.max(frame_rms_arr)) if total_frames > 0 else 0.0
-        active_thresh = max(0.0018, 0.30 * max_frame_rms)
+        active_thresh = max(0.0018, 0.30 * ref_frame_rms)
 
         voiced_frames: List[Tuple[int, float, float, float]] = []  # (frame_idx, period_s, amp, r_peak)
         f2_centroids: List[Tuple[int, float]] = []

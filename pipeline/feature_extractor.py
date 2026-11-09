@@ -157,6 +157,7 @@ class FrameFeatures:
     vocal_shimmer_pct: float = 0.0
     vocal_hnr_db: float = 20.0
     formant_f2_slope_hz_ms: float = 25.0
+    speech_pause_ratio: float = 0.20
     voice_impairment_score: float = 0.0
     voice_slurred_detected: bool = False
     voice_vad_active: bool = False
@@ -1982,6 +1983,7 @@ class FeatureExtractor:
                 features.vocal_shimmer_pct = self._last_features.vocal_shimmer_pct
                 features.vocal_hnr_db = self._last_features.vocal_hnr_db
                 features.formant_f2_slope_hz_ms = self._last_features.formant_f2_slope_hz_ms
+                features.speech_pause_ratio = self._last_features.speech_pause_ratio
                 features.voice_impairment_score = self._last_features.voice_impairment_score
                 features.voice_slurred_detected = self._last_features.voice_slurred_detected
                 features.voice_vad_active = self._last_features.voice_vad_active
@@ -2367,6 +2369,7 @@ class FeatureExtractor:
                 features.vocal_shimmer_pct = audio_feats.vocal_shimmer_pct
                 features.vocal_hnr_db = audio_feats.vocal_hnr_db
                 features.formant_f2_slope_hz_ms = audio_feats.formant_f2_slope_hz_ms
+                features.speech_pause_ratio = audio_feats.speech_pause_ratio
                 features.voice_impairment_score = audio_feats.voice_impairment_score
                 features.voice_slurred_detected = audio_feats.voice_slurred_detected
                 features.voice_vad_active = audio_feats.voice_vad_active

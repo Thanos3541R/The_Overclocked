@@ -314,11 +314,13 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             model_path=model_path,
             fps=capture.fps,
             max_occlusion_hold_frames=config.max_occlusion_hold_frames,
+            enable_ml_model=True,
         )
     else:
         classifier = ImpairmentClassifier(
             fps=capture.fps,
             max_occlusion_hold_frames=config.max_occlusion_hold_frames,
+            enable_ml_model=True,
         )
     bayesian_filter = BayesianEvidenceAccumulator(lockout_sustained_sec=15.0)
 

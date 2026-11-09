@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from config import DEFAULT_CONFIG
+from pipeline.audio_extractor import AudioIntoxicationExtractor
 from pipeline.face_mesh_detector import FaceMeshDetector
 from pipeline.feature_extractor import FeatureExtractor
 from pipeline.head_pose_estimator import HeadPoseGate
@@ -254,12 +255,14 @@ def audit_and_ingest_clip(
         )
 
     extractor = make_extractor()
+    audio_extractor = AudioIntoxicationExtractor(source_path=str(video_path), enable_live_mic=False)
     buffer = TrainingBuffer(
         subject_id=subject_id,
         fps=fps,
         window_size_sec=window_sec,
         stride_sec=stride_sec,
         include_extended_features=True,
+        include_voice_features=True,
     )
 
     face_detected_frames = 0
@@ -386,6 +389,7 @@ def audit_and_ingest_clip(
                     frame=frame,
                     image_landmarks=smooth_landmarks,
                     vibration_score=eff_vibration,
+                    audio_extractor=audio_extractor,
                 )
             else:
                 missing_face_frames += 1
@@ -403,6 +407,7 @@ def audit_and_ingest_clip(
                     gating_reason="no_face",
                     frame=frame,
                     vibration_score=stabilizer.vibration_score,
+                    audio_extractor=audio_extractor,
                 )
 
             if features.face_valid and not features.imu_gated:
@@ -414,6 +419,7 @@ def audit_and_ingest_clip(
         accumulated_windows.extend(buffer.extract_windows(label=label))
 
     finally:
+        audio_extractor.close()
         detector.close()
         cap.release()
 

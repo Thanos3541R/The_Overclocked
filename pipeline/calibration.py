@@ -27,6 +27,7 @@ PHYSIOLOGICAL_EAR_MAX: float = 0.38
 PHYSIOLOGICAL_BLINK_UP_MIN: float = 1.80
 PHYSIOLOGICAL_BLINK_UP_MAX: float = 3.20
 MAX_ALLOWABLE_ASYMMETRY: float = 0.05
+DEFAULT_BLINK_UP_VEL: float = 2.5
 
 
 @dataclass
@@ -64,11 +65,16 @@ class PersonalBaselineCalibrator:
         self.calibration_duration_sec = calibration_duration_sec
         self.min_samples = min_samples
         self.fps = fps
+        self.PHYSIOLOGICAL_EAR_MIN = PHYSIOLOGICAL_EAR_MIN
+        self.PHYSIOLOGICAL_BLINK_UP_MIN = PHYSIOLOGICAL_BLINK_UP_MIN
+        self.PHYSIOLOGICAL_ASYMMETRY_MAX = MAX_ALLOWABLE_ASYMMETRY
+        self.DEFAULT_BLINK_UP_VEL = DEFAULT_BLINK_UP_VEL
 
         max_history = int(calibration_duration_sec * fps * 1.5)
         self._ear_samples: Deque[float] = deque(maxlen=max_history)
         self._mar_samples: Deque[float] = deque(maxlen=max_history)
         self._blink_up_samples: Deque[float] = deque(maxlen=100)
+        self._seen_blink_up_samples: Deque[float] = deque(maxlen=100)
         self._flushing_samples: Deque[float] = deque(maxlen=max_history)
         self._asymmetry_samples: Deque[float] = deque(maxlen=max_history)
         self._brow_samples: Deque[float] = deque(maxlen=max_history)
@@ -130,9 +136,9 @@ class PersonalBaselineCalibrator:
 
         # Accumulate completed blink upstroke velocities (avoid duplicating held low-FPS values across non-blink frames)
         if features.blink_opening_velocity > 0.20:
-            if features.blink_detected or not self._blink_up_samples or features.blink_opening_velocity >= PHYSIOLOGICAL_BLINK_UP_MIN:
-                if not self._blink_up_samples or features.blink_detected or len(self._blink_up_samples) < 30:
-                    self._blink_up_samples.append(features.blink_opening_velocity)
+            self._seen_blink_up_samples.append(features.blink_opening_velocity)
+            if getattr(features, "blink_detected", False):
+                self._blink_up_samples.append(features.blink_opening_velocity)
 
         # Accumulate valid RGB facial flushing ratios
         if features.flushing_valid and features.facial_flushing_ratio > 0.5:
@@ -161,7 +167,16 @@ class PersonalBaselineCalibrator:
 
         raw_ear = float(np.median(self._ear_samples)) if self._ear_samples else 0.28
         raw_mar = float(np.median(self._mar_samples)) if self._mar_samples else 0.15
-        raw_blink_up = float(np.median(self._blink_up_samples)) if self._blink_up_samples else 2.5
+
+        if len(self._blink_up_samples) > 0:
+            raw_blink_up = float(np.median(self._blink_up_samples))
+        elif len(self._seen_blink_up_samples) > 0 and raw_ear < self.PHYSIOLOGICAL_EAR_MIN:
+            raw_blink_up = float(np.median(self._seen_blink_up_samples))
+        elif len(self._seen_blink_up_samples) > 0:
+            raw_blink_up = float(np.median(self._seen_blink_up_samples))
+        else:
+            raw_blink_up = self.DEFAULT_BLINK_UP_VEL
+
         raw_flush = float(np.median(self._flushing_samples)) if self._flushing_samples else 1.35
         raw_asym = float(np.median(self._asymmetry_samples)) if self._asymmetry_samples else 0.0
         raw_brow = float(np.median(self._brow_samples)) if self._brow_samples else 0.0
@@ -170,18 +185,23 @@ class PersonalBaselineCalibrator:
         yaw_base = float(np.median(self._yaw_samples)) if self._yaw_samples else 0.0
 
         # Check for Drunk Ingress: if driver enters with impaired open EAR or sluggish eyelid velocity
+        ear_impaired = (raw_ear < self.PHYSIOLOGICAL_EAR_MIN)
+        blink_impaired = (
+            (len(self._blink_up_samples) >= 3 or len(self._seen_blink_up_samples) >= 3)
+            and (raw_blink_up < self.PHYSIOLOGICAL_BLINK_UP_MIN)
+        )
         ingress_flag = False
         reasons = []
-        if has_min_ear and raw_ear < PHYSIOLOGICAL_EAR_MIN:
+        if (ear_impaired and blink_impaired) or (raw_ear < 0.21) or (raw_asym > self.PHYSIOLOGICAL_ASYMMETRY_MAX + 0.03):
             ingress_flag = True
-            reasons.append(
-                f"Resting open EAR {raw_ear:.3f} < physiological sober minimum {PHYSIOLOGICAL_EAR_MIN:.2f} (severe ptosis)"
-            )
-        if has_min_blink and raw_blink_up < PHYSIOLOGICAL_BLINK_UP_MIN and (not has_min_ear or raw_ear < PHYSIOLOGICAL_EAR_MIN):
-            ingress_flag = True
-            reasons.append(
-                f"Eyelid reopening velocity {raw_blink_up:.2f} EAR/s < physiological sober minimum {PHYSIOLOGICAL_BLINK_UP_MIN:.2f} EAR/s"
-            )
+            if ear_impaired and blink_impaired:
+                reasons.append(
+                    f"Resting open EAR {raw_ear:.3f} < {self.PHYSIOLOGICAL_EAR_MIN:.2f} and blink reopening {raw_blink_up:.2f} < {self.PHYSIOLOGICAL_BLINK_UP_MIN:.2f}"
+                )
+            elif raw_ear < 0.21:
+                reasons.append(f"Severe ptosis: resting open EAR {raw_ear:.3f} < 0.21")
+            elif raw_asym > self.PHYSIOLOGICAL_ASYMMETRY_MAX + 0.03:
+                reasons.append(f"Severe facial/palpebral asymmetry {raw_asym:.3f} > {self.PHYSIOLOGICAL_ASYMMETRY_MAX + 0.03:.2f}")
 
         if ingress_flag:
             # Reject poisoned calibration: clamp/reset to conservative population sober baselines

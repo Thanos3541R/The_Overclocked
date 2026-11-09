@@ -75,12 +75,28 @@ EXTENDED_BOOL_NAMES = (
 FEATURE_NAMES = CORE_NUMERIC_NAMES + CORE_BOOL_NAMES              # 29 channels
 EXTENDED_FEATURE_NAMES = EXTENDED_NUMERIC_NAMES + EXTENDED_BOOL_NAMES  # 48 channels
 
+VOICE_NUMERIC_NAMES: List[str] = [
+    "vocal_jitter_pct",
+    "vocal_shimmer_pct",
+    "vocal_hnr_db",
+    "formant_f2_slope_hz_ms",
+    "speech_pause_ratio",
+    "voice_impairment_score",
+]
+
+VOICE_BOOL_NAMES: List[str] = [
+    "audio_valid",
+    "voice_slurred_detected",
+]
+
 
 class TrainingBuffer:
     CORE_NUMERIC_NAMES = CORE_NUMERIC_NAMES
     EXTENDED_NUMERIC_NAMES = EXTENDED_NUMERIC_NAMES
     CORE_BOOL_NAMES = CORE_BOOL_NAMES
     EXTENDED_BOOL_NAMES = EXTENDED_BOOL_NAMES
+    VOICE_NUMERIC_NAMES = VOICE_NUMERIC_NAMES
+    VOICE_BOOL_NAMES = VOICE_BOOL_NAMES
     FEATURE_NAMES = FEATURE_NAMES
     EXTENDED_FEATURE_NAMES = EXTENDED_FEATURE_NAMES
     MAX_SACCADE_LATENCY_MS = MAX_SACCADE_LATENCY_MS
@@ -97,6 +113,7 @@ class TrainingBuffer:
         max_session_hours: float = 1.0,
         default_label: Optional[str] = None,
         include_extended_features: bool = False,
+        include_voice_features: bool = False,
     ):
         """
         Initialize the training data buffer.
@@ -112,6 +129,7 @@ class TrainingBuffer:
             default_label: Optional default ground-truth label for extracted windows.
             include_extended_features: If True, uses all 48 features (33 numeric + 15 boolean);
                                        if False (default), uses the 29 core features.
+            include_voice_features: If True, appends 8 voice features (6 numeric + 2 boolean).
         """
         self.subject_id = subject_id
         self.fps = fps
@@ -121,15 +139,22 @@ class TrainingBuffer:
         self.gated_strategy = gated_strategy
         self.default_label = default_label
         self.include_extended_features = bool(include_extended_features)
+        self.include_voice_features = bool(include_voice_features)
 
         if self.include_extended_features:
-            self._numeric_names = self.EXTENDED_NUMERIC_NAMES
-            self._bool_names = self.EXTENDED_BOOL_NAMES
-            self.feature_names = self.EXTENDED_FEATURE_NAMES
+            self._numeric_names = list(self.EXTENDED_NUMERIC_NAMES)
+            self._bool_names = list(self.EXTENDED_BOOL_NAMES)
         else:
-            self._numeric_names = self.CORE_NUMERIC_NAMES
-            self._bool_names = self.CORE_BOOL_NAMES
-            self.feature_names = self.FEATURE_NAMES
+            self._numeric_names = list(self.CORE_NUMERIC_NAMES)
+            self._bool_names = list(self.CORE_BOOL_NAMES)
+
+        if self.include_voice_features:
+            self._numeric_names = self._numeric_names + list(self.VOICE_NUMERIC_NAMES)
+            self._bool_names = self._bool_names + list(self.VOICE_BOOL_NAMES)
+
+        self.numeric_names = list(self._numeric_names)
+        self.bool_names = list(self._bool_names)
+        self.feature_names = tuple(self._numeric_names + self._bool_names)
         self._n_bool_features = len(self._bool_names)
         
         self.window_frames = int(window_size_sec * fps)

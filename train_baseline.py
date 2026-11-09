@@ -149,13 +149,46 @@ def compute_window_summary_features(
         medians = q10_50_90[1]
         p90s = q10_50_90[2]
 
-    means = np.nan_to_num(means, nan=0.0)
-    stds = np.nan_to_num(stds, nan=0.0)
-    mins = np.nan_to_num(mins, nan=0.0)
-    maxs = np.nan_to_num(maxs, nan=0.0)
-    medians = np.nan_to_num(medians, nan=0.0)
-    p10s = np.nan_to_num(p10s, nan=0.0)
-    p90s = np.nan_to_num(p90s, nan=0.0)
+    # Handle voice numeric features: mask unvoiced/silent windows to NaN for native tree routing
+    VOICE_NUMERIC_SET = {
+        "vocal_jitter_pct",
+        "vocal_shimmer_pct",
+        "vocal_hnr_db",
+        "formant_f2_slope_hz_ms",
+        "speech_pause_ratio",
+        "voice_impairment_score",
+    }
+    voice_indices = [idx for idx, fn in enumerate(feature_names) if fn in VOICE_NUMERIC_SET]
+    if "audio_valid" in feature_names and voice_indices:
+        av_idx = feature_names.index("audio_valid")
+        voiced_frac = np.nanmean(windows_3d[:, :, av_idx], axis=1)
+        silent_windows = voiced_frac < 0.15
+        for v_idx in voice_indices:
+            means[silent_windows, v_idx] = np.nan
+            stds[silent_windows, v_idx] = np.nan
+            mins[silent_windows, v_idx] = np.nan
+            maxs[silent_windows, v_idx] = np.nan
+            medians[silent_windows, v_idx] = np.nan
+            p10s[silent_windows, v_idx] = np.nan
+            p90s[silent_windows, v_idx] = np.nan
+
+    non_voice_indices = [idx for idx in range(n_features) if idx not in voice_indices]
+    if non_voice_indices:
+        means[:, non_voice_indices] = np.nan_to_num(means[:, non_voice_indices], nan=0.0)
+        stds[:, non_voice_indices] = np.nan_to_num(stds[:, non_voice_indices], nan=0.0)
+        mins[:, non_voice_indices] = np.nan_to_num(mins[:, non_voice_indices], nan=0.0)
+        maxs[:, non_voice_indices] = np.nan_to_num(maxs[:, non_voice_indices], nan=0.0)
+        medians[:, non_voice_indices] = np.nan_to_num(medians[:, non_voice_indices], nan=0.0)
+        p10s[:, non_voice_indices] = np.nan_to_num(p10s[:, non_voice_indices], nan=0.0)
+        p90s[:, non_voice_indices] = np.nan_to_num(p90s[:, non_voice_indices], nan=0.0)
+    else:
+        means = np.nan_to_num(means, nan=0.0)
+        stds = np.nan_to_num(stds, nan=0.0)
+        mins = np.nan_to_num(mins, nan=0.0)
+        maxs = np.nan_to_num(maxs, nan=0.0)
+        medians = np.nan_to_num(medians, nan=0.0)
+        p10s = np.nan_to_num(p10s, nan=0.0)
+        p90s = np.nan_to_num(p90s, nan=0.0)
 
     # Concatenate statistics horizontally
     features_2d = np.hstack([means, stds, mins, maxs, medians, p10s, p90s]).astype(np.float32)
@@ -251,6 +284,16 @@ def filter_involuntary_features(
     keep_names = []
 
     for idx, name in enumerate(feature_names):
+        # Retain voice and acoustic impairment features
+        if name.startswith((
+            "vocal_jitter_pct_", "vocal_shimmer_pct_", "vocal_hnr_db_",
+            "formant_f2_slope_hz_ms_", "speech_pause_ratio_",
+            "voice_impairment_score_", "audio_valid_", "voice_slurred_detected_"
+        )):
+            keep_indices.append(idx)
+            keep_names.append(name)
+            continue
+
         # Retain head instability/tremor standard deviation and vasodilation fluctuation
         if name in ("head_yaw_std", "head_pitch_std", "head_roll_std", "facial_flushing_ratio_std"):
             keep_indices.append(idx)

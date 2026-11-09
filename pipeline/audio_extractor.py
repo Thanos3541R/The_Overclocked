@@ -8,6 +8,8 @@ import collections
 from dataclasses import dataclass
 import logging
 import os
+import shutil
+import subprocess
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,72 +90,64 @@ class AudioIntoxicationExtractor:
         if self.enable_live_mic:
             self._init_live_mic()
 
+    @property
+    def _stream(self) -> Optional[Any]:
+        return self._mic_stream
+
+    @_stream.setter
+    def _stream(self, val: Optional[Any]) -> None:
+        self._mic_stream = val
+
     def _load_source_audio(self, path: str) -> None:
-        """Attempt to load audio track from .wav or .mp4 file into memory."""
         if not os.path.isfile(path):
             return
-
-        # 1. Try companion .wav file or .wav directly
-        wav_path = path if path.lower().endswith(".wav") else os.path.splitext(path)[0] + ".wav"
-        if os.path.isfile(wav_path):
-            try:
-                import scipy.io.wavfile as wavfile
-                sr, data = wavfile.read(wav_path)
-                data = self._to_mono_float32(data)
-                if sr != self.sample_rate and len(data) > 0:
-                    num_samples = int(len(data) * self.sample_rate / sr)
-                    data = scipy.signal.resample(data, num_samples).astype(np.float32)
-                self._audio_track = data
-                self._audio_track_sr = self.sample_rate
-                self.mic_active = True
-                logger.info("Loaded companion WAV audio: %s (%d samples)", wav_path, len(data))
-                return
-            except Exception as exc:
-                logger.debug("scipy.io.wavfile failed for %s: %s", wav_path, exc)
-
-        # 2. Try PyAV (av)
+        ext = os.path.splitext(path)[1].lower()
         try:
-            import av  # type: ignore
-            container = av.open(path)
-            audio_streams = [s for s in container.streams if s.type == "audio"]
-            if audio_streams:
-                resampler = av.AudioResampler(
-                    format="fltp",
-                    layout="mono",
-                    rate=self.sample_rate
+            if ext == ".wav":
+                from scipy.io import wavfile
+                sr, data = wavfile.read(path)
+                if data.ndim > 1:
+                    data = np.mean(data, axis=1)
+                if data.dtype == np.int16:
+                    pcm = data.astype(np.float32) / 32768.0
+                elif data.dtype == np.int32:
+                    pcm = data.astype(np.float32) / 2147483648.0
+                elif data.dtype == np.uint8:
+                    pcm = (data.astype(np.float32) - 128.0) / 128.0
+                else:
+                    pcm = data.astype(np.float32)
+                if sr != self.sample_rate and len(pcm) > 0:
+                    from scipy.signal import resample_poly
+                    gcd = int(np.gcd(int(sr), int(self.sample_rate)))
+                    pcm = resample_poly(pcm, int(self.sample_rate) // gcd, int(sr) // gcd).astype(np.float32)
+                self._audio_track = pcm
+                self.mic_active = True
+                return
+
+            # For .mp4 / video containers, decode mono 16kHz s16le PCM via ffmpeg pipe
+            ffmpeg_bin = shutil.which("ffmpeg")
+            if ffmpeg_bin is None:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+                except Exception:
+                    ffmpeg_bin = None
+
+            if ffmpeg_bin is not None:
+                cmd = [
+                    ffmpeg_bin, "-nostdin", "-y", "-i", path,
+                    "-vn", "-ac", "1", "-ar", str(self.sample_rate),
+                    "-f", "s16le", "-acodec", "pcm_s16le", "-"
+                ]
+                proc = subprocess.run(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False
                 )
-                frames = []
-                for frame in container.decode(audio_streams[0]):
-                    resampled_frames = resampler.resample(frame)
-                    for rf in resampled_frames:
-                        frames.append(rf.to_ndarray().flatten())
-                if frames:
-                    self._audio_track = np.concatenate(frames).astype(np.float32)
-                    self._audio_track_sr = self.sample_rate
+                if proc.returncode == 0 and len(proc.stdout) >= 640:
+                    pcm = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+                    self._audio_track = pcm
                     self.mic_active = True
-                    logger.info("Decoded audio via PyAV: %s (%d samples)", path, len(self._audio_track))
-                    container.close()
-                    return
-            container.close()
-        except Exception as exc:
-            logger.debug("PyAV audio decoding failed for %s: %s", path, exc)
-
-        # 3. Try moviepy
-        try:
-            from moviepy.editor import VideoFileClip  # type: ignore
-            clip = VideoFileClip(path)
-            if clip.audio is not None:
-                audio_array = clip.audio.to_soundarray(fps=self.sample_rate)
-                audio_mono = self._to_mono_float32(audio_array)
-                self._audio_track = audio_mono
-                self._audio_track_sr = self.sample_rate
-                self.mic_active = True
-                clip.close()
-                logger.info("Decoded audio via moviepy: %s (%d samples)", path, len(audio_mono))
-                return
-            clip.close()
-        except Exception as exc:
-            logger.debug("moviepy audio decoding failed for %s: %s", path, exc)
+        except Exception:
+            self._audio_track = None
 
     def _to_mono_float32(self, data: np.ndarray) -> np.ndarray:
         """Convert arbitrary audio data array to mono float32 in [-1.0, 1.0]."""
@@ -329,6 +323,7 @@ class AudioIntoxicationExtractor:
         speech_pause_ratio: float = 1.0,
     ) -> AudioFeatures:
         """Create a default inactive AudioFeatures instance with current mic status."""
+        is_offline = (self._stream is None)
         return AudioFeatures(
             audio_valid=False,
             voice_vad_active=voice_vad_active,
@@ -336,7 +331,7 @@ class AudioIntoxicationExtractor:
             speech_pause_ratio=speech_pause_ratio,
             voice_impairment_score=0.0,
             voice_slurred_detected=False,
-            mic_active=self.mic_active,
+            mic_active=False if is_offline else self.mic_active,
             audio_rms=float(rms),
         )
 
@@ -557,25 +552,25 @@ class AudioIntoxicationExtractor:
             if active_rms < 0.0025 and rms < 0.0015:
                 return self._empty_or_held(rms=active_rms)
 
-        # 2. Bounded Automatic Gain Normalization (max 25x gain to avoid amplifying room hiss)
+        # 2. Automatic Gain Normalization (quiet signals only)
         peak_95 = float(np.percentile(np.abs(arr), 95))
-        if peak_95 > 1e-4:
-            gain = min(25.0, 1.0 / (peak_95 * 1.25))
-            pcm_norm = np.clip(arr * gain, -1.0, 1.0)
+        if 1e-5 < peak_95 < 0.10:
+            scale = min(15.0, 0.25 / peak_95)
+            pcm_proc = np.clip(arr * scale, -1.0, 1.0)
         else:
-            return self._empty_or_held(rms=active_rms)
+            pcm_proc = arr
 
         # 3. Bandpass filter to speech band [75 Hz, 4000 Hz]
         high_cutoff = min(4000.0, self.sample_rate * 0.48)
         b, a = scipy.signal.butter(4, [75.0, high_cutoff], btype="bandpass", fs=self.sample_rate)
-        filtered = scipy.signal.lfilter(b, a, pcm_norm)
+        filtered = scipy.signal.lfilter(b, a, pcm_proc)
 
         # 4. Active-Segment Voiced Pitch Detection (Vectorized FFT Autocorrelation)
         min_lag = max(1, int(self.sample_rate / 320.0))  # ~320 Hz (50 samples)
         max_lag = min(frame_len - 2, int(self.sample_rate / 80.0))  # ~80 Hz (200 samples)
 
         max_frame_rms = float(np.max(frame_rms_arr)) if total_frames > 0 else 0.0
-        active_thresh = max(0.0025, 0.30 * max_frame_rms)
+        active_thresh = max(0.002, 0.25 * max_frame_rms)
 
         voiced_frames: List[Tuple[int, float, float, float]] = []  # (frame_idx, period_s, amp, r_peak)
         f2_centroids: List[Tuple[int, float]] = []

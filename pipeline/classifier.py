@@ -77,7 +77,8 @@ class ImpairmentClassifier:
                  model_path: Optional[str] = None,
                  fps: float = 30.0,
                  window_sec: float = 3.0,
-                 max_occlusion_hold_frames: int = 15):
+                 max_occlusion_hold_frames: int = 15,
+                 enable_ml_model: bool = False):
         """
         Args:
             sober_ear_baseline: Expected normal awake EAR for an alert driver.
@@ -108,6 +109,18 @@ class ImpairmentClassifier:
         self._consecutive_invalid_frames: int = 0
 
         # ML model attributes
+        self.enable_ml_model = enable_ml_model
+        if model_path is None and enable_ml_model:
+            candidates = [
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "involuntary_model.joblib"),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "all_features_model.joblib"),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "baseline_impairment_model.joblib"),
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    model_path = c
+                    break
+
         self.model_path = model_path
         self._ml_model = None
         self._ml_feature_names: List[str] = []
@@ -169,6 +182,9 @@ class ImpairmentClassifier:
                 from pipeline.training_buffer import TrainingBuffer
 
                 win_3d = np.array(self._ml_frame_buffer, dtype=np.float32)[None, :, :]
+                if "saccade_latency_ms" in TrainingBuffer.EXTENDED_NUMERIC_NAMES:
+                    saccade_idx = TrainingBuffer.EXTENDED_NUMERIC_NAMES.index("saccade_latency_ms")
+                    win_3d[:, :, saccade_idx] = np.clip(win_3d[:, :, saccade_idx], 0.0, 10000.0)
                 feat_2d, summary_names = compute_window_summary_features(
                     win_3d, TrainingBuffer.EXTENDED_FEATURE_NAMES, apply_subject_deltas=False
                 )
@@ -729,6 +745,18 @@ class ImpairmentClassifier:
                 indicators.append(f"Depressed autonomic HRV (RMSSD={features.rppg_hrv_rmssd_ms:.1f}ms, BPM={features.rppg_pulse_bpm:.0f})")
 
         # ── Catatonic Stupor Floor against ML Bias ──
+        catatonic_stare = (
+            (features.compensatory_stare_active or features.stare_fixation_duration_s >= 5.0)
+            and (0.0 < features.gaze_yaw_dispersion < 0.035)
+            and (0.0 < features.blink_opening_velocity < 1.65)
+        )
+        if catatonic_stare:
+            inv_risk = max(inv_risk, 48.0)
+            if not any("catatonic" in ind.lower() for ind in indicators):
+                indicators.append(
+                    f"Catatonic Stare Stupor (fixation={getattr(features, 'stare_fixation_duration_s', 0.0):.1f}s, yaw_disp={getattr(features, 'gaze_yaw_dispersion', 0.0):.3f})"
+                )
+
         stupor_floor = 0.0
         if catatonic_stare_detected:
             stupor_floor = 62.0 if (sluggish_blink_detected or (0.0 < getattr(features, "gaze_yaw_dispersion", 1.0) < 0.020)) else 48.0
@@ -742,6 +770,7 @@ class ImpairmentClassifier:
         sober_attentive_guard = bool(
             features.ear_avg >= 0.26
             and features.perclos < 0.10
+            and not catatonic_stare
             and not catatonic_stare_detected
             and not sluggish_blink_detected
             and not getattr(features, "masking_detected", False)
@@ -754,6 +783,7 @@ class ImpairmentClassifier:
             and not features.gen_detected
             and not features.lack_of_convergence
             and features.pursuit_fragmentation_ratio <= 0.20
+            and not catatonic_stare
             and not catatonic_stare_detected
             and not sluggish_blink_detected
             and not getattr(features, "masking_detected", False)
@@ -761,10 +791,13 @@ class ImpairmentClassifier:
 
         # Ingress alert: only floor at 55.0 if driver is NOT currently showing live alert open eyes
         # (Note: features.ear_avg == 0.0 in synthetic unit tests where ear_avg is omitted)
-        if self.ingress_impairment_detected and (features.ear_avg == 0.0 or not live_alert_open_eyes):
-            inv_risk = max(inv_risk, 55.0)
+        if self.ingress_impairment_detected:
             reason_msg = f" ({self.ingress_reason})" if self.ingress_reason else ""
             indicators.insert(0, f"CRITICAL INGRESS ALERT: Driver biometrics at startup violated sober human physiological bounds{reason_msg}")
+            if features.ear_avg == 0.0:
+                inv_risk = max(inv_risk, 55.0)
+            elif inv_risk >= 20.0:
+                inv_risk = min(100.0, inv_risk + 10.0)
 
         inv_risk = float(np.clip(inv_risk, 0.0, 100.0))
 
@@ -790,7 +823,8 @@ class ImpairmentClassifier:
             and (ml_prob is not None and (ml_prob * 100.0) >= 45.0)
         )
         bypass_open_eye_cap = bool(
-            catatonic_stare_detected
+            catatonic_stare
+            or catatonic_stare_detected
             or has_sluggish_blink
             or (getattr(features, "masking_detected", False) and not is_alert_desktop_gaze)
             or catatonic_stupor_score >= 35.0

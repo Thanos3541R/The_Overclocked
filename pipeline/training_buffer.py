@@ -33,6 +33,18 @@ class TrainingWindow:
     n_gated_frames: int
     label: Optional[str] = None
     valid_mask: Optional[np.ndarray] = None
+    audio_data: Optional[np.ndarray] = None  # (window_frames, 7) supplementary audio channels
+
+
+AUDIO_FEATURE_NAMES: List[str] = [
+    "audio_valid",
+    "vocal_jitter_pct",
+    "vocal_shimmer_pct",
+    "vocal_hnr_db",
+    "formant_f2_slope_hz_ms",
+    "speech_pause_ratio",
+    "voice_impairment_score",
+]
 
 
 # Shared physiological outlier caps for train-serve consistency
@@ -97,6 +109,7 @@ class TrainingBuffer:
     EXTENDED_BOOL_NAMES = EXTENDED_BOOL_NAMES
     VOICE_NUMERIC_NAMES = VOICE_NUMERIC_NAMES
     VOICE_BOOL_NAMES = VOICE_BOOL_NAMES
+    AUDIO_FEATURE_NAMES = AUDIO_FEATURE_NAMES
     FEATURE_NAMES = FEATURE_NAMES
     EXTENDED_FEATURE_NAMES = EXTENDED_FEATURE_NAMES
     MAX_SACCADE_LATENCY_MS = MAX_SACCADE_LATENCY_MS
@@ -165,16 +178,26 @@ class TrainingBuffer:
         
         # Buffer to store frame data: (timestamp, feature_vector, is_gated)
         self._buffer: deque = deque(maxlen=self.max_frames)
+        self._audio_buffer: deque = deque(maxlen=self.max_frames)
         
         self._lookahead_buffer: deque = deque(maxlen=2)
+        self._audio_lookahead_buffer: deque = deque(maxlen=2)
         self._last_valid_vector = None
 
     def reset(self):
         """Clear the buffer but keep subject_id and config."""
         self._buffer.clear()
+        self._audio_buffer.clear()
         self._lookahead_buffer.clear()
+        self._audio_lookahead_buffer.clear()
         self._last_valid_vector = None
         self.session_id = str(uuid.uuid4())
+
+    clear = reset
+
+    def push(self, features: FrameFeatures):
+        """Alias for add_sample."""
+        self.add_sample(features)
 
     def __len__(self) -> int:
         """Return number of accumulated samples."""
@@ -204,18 +227,31 @@ class TrainingBuffer:
 
     _features_to_vector = _extract_vector
 
+    def _extract_audio_vector(self, ff: FrameFeatures) -> np.ndarray:
+        return np.array([
+            float(bool(getattr(ff, "audio_valid", False))),
+            float(getattr(ff, "vocal_jitter_pct", 0.0)),
+            float(getattr(ff, "vocal_shimmer_pct", 0.0)),
+            float(getattr(ff, "vocal_hnr_db", 0.0)),
+            float(getattr(ff, "formant_f2_slope_hz_ms", 0.0)),
+            float(getattr(ff, "speech_pause_ratio", 0.0)),
+            float(getattr(ff, "voice_impairment_score", 0.0)),
+        ], dtype=np.float32)
+
     def add_sample(self, ff: FrameFeatures):
         """
         Add a FrameFeatures sample to the buffer, applying the gated frame strategy.
         """
         is_gated = ff.imu_gated or not ff.face_valid
         vec = self._extract_vector(ff)
+        audio_vec = self._extract_audio_vector(ff)
         n_b = self._n_bool_features
         
         if self.gated_strategy == GatedFrameStrategy.DROP:
             if is_gated:
                 return
             self._buffer.append((ff.timestamp, vec, is_gated))
+            self._audio_buffer.append(audio_vec)
             
         elif self.gated_strategy == GatedFrameStrategy.HOLD_LAST:
             if is_gated:
@@ -227,6 +263,7 @@ class TrainingBuffer:
             else:
                 self._last_valid_vector = vec
             self._buffer.append((ff.timestamp, vec, is_gated))
+            self._audio_buffer.append(audio_vec)
             
         elif self.gated_strategy == GatedFrameStrategy.INTERPOLATE:
             if not is_gated:
@@ -238,20 +275,29 @@ class TrainingBuffer:
                         interp_vec = (1 - alpha) * self._last_valid_vector + alpha * vec
                         interp_vec[-n_b:] = g_vec[-n_b:]
                         self._buffer.append((g_ts, interp_vec, g_is_gated))
+                    for a_vec in self._audio_lookahead_buffer:
+                        self._audio_buffer.append(a_vec)
                 elif len(self._lookahead_buffer) > 0:
                     for (g_ts, g_vec, g_is_gated) in self._lookahead_buffer:
                         g_vec[:-n_b] = vec[:-n_b]
                         self._buffer.append((g_ts, g_vec, g_is_gated))
+                    for a_vec in self._audio_lookahead_buffer:
+                        self._audio_buffer.append(a_vec)
                 self._lookahead_buffer.clear()
+                self._audio_lookahead_buffer.clear()
                 self._last_valid_vector = vec
                 self._buffer.append((ff.timestamp, vec, is_gated))
+                self._audio_buffer.append(audio_vec)
             else:
                 self._lookahead_buffer.append((ff.timestamp, vec, is_gated))
+                self._audio_lookahead_buffer.append(audio_vec)
                 if len(self._lookahead_buffer) > 2:
                     oldest_ts, oldest_vec, oldest_is_gated = self._lookahead_buffer.popleft()
+                    oldest_audio_vec = self._audio_lookahead_buffer.popleft()
                     if self._last_valid_vector is not None:
                         oldest_vec[:-n_b] = self._last_valid_vector[:-n_b]
                     self._buffer.append((oldest_ts, oldest_vec, oldest_is_gated))
+                    self._audio_buffer.append(oldest_audio_vec)
 
     def extract_windows(self, label: Optional[str] = None) -> List[TrainingWindow]:
         """
@@ -269,6 +315,7 @@ class TrainingBuffer:
             
         windows = []
         buf_list = list(self._buffer)
+        audio_list = list(self._audio_buffer)
         n_samples = len(buf_list)
         win_label = label if label is not None else self.default_label
         
@@ -302,10 +349,17 @@ class TrainingBuffer:
                 feats = np.zeros((self.window_frames, len(self.feature_names)), dtype=np.float32)
                 timestamps = np.zeros(self.window_frames, dtype=np.float64)
                 valid_mask = np.zeros(self.window_frames, dtype=bool)
+                audio_feats = np.zeros((self.window_frames, len(AUDIO_FEATURE_NAMES)), dtype=np.float32)
 
                 feats[:n_copy] = np.array([x[1] for x in window_slice[:n_copy]], dtype=np.float32)
                 timestamps[:n_copy] = np.array([x[0] for x in window_slice[:n_copy]], dtype=np.float64)
                 valid_mask[:n_copy] = np.array([not x[2] for x in window_slice[:n_copy]], dtype=bool)
+
+                if len(audio_list) >= right_idx:
+                    audio_slice = audio_list[left_idx:right_idx]
+                    n_audio_copy = min(len(audio_slice), self.window_frames)
+                    if n_audio_copy > 0:
+                        audio_feats[:n_audio_copy] = np.array(audio_slice[:n_audio_copy], dtype=np.float32)
 
                 n_gated = sum(1 for x in window_slice if x[2])
 
@@ -319,6 +373,7 @@ class TrainingBuffer:
                     n_gated_frames=n_gated,
                     label=win_label,
                     valid_mask=valid_mask,
+                    audio_data=audio_feats,
                 )
                 windows.append(win)
 
@@ -355,17 +410,33 @@ class TrainingBuffer:
             "gated_strategy": self.gated_strategy.value
         }
 
-        np.savez(
-            path,
-            features=features_arr,
-            timestamps=timestamps_arr,
-            valid_masks=valid_masks_arr,
-            feature_names=np.array(self.feature_names, dtype=str),
-            subject_ids=subject_ids_arr,
-            session_id=self.session_id,
-            labels=labels_arr,
-            metadata=json.dumps(meta)
+        save_dict = {
+            "features": features_arr,
+            "timestamps": timestamps_arr,
+            "valid_masks": valid_masks_arr,
+            "feature_names": np.array(self.feature_names, dtype=str),
+            "subject_ids": subject_ids_arr,
+            "session_id": self.session_id,
+            "labels": labels_arr,
+            "metadata": json.dumps(meta),
+        }
+
+        has_audio = self.include_voice_features or any(
+            getattr(w, "audio_data", None) is not None
+            and np.any(w.audio_data[:, 0] > 0.0)
+            for w in windows
         )
+        if has_audio:
+            audio_arr = np.stack([
+                w.audio_data if getattr(w, "audio_data", None) is not None
+                else np.zeros((w.features.shape[0], len(AUDIO_FEATURE_NAMES)), dtype=np.float32)
+                for w in windows
+            ])
+            save_dict["X_audio"] = audio_arr
+            save_dict["audio_features"] = audio_arr
+            save_dict["audio_feature_names"] = np.array(AUDIO_FEATURE_NAMES, dtype=str)
+
+        np.savez_compressed(path, **save_dict)
 
     @staticmethod
     def load_from_disk(path: str) -> List[TrainingWindow]:
@@ -377,6 +448,7 @@ class TrainingBuffer:
         subject_ids = data["subject_ids"] if "subject_ids" in data else np.array([""] * len(features))
         labels = data["labels"] if "labels" in data else np.array([""] * len(features))
         session_id = str(data.get("session_id", ""))
+        x_audio = data["X_audio"] if "X_audio" in data else (data["audio_features"] if "audio_features" in data else None)
 
         windows = []
         for i in range(len(features)):
@@ -384,6 +456,7 @@ class TrainingBuffer:
             ts = timestamps[i]
             vm = valid_masks[i] if valid_masks is not None else (ts > 0.0)
             n_gated = int(np.sum(~vm))
+            a_data = x_audio[i] if x_audio is not None and i < len(x_audio) else None
             w = TrainingWindow(
                 features=feats,
                 timestamps=ts,
@@ -394,6 +467,7 @@ class TrainingBuffer:
                 n_gated_frames=n_gated,
                 label=str(labels[i]) if i < len(labels) else None,
                 valid_mask=vm,
+                audio_data=a_data,
             )
             windows.append(w)
         return windows

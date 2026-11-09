@@ -149,46 +149,39 @@ def compute_window_summary_features(
         medians = q10_50_90[1]
         p90s = q10_50_90[2]
 
-    # Handle voice numeric features: mask unvoiced/silent windows to NaN for native tree routing
-    VOICE_NUMERIC_SET = {
-        "vocal_jitter_pct",
-        "vocal_shimmer_pct",
-        "vocal_hnr_db",
-        "formant_f2_slope_hz_ms",
-        "speech_pause_ratio",
-        "voice_impairment_score",
+    # Handle voice features: impute neutral sober defaults on silent windows (< 20% voiced)
+    VOICE_NEUTRAL_DEFAULTS = {
+        "vocal_jitter_pct": 0.35,
+        "vocal_shimmer_pct": 1.50,
+        "vocal_hnr_db": 20.0,
+        "formant_f2_slope_hz_ms": 22.0,
+        "speech_pause_ratio": 0.0,
+        "voice_impairment_score": 0.0,
+        "audio_valid": 0.0,
+        "voice_slurred_detected": 0.0,
     }
-    voice_indices = [idx for idx, fn in enumerate(feature_names) if fn in VOICE_NUMERIC_SET]
-    if "audio_valid" in feature_names and voice_indices:
+    if "audio_valid" in feature_names:
         av_idx = feature_names.index("audio_valid")
         voiced_frac = np.nanmean(windows_3d[:, :, av_idx], axis=1)
-        silent_windows = voiced_frac < 0.15
-        for v_idx in voice_indices:
-            means[silent_windows, v_idx] = np.nan
-            stds[silent_windows, v_idx] = np.nan
-            mins[silent_windows, v_idx] = np.nan
-            maxs[silent_windows, v_idx] = np.nan
-            medians[silent_windows, v_idx] = np.nan
-            p10s[silent_windows, v_idx] = np.nan
-            p90s[silent_windows, v_idx] = np.nan
+        silent_windows = (voiced_frac < 0.20)
+        for fn, def_val in VOICE_NEUTRAL_DEFAULTS.items():
+            if fn in feature_names:
+                v_idx = feature_names.index(fn)
+                means[silent_windows, v_idx] = def_val
+                stds[silent_windows, v_idx] = 0.0
+                mins[silent_windows, v_idx] = def_val
+                maxs[silent_windows, v_idx] = def_val
+                medians[silent_windows, v_idx] = def_val
+                p10s[silent_windows, v_idx] = def_val
+                p90s[silent_windows, v_idx] = def_val
 
-    non_voice_indices = [idx for idx in range(n_features) if idx not in voice_indices]
-    if non_voice_indices:
-        means[:, non_voice_indices] = np.nan_to_num(means[:, non_voice_indices], nan=0.0)
-        stds[:, non_voice_indices] = np.nan_to_num(stds[:, non_voice_indices], nan=0.0)
-        mins[:, non_voice_indices] = np.nan_to_num(mins[:, non_voice_indices], nan=0.0)
-        maxs[:, non_voice_indices] = np.nan_to_num(maxs[:, non_voice_indices], nan=0.0)
-        medians[:, non_voice_indices] = np.nan_to_num(medians[:, non_voice_indices], nan=0.0)
-        p10s[:, non_voice_indices] = np.nan_to_num(p10s[:, non_voice_indices], nan=0.0)
-        p90s[:, non_voice_indices] = np.nan_to_num(p90s[:, non_voice_indices], nan=0.0)
-    else:
-        means = np.nan_to_num(means, nan=0.0)
-        stds = np.nan_to_num(stds, nan=0.0)
-        mins = np.nan_to_num(mins, nan=0.0)
-        maxs = np.nan_to_num(maxs, nan=0.0)
-        medians = np.nan_to_num(medians, nan=0.0)
-        p10s = np.nan_to_num(p10s, nan=0.0)
-        p90s = np.nan_to_num(p90s, nan=0.0)
+    means = np.nan_to_num(means, nan=0.0)
+    stds = np.nan_to_num(stds, nan=0.0)
+    mins = np.nan_to_num(mins, nan=0.0)
+    maxs = np.nan_to_num(maxs, nan=0.0)
+    medians = np.nan_to_num(medians, nan=0.0)
+    p10s = np.nan_to_num(p10s, nan=0.0)
+    p90s = np.nan_to_num(p90s, nan=0.0)
 
     # Concatenate statistics horizontally
     features_2d = np.hstack([means, stds, mins, maxs, medians, p10s, p90s]).astype(np.float32)
@@ -284,14 +277,12 @@ def filter_involuntary_features(
     keep_names = []
 
     for idx, name in enumerate(feature_names):
-        # Retain voice and acoustic impairment features
+        # Exclude audio and speech features from involuntary-only model
         if name.startswith((
             "vocal_jitter_pct_", "vocal_shimmer_pct_", "vocal_hnr_db_",
             "formant_f2_slope_hz_ms_", "speech_pause_ratio_",
             "voice_impairment_score_", "audio_valid_", "voice_slurred_detected_"
         )):
-            keep_indices.append(idx)
-            keep_names.append(name)
             continue
 
         # Retain head instability/tremor standard deviation and vasodilation fluctuation
@@ -321,10 +312,10 @@ def filter_involuntary_features(
             continue
 
         # Exclude Section B voluntary/gaming and validity-mask prefixes when involuntary-only is active
+        # Retain stare_fixation_duration_s, eyelid_tremor_hz, and catatonic_stupor_detected for catatonic stupor
         if name.startswith((
             "deliberate_blink_suppression_",
             "voluntary_eye_widening_",
-            "stare_fixation_duration_s_",
             "compensatory_stare_active_",
             "rigid_head_stabilization_",
             "frontalis_compensation_active_",
@@ -380,12 +371,31 @@ def load_dataset_from_npz(
     if clean_contaminated and excluded_count > 0:
         print(f"[Dataset Quarantine] Excluded {excluded_count} contaminated ('Drunk-in-Sober') or duplicate '(1)' archives.")
 
+    AUDIO_NEUTRAL_DEFAULTS = {
+        "audio_valid": 0.0,
+        "vocal_jitter_pct": 0.35,
+        "vocal_shimmer_pct": 1.50,
+        "vocal_hnr_db": 20.0,
+        "formant_f2_slope_hz_ms": 22.0,
+        "speech_pause_ratio": 0.0,
+        "voice_impairment_score": 0.0,
+    }
+
     for path in clean_paths:
         data = np.load(path, allow_pickle=True)
         feats = data["features"]  # (n_windows, window_frames, n_features)
         subs = data["subject_ids"]
         labs = data["labels"]
         fnames = list(data["feature_names"]) if "feature_names" in data else [f"feat_{i}" for i in range(feats.shape[2])]
+
+        # Supplementary audio tensor loading
+        if "X_audio" in data or "audio_features" in data:
+            x_audio = data["X_audio"] if "X_audio" in data else data["audio_features"]
+            afnames = list(data["audio_feature_names"]) if "audio_feature_names" in data else list(AUDIO_NEUTRAL_DEFAULTS.keys())
+            missing_audio = [i for i, afn in enumerate(afnames) if afn not in fnames]
+            if missing_audio and feats.ndim == 3 and x_audio.ndim == 3:
+                feats = np.concatenate([feats, x_audio[:, :, missing_audio]], axis=2)
+                fnames = fnames + [afnames[i] for i in missing_audio]
 
         if "valid_masks" in data:
             vm = np.asarray(data["valid_masks"], dtype=bool)
@@ -464,6 +474,8 @@ def load_dataset_from_npz(
             for t_idx, t_name in enumerate(target_feature_names):
                 if t_name in fname_to_idx:
                     aligned_feats[:, :, t_idx] = feats[:, :, fname_to_idx[t_name]]
+                elif t_name in AUDIO_NEUTRAL_DEFAULTS:
+                    aligned_feats[:, :, t_idx] = AUDIO_NEUTRAL_DEFAULTS[t_name]
 
         # 2. Temporal frame count alignment along axis 1 (if framerate differs)
         if win_frames != target_frames:

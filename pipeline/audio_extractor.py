@@ -129,6 +129,11 @@ class AudioIntoxicationExtractor:
     def _stream(self, val: Optional[Any]) -> None:
         self._mic_stream = val
 
+    def load_video_audio(self, path: str) -> None:
+        """Public method to extract and load audio from video container (.mp4) or audio file."""
+        self.source_path = path
+        self._load_source_audio(path)
+
     def _load_source_audio(self, path: str) -> None:
         if not os.path.isfile(path):
             return

@@ -234,7 +234,9 @@ class FeatureExtractor:
                  sway_window_sec: float = 3.0,
                  sway_yaw_gate_deg_s: float = 5.0,
                  sway_nod_reset_deg_s: float = 35.0,
-                 rigid_head_sway_threshold: float = 0.12):
+                 rigid_head_sway_threshold: float = 0.12,
+                 enable_live_audio: bool = False,
+                 audio_extractor: Optional[Any] = None):
         """
         Args:
             blink_threshold: EAR below this = eyes closed.
@@ -376,7 +378,17 @@ class FeatureExtractor:
         self.sway_window_sec = sway_window_sec
         sway_buffer_size = int(self.sway_window_sec * fps)
         self._head_pose_history: Deque[Tuple[float, float, float]] = deque(maxlen=max(sway_buffer_size, 1))
-        self.audio_extractor: Optional[Any] = None
+        if audio_extractor is not None:
+            self.audio_extractor = audio_extractor
+        else:
+            try:
+                from pipeline.audio_extractor import AudioIntoxicationExtractor
+                self.audio_extractor = AudioIntoxicationExtractor(
+                    sample_rate=16000,
+                    enable_live_mic=enable_live_audio,
+                )
+            except Exception:
+                self.audio_extractor = None
 
         # ── Facial Flushing State (Section A) ──
         self._smoothed_flushing: float = 1.0
@@ -485,6 +497,8 @@ class FeatureExtractor:
             self._last_lip_active_time = -10.0
             self._vor_ratios.clear()
             self._iris_x_history.clear()
+            if self.audio_extractor is not None:
+                self.audio_extractor.reset()
 
     @property
     def _vergence_baseline(self) -> float:

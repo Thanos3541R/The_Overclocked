@@ -105,7 +105,7 @@ def infer_subject_id(
     else:
         should_split = bool(split_compilations)
 
-    if should_split and part_num is not None and (part_num // 6) > 0 and "person" not in sub_id:
+    if should_split and part_num is not None and (part_num // 6) > 0 and "person" not in sub_id.lower():
         sub_id = f"{sub_id}_grp{part_num // 6:02d}"
 
     return sub_id
@@ -256,6 +256,8 @@ def audit_and_ingest_clip(
 
     extractor = make_extractor()
     audio_extractor = AudioIntoxicationExtractor(source_path=str(video_path), enable_live_mic=False)
+    audio_extractor.load_video_audio(str(video_path))
+    extractor.audio_extractor = audio_extractor
     buffer = TrainingBuffer(
         subject_id=subject_id,
         fps=fps,
@@ -323,7 +325,11 @@ def audit_and_ingest_clip(
                         # Reset tracking state so windows never bridge across a cut
                         buffer.reset()
                         filter_bank = None
+                        saved_audio_track = extractor.audio_extractor._audio_track if extractor.audio_extractor is not None else None
                         extractor = make_extractor()
+                        if saved_audio_track is not None and extractor.audio_extractor is not None:
+                            extractor.audio_extractor._audio_track = saved_audio_track
+                        extractor.audio_extractor = audio_extractor
                         pnp.reset()
                         imu_gate.reset()
                         stabilizer.reset()
@@ -451,6 +457,11 @@ def audit_and_ingest_clip(
         labels_arr = np.array(
             [w.label if w.label is not None else "" for w in accumulated_windows], dtype=str
         )
+        audio_arr = np.stack([
+            w.audio_data if getattr(w, "audio_data", None) is not None
+            else np.zeros((w.features.shape[0], len(TrainingBuffer.AUDIO_FEATURE_NAMES)), dtype=np.float32)
+            for w in accumulated_windows
+        ])
 
         meta = {
             "fps": fps,
@@ -463,7 +474,7 @@ def audit_and_ingest_clip(
             "source_clip": str(video_path),
         }
 
-        np.savez(
+        np.savez_compressed(
             archive_path,
             features=features_arr,
             timestamps=timestamps_arr,
@@ -472,6 +483,9 @@ def audit_and_ingest_clip(
             subject_ids=subject_ids_arr,
             session_id=buffer.session_id,
             labels=labels_arr,
+            X_audio=audio_arr,
+            audio_features=audio_arr,
+            audio_feature_names=np.array(TrainingBuffer.AUDIO_FEATURE_NAMES, dtype=str),
             metadata=json.dumps(meta),
         )
         archive_file = archive_name

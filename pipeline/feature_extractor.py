@@ -647,7 +647,8 @@ class FeatureExtractor:
                                    vibration_score: float = 0.0,
                                    d_ear: float = 0.0,
                                    head_yaw: float = 0.0,
-                                   d_head_yaw: float = 0.0) -> Tuple[float, bool, float, float]:
+                                   d_head_yaw: float = 0.0,
+                                   ear_avg: Optional[float] = None) -> Tuple[float, bool, float, float]:
         if (np.isnan(iris_x) or np.isnan(iris_y) or np.isinf(iris_x) or np.isinf(iris_y) or
                 np.isnan(timestamp) or np.isinf(timestamp)):
             return (0.0, False, 0.0, 0.0)
@@ -679,31 +680,22 @@ class FeatureExtractor:
             return (0.0, False, 0.0, 0.0)
 
         # ── Blink Occlusion Guard ──
-        if blink_phase != "open":
+        # Reset _in_saccade so saccade_detected never latches True with 0.0 velocity across a blink.
+        if blink_phase != "open" or (ear_avg is not None and 0.0 < ear_avg < self.blink_threshold):
             self._was_in_blink = True
-            raw_dx = 0.0
-            velocity = 0.0
-            saccade_detected = self._last_features.saccade_detected
-            self._in_saccade = saccade_detected
-
-            if self._in_saccade:
-                latency_ms = 0.0
-            elif self._last_saccade_end_time > 0:
-                latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
-            else:
-                latency_ms = 0.0
-
-            return (velocity, saccade_detected, latency_ms, raw_dx)
-
-        if getattr(self, "_was_in_blink", False):
-            self._was_in_blink = False
-            raw_dx = 0.0
-            velocity = 0.0
             if self._in_saccade:
                 self._in_saccade = False
                 self._last_saccade_end_time = timestamp
+            if self._last_saccade_end_time > 0:
+                latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
+            else:
                 latency_ms = 0.0
-            elif self._last_saccade_end_time > 0:
+            return (0.0, False, round(latency_ms, 2), 0.0)
+
+        if getattr(self, "_was_in_blink", False):
+            self._was_in_blink = False
+            self._in_saccade = False
+            if self._last_saccade_end_time > 0:
                 latency_ms = (timestamp - self._last_saccade_end_time) * 1000.0
             else:
                 latency_ms = 0.0
@@ -714,7 +706,7 @@ class FeatureExtractor:
                 self._prev_left_iris_x = left_iris_x
             if right_iris_x is not None:
                 self._prev_right_iris_x = right_iris_x
-            return (velocity, False, latency_ms, raw_dx)
+            return (0.0, False, round(latency_ms, 2), 0.0)
 
         raw_dx = float(abs(iris_x - self._prev_iris_x))
         raw_dy = float(abs(iris_y - self._prev_iris_y))
@@ -903,18 +895,18 @@ class FeatureExtractor:
                     if inst_up > self._last_blink_opening_vel:
                         self._last_blink_opening_vel = float(min(inst_up, 6.0))
 
-            # If eyes have been wide open and alert for > 4.5s since last blink,
-            # gradually recover stale low-FPS sub-normal upstroke velocity toward 1.85 EAR/s
-            # so a single 15-FPS partial blink does not permanently lock sluggish_blink_detected.
+            # If eyes have been wide open for > 4.0s since last blink,
+            # gradually relax stale low-FPS sub-normal upstroke velocity toward 1.65 EAR/s
+            # so a single noisy 15-FPS blink does not penalize the next 100 open-eye frames.
             if (
-                0.0 < self._last_blink_opening_vel < 1.80
-                and ear_avg >= max(0.27, self._open_ear_baseline * 0.88)
+                0.0 < self._last_blink_opening_vel < 1.65
+                and ear_avg >= max(0.24, self._open_ear_baseline * 0.85)
                 and self._last_blink_time > 0.0
-                and (timestamp - self._last_blink_time) > 4.5
-                and (self._stare_start_time is None or (timestamp - self._stare_start_time) < 3.0)
+                and (timestamp - self._last_blink_time) > 4.0
+                and 0.0 < dt < 0.25
             ):
                 self._last_blink_opening_vel = float(
-                    min(1.85, self._last_blink_opening_vel + 0.25 * dt)
+                    min(1.65, self._last_blink_opening_vel + 0.08 * dt)
                 )
 
             # Keep _last_blink_opening_vel strictly equal to the last completed blink's
@@ -975,11 +967,14 @@ class FeatureExtractor:
                         self._last_blink_closing_vel = float(
                             np.max(self._closing_velocities))
                     if self._opening_velocities:
-                        self._last_blink_opening_vel = float(
-                            np.max(self._opening_velocities))
+                        opening_vel = float(np.max(self._opening_velocities))
+                        if 0.038 < dt <= 0.12 and 0.0 < opening_vel < 1.65:
+                            opening_vel = opening_vel * (1.0 + min(0.50, 10.0 * (dt - 0.033)))
+                        self._last_blink_opening_vel = opening_vel
                     if dt >= 0.030 and ear_avg >= self._open_ear_baseline * 0.82:
                         chord_up_vel = (ear_avg - self._min_closed_ear) / max(0.075, min(0.110, 1.6 * dt))
                         self._last_blink_opening_vel = max(self._last_blink_opening_vel, min(chord_up_vel, 2.6))
+                    self._last_blink_time = max(self._last_blink_time, timestamp)
                 else:
                     self._blink_phase = "opening"
                     self._phase_frames = 0
@@ -1002,12 +997,15 @@ class FeatureExtractor:
                     self._last_blink_closing_vel = float(
                         np.max(self._closing_velocities))
                 if self._opening_velocities:
-                    self._last_blink_opening_vel = float(
-                        np.max(self._opening_velocities))
+                    opening_vel = float(np.max(self._opening_velocities))
+                    if 0.038 < dt <= 0.12 and 0.0 < opening_vel < 1.65:
+                        opening_vel = opening_vel * (1.0 + min(0.50, 10.0 * (dt - 0.033)))
+                    self._last_blink_opening_vel = opening_vel
 
                 if dt >= 0.030 and ear_avg >= self._open_ear_baseline * 0.82:
                     chord_up_vel = (ear_avg - self._min_closed_ear) / max(0.075, min(0.110, 1.6 * dt))
                     self._last_blink_opening_vel = max(self._last_blink_opening_vel, min(chord_up_vel, 2.6))
+                self._last_blink_time = max(self._last_blink_time, timestamp)
 
                 self._blink_phase = "open"
                 self._phase_frames = 0
@@ -1069,19 +1067,32 @@ class FeatureExtractor:
         loc = bool(vergence < self.loc_vergence_threshold_deg)
         return (float(vergence), loc)
 
-    def _compute_vor_gain(self, avg_iris_x: float, head_yaw: float, timestamp: float, blink_phase: str = "open") -> float:
+    def _compute_vor_gain(
+        self,
+        avg_iris_x: float,
+        head_yaw: float,
+        timestamp: float,
+        blink_phase: str = "open",
+        head_pitch: float = 0.0,
+    ) -> float:
         """Compute Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842).
 
         VOR maintains gaze fixated on the road during natural head tremors/sway (2-25 deg/s).
         Eye counter-rotation velocity should match negative head velocity: gain = -d_eye / d_head.
         Sober: ~0.85-1.05. Impaired (BAC >= 0.05%): depressed (<0.7) or lagged.
         """
+        if abs(head_pitch) > 12.0:
+            self._smoothed_vor_gain = float(np.clip(self._smoothed_vor_gain, 0.0, 2.0))
+            return round(self._smoothed_vor_gain, 4)
+
         if self._prev_head_yaw is None or self._prev_head_timestamp is None:
-            return float(self._smoothed_vor_gain)
+            self._smoothed_vor_gain = float(np.clip(self._smoothed_vor_gain, 0.0, 2.0))
+            return round(self._smoothed_vor_gain, 4)
 
         dt = timestamp - self._prev_head_timestamp
         if dt <= 1e-6:
-            return float(self._smoothed_vor_gain)
+            self._smoothed_vor_gain = float(np.clip(self._smoothed_vor_gain, 0.0, 2.0))
+            return round(self._smoothed_vor_gain, 4)
 
         d_yaw = (head_yaw - self._prev_head_yaw + 180.0) % 360.0 - 180.0
         head_vel = d_yaw / dt   # deg/s
@@ -1093,7 +1104,7 @@ class FeatureExtractor:
             if abs(d_yaw) > 0.45 and abs(d_yaw) < 8.0:
                 if abs(d_iris_deg) > 0.20:
                     ratio = -d_iris_deg / d_yaw
-                    ratio_clamped = float(np.clip(ratio, -0.5, 2.5))
+                    ratio_clamped = float(np.clip(ratio, 0.0, 2.0))
                     self._vor_ratios.append(ratio_clamped)
                     self._smoothed_vor_gain = float(np.median(self._vor_ratios))
                 elif abs(d_iris_deg) <= 0.15 and abs(d_yaw) > 1.5:
@@ -1106,7 +1117,8 @@ class FeatureExtractor:
                     clamped_gain = float(np.clip(raw_gain, 0.0, 2.0))
                     self._smoothed_vor_gain = 0.85 * self._smoothed_vor_gain + 0.15 * clamped_gain
 
-        return float(self._smoothed_vor_gain)
+        self._smoothed_vor_gain = float(np.clip(self._smoothed_vor_gain, 0.0, 2.0))
+        return round(self._smoothed_vor_gain, 4)
 
     def _compute_gaze_nystagmus(self, iris_x: Optional[float] = None) -> float:
         """Compute gaze nystagmus power in 2.0-6.0 Hz band with linear detrending and Hann window."""
@@ -1357,9 +1369,10 @@ class FeatureExtractor:
                             self.baseline_flushing = med
                         self._flushing_cal_locked = True
 
-                if getattr(self, "_flushing_cal_locked", False):
-                    if abs(self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing) < 0.18:
-                        self.baseline_flushing = 0.995 * self.baseline_flushing + 0.005 * self._smoothed_flushing
+                if self.baseline_flushing is not None and (self._prev_ear_avg or 0.0) >= 0.26:
+                    if getattr(self, "_flushing_cal_locked", False) or abs(self.baseline_flushing - 1.35) > 1e-4:
+                        if abs(self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing) < 0.18:
+                            self.baseline_flushing = 0.996 * self.baseline_flushing + 0.004 * clamped
 
                 flushing_delta = float((self._smoothed_flushing - self.baseline_flushing) / max(0.1, self.baseline_flushing))
                 return (float(self._smoothed_flushing), True, flushing_delta)
@@ -1678,6 +1691,13 @@ class FeatureExtractor:
             duration = times[-1] - times[0]
             if len(self._rppg_green_history) < 60 or duration < 4.0:
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, self._last_rppg_valid)
+
+            actual_fps = (len(times) - 1) / max(duration, 1e-6)
+            if actual_fps < 18.0:
+                self._last_rppg_valid = False
+                self._last_rppg_bpm = 0.0
+                self._last_rppg_rmssd = 0.0
+                return (0.0, 0.0, False)
 
             if self._last_rppg_valid and (self._rppg_fft_stride_counter % 5 != 0):
                 return (self._last_rppg_bpm, self._last_rppg_rmssd, True)
@@ -2207,12 +2227,19 @@ class FeatureExtractor:
                 mars = np.array([m for _, m in recent_mar_samples], dtype=np.float64)
                 mean_mar = float(np.mean(mars))
                 mar_std = float(np.std(mars))
+                mar_range = float(np.max(mars) - np.min(mars))
                 devs = mars - mean_mar
                 zero_crossings = int(np.sum((devs[:-1] * devs[1:]) < 0))
                 dt_mar = float(max(times_mar[-1] - times_mar[0], 1e-4))
                 zc_rate = float(zero_crossings / dt_mar)
                 zc_freq = zc_rate / 2.0
-                if 0.15 <= mean_mar <= 0.55 and mar_std >= 0.04 and (zc_freq >= 1.5 or zc_rate >= 1.5):
+                if (
+                    0.15 <= mean_mar <= 0.55
+                    and mar_std >= 0.04
+                    and mar_range >= 0.055
+                    and float(np.max(mars)) >= 0.085
+                    and (zc_freq >= 1.5 or zc_rate >= 1.5)
+                ):
                     features.speech_active = True
 
             # ── Yawn detection ──
@@ -2281,6 +2308,7 @@ class FeatureExtractor:
                     d_ear=d_ear_step,
                     head_yaw=head_yaw,
                     d_head_yaw=d_yaw_step,
+                    ear_avg=features.ear_avg,
                 )
 
             # ── Gaze yaw dispersion (σ_yaw) ──
@@ -2293,13 +2321,17 @@ class FeatureExtractor:
 
             # ── Advanced Oculomotor Impairment Signals ──
             # 1. Binocular vergence & Lack of Convergence (LOC - DRE sign)
-            # Gate on blink, extreme yaw (>20°), steep pitch (>15°), and eccentric gaze (>0.30)
-            # where eyeball geometry naturally foreshortens the abducting eye
+            # Gate on blink, extreme yaw (>20°), downward/upward pitch, eccentric gaze, and initial live warmup
             if (
                 self._blink_phase != "open"
                 or (0.0 < features.ear_avg < self.blink_threshold)
                 or abs(head_yaw) > 20.0
-                or abs(head_pitch) > 15.0
+                or head_pitch < -12.0
+                or head_pitch > 8.0
+                or (
+                    (abs(features.left_iris_x) > 0.32 or abs(features.right_iris_x) > 0.32)
+                    and (features.left_iris_x * features.right_iris_x) > 0.0
+                )
                 or abs(avg_iris_x) > 0.30
             ):
                 features.vergence_angle_deg = float(self._last_features.vergence_angle_deg)
@@ -2317,10 +2349,15 @@ class FeatureExtractor:
                                 self._baseline_vergence_deg = float(np.median(self._vergence_cal_samples))
 
                 features.vergence_angle_deg -= self._baseline_vergence_deg
-                features.lack_of_convergence = bool(features.vergence_angle_deg < self.loc_vergence_threshold_deg)
+                if image_landmarks is not None and len(self._ear_history) <= 10:
+                    features.lack_of_convergence = False
+                else:
+                    features.lack_of_convergence = bool(features.vergence_angle_deg < self.loc_vergence_threshold_deg)
 
             # 2. Vestibulo-Ocular Reflex (VOR) micro-compensation gain (PMC8997842)
-            features.vor_gain = self._compute_vor_gain(avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase)
+            features.vor_gain = self._compute_vor_gain(
+                avg_iris_x, head_yaw, timestamp, blink_phase=self._blink_phase, head_pitch=head_pitch
+            )
 
             # 3. Gaze-Evoked Nystagmus (GEN - Romano et al. 2017)
             features.gen_detected, features.gen_beat_count, features.gen_slow_phase_vel = \
@@ -2451,7 +2488,11 @@ class FeatureExtractor:
                 features.formant_f2_slope_hz_ms = audio_feats.formant_f2_slope_hz_ms
                 features.speech_pause_ratio = audio_feats.speech_pause_ratio
                 features.voice_impairment_score = audio_feats.voice_impairment_score
-                features.voice_slurred_detected = audio_feats.voice_slurred_detected
+                features.voice_slurred_detected = bool(
+                    audio_feats.voice_slurred_detected
+                    and lip_moving_for_audio
+                    and audio_feats.audio_rms >= 0.010
+                )
                 features.voice_vad_active = audio_feats.voice_vad_active
                 features.mic_active = audio_feats.mic_active
                 features.audio_rms = audio_feats.audio_rms

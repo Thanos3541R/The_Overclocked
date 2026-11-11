@@ -594,23 +594,41 @@ class AudioIntoxicationExtractor:
         else:
             filtered = pcm.copy()
 
-        # Soft Automatic Gain Normalization for quiet laptop mics (< 0.08 peak)
-        peak_95 = float(np.percentile(np.abs(filtered), 95))
-        if 1e-5 < peak_95 < 0.08:
-            gain = min(15.0, 0.12 / peak_95)
-            filtered = np.clip(filtered * gain, -1.0, 1.0)
-
         frame_len = self._frame_len
         hop_len = self._hop_len
         n_frames = 1 + (len(filtered) - frame_len) // hop_len
         if n_frames < 5:
-            return AudioFeatures(mic_active=mic_is_live, mic_rms_level=raw_rms, audio_rms=raw_rms)
+            return AudioFeatures(mic_active=mic_is_live, mic_rms_level=round(raw_rms, 6), audio_rms=round(raw_rms, 6))
 
         # Vectorized 2D frame slicing: shape (n_frames, frame_len)
         strides = (filtered.strides[0] * hop_len, filtered.strides[0])
         frames = np.lib.stride_tricks.as_strided(
             filtered, shape=(n_frames, frame_len), strides=strides
         ).copy()
+
+        # Check pre-AGN per-frame energy so quiet ambient room/fan noise (0.001-0.006)
+        # is never amplified 15x into synthetic dysarthria, while short quiet speech bursts pass.
+        raw_frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
+        raw_ref_rms = float(np.percentile(raw_frame_rms, 85))
+        raw_active_thresh = max(0.0020, 0.32 * raw_ref_rms)
+        raw_active_mask = raw_frame_rms >= raw_active_thresh
+        raw_active_rms = float(np.mean(raw_frame_rms[raw_active_mask])) if np.any(raw_active_mask) else 0.0
+        if float(np.max(raw_frame_rms)) < 0.008 or raw_active_rms < 0.008:
+            return AudioFeatures(
+                audio_valid=False,
+                voice_vad_active=False,
+                av_speech_gated=False,
+                mic_active=mic_is_live,
+                mic_rms_level=round(raw_rms, 6),
+                audio_rms=round(raw_rms, 6),
+            )
+
+        # Soft Automatic Gain Normalization for quiet laptop mics (< 0.08 peak),
+        # strictly gated on real active speech energy (raw_active_rms >= 0.008).
+        peak_95 = float(np.percentile(np.abs(filtered), 95))
+        if raw_active_rms >= 0.008 and 1e-5 < peak_95 < 0.08:
+            gain = min(15.0, 0.12 / peak_95)
+            frames = np.clip(frames * gain, -1.0, 1.0)
 
         frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
         frame_peaks = np.percentile(np.abs(frames), 95, axis=1)
@@ -622,8 +640,8 @@ class AudioIntoxicationExtractor:
                 voice_vad_active=False,
                 av_speech_gated=False,
                 mic_active=mic_is_live,
-                mic_rms_level=raw_rms,
-                audio_rms=raw_rms,
+                mic_rms_level=round(raw_rms, 6),
+                audio_rms=round(raw_rms, 6),
             )
 
         # Gate out room noise tail frames
@@ -636,8 +654,8 @@ class AudioIntoxicationExtractor:
                 voice_vad_active=False,
                 av_speech_gated=False,
                 mic_active=mic_is_live,
-                mic_rms_level=raw_rms,
-                audio_rms=raw_rms,
+                mic_rms_level=round(raw_rms, 6),
+                audio_rms=round(raw_rms, 6),
             )
 
         # Batch Hann windowing + Batch RFFT for spectrum & Wiener-Khinchin autocorrelation
@@ -715,11 +733,10 @@ class AudioIntoxicationExtractor:
                 audio_rms=raw_rms,
             )
 
-        active_rms = float(np.mean(frame_rms[active_mask]))
         if self._stream is not None:
             av_speech_gated = bool(
                 visual_speech_active
-                or (active_rms >= 0.006 and len(voiced_periods) >= 6 and float(np.mean(voiced_autocorrs)) >= 0.40)
+                or (raw_active_rms >= 0.010 and len(voiced_periods) >= 6 and float(np.mean(voiced_autocorrs)) >= 0.40)
             )
         else:
             av_speech_gated = bool(visual_speech_active and voice_vad_active)
@@ -836,9 +853,22 @@ class AudioIntoxicationExtractor:
             f2_slope < 12.0,
         ])
         if self._stream is not None:
-            slurred = bool(len(voiced_periods) >= 8 and jitter_pct >= 1.25 and abnormal_count >= 2 and score >= 45.0)
+            slurred = bool(
+                visual_speech_active
+                and raw_rms >= 0.010
+                and len(voiced_periods) >= 8
+                and jitter_pct >= 1.25
+                and abnormal_count >= 2
+                and score >= 45.0
+            )
         else:
-            slurred = bool(len(voiced_periods) >= 5 and abnormal_count >= 2 and score >= 45.0)
+            slurred = bool(
+                visual_speech_active
+                and raw_rms >= 0.010
+                and len(voiced_periods) >= 5
+                and abnormal_count >= 2
+                and score >= 45.0
+            )
 
         result = AudioFeatures(
             audio_valid=True,
@@ -852,8 +882,8 @@ class AudioIntoxicationExtractor:
             voice_impairment_score=round(score, 2),
             voice_slurred_detected=slurred,
             mic_active=mic_is_live,
-            mic_rms_level=round(raw_rms, 4),
-            audio_rms=round(raw_rms, 4),
+            mic_rms_level=round(raw_rms, 6),
+            audio_rms=round(raw_rms, 6),
         )
 
         self._last_valid_features = result

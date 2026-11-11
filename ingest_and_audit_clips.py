@@ -8,14 +8,27 @@ saves valid .npz training archives, and outputs comprehensive audit summaries
 (dataset_audit_summary.csv and dataset_audit_summary.json).
 """
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Suppress noisy OpenCV/FFmpeg decode warnings on stderr
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+try:
+    from process_guard import register_process_guard
+except ImportError:
+    def register_process_guard():
+        pass
 
 import cv2
 import numpy as np
@@ -134,6 +147,7 @@ def audit_and_ingest_clip(
     window_sec: float = 3.0,
     headless: bool = True,
     split_compilations: Optional[bool] = None,
+    clean_output: bool = True,
 ) -> Dict[str, Any]:
     """Run full DMS pipeline on a video clip, audit for artifacts, and extract training windows.
 
@@ -145,12 +159,38 @@ def audit_and_ingest_clip(
         window_sec: Window duration in seconds (default 3.0s).
         headless: Headless flag for execution.
         split_compilations: Optional override for multi-person compilation sub-grouping.
+        clean_output: Whether existing .npz archives are being cleaned. If False, skips existing.
 
     Returns:
         Audit record dict with metrics, status, and window counts.
     """
     subject_id = infer_subject_id(video_path, label, split_compilations=split_compilations)
     stem = Path(video_path).stem.strip()
+
+    archive_name = f"{subject_id}_{stem}.npz"
+    archive_path = os.path.join(output_dir, archive_name)
+    if not clean_output and os.path.exists(archive_path) and os.path.getsize(archive_path) > 500:
+        try:
+            with np.load(archive_path) as data:
+                n_win = len(data["features"]) if "features" in data else 0
+            return {
+                "clip_path": video_path,
+                "subject_id": subject_id,
+                "label": label,
+                "status": "ACCEPTED_RESUMED",
+                "total_frames": 0,
+                "fps": 30.0,
+                "duration_s": 0.0,
+                "face_detected_frames": 0,
+                "face_detection_rate_pct": 100.0,
+                "valid_ungated_frames": 0,
+                "valid_ungated_rate_pct": 100.0,
+                "scene_cut_count": 0,
+                "windows_extracted": n_win,
+                "archive_file": archive_name,
+            }
+        except Exception:
+            pass
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -519,6 +559,7 @@ def ingest_dataset(
     headless: bool = True,
     clean_output: bool = True,
     split_compilations: Optional[bool] = None,
+    workers: int = 1,
 ) -> Dict[str, Any]:
     """Discover clips, audit each, extract training windows, and write audit summaries."""
     os.makedirs(output_dir, exist_ok=True)
@@ -585,40 +626,121 @@ def ingest_dataset(
     sober_windows = 0
     drunk_windows = 0
 
-    print(f"\nProcessing {len(all_clips)} video clips...")
-    for idx, (vpath, lbl) in enumerate(all_clips, 1):
-        stride = sober_stride if lbl == "sober" else drunk_stride
-        print(f"[{idx}/{len(all_clips)}] Processing {Path(vpath).name} ({lbl.upper()}, stride={stride:.1f}s)...")
-        rec = audit_and_ingest_clip(
-            video_path=vpath,
-            label=lbl,
-            output_dir=output_dir,
-            stride_sec=stride,
-            window_sec=window_sec,
-            headless=headless,
-            split_compilations=split_compilations,
-        )
-        audit_records.append(rec)
+    print(f"\nProcessing {len(all_clips)} video clips (workers={workers})...")
+    if workers > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_clip = {
+                executor.submit(
+                    audit_and_ingest_clip,
+                    video_path=vpath,
+                    label=lbl,
+                    output_dir=output_dir,
+                    stride_sec=(sober_stride if lbl == "sober" else drunk_stride),
+                    window_sec=window_sec,
+                    headless=headless,
+                    split_compilations=split_compilations,
+                    clean_output=clean_output,
+                ): (idx, vpath, lbl)
+                for idx, (vpath, lbl) in enumerate(all_clips, 1)
+            }
+            for future in concurrent.futures.as_completed(future_to_clip):
+                idx, vpath, lbl = future_to_clip[future]
+                try:
+                    rec = future.result()
+                except Exception as e:
+                    print(f"[Error] Failed processing {Path(vpath).name}: {e}")
+                    rec = {
+                        "clip_path": vpath,
+                        "subject_id": infer_subject_id(vpath, lbl),
+                        "label": lbl,
+                        "status": "REJECTED_ERROR",
+                        "error": str(e),
+                        "windows_extracted": 0,
+                        "total_frames": 0,
+                        "fps": 0.0,
+                        "duration_s": 0.0,
+                        "face_detected_frames": 0,
+                        "face_detection_rate_pct": 0.0,
+                        "valid_ungated_frames": 0,
+                        "valid_ungated_rate_pct": 0.0,
+                        "scene_cut_count": 0,
+                        "archive_file": "",
+                    }
+                audit_records.append(rec)
+                if rec["status"] in ("ACCEPTED", "ACCEPTED_RESUMED"):
+                    total_accepted += 1
+                elif rec["status"] == "WARNING_JUMP_CUTS":
+                    total_warnings += 1
+                else:
+                    total_rejected += 1
 
-        if rec["status"] == "ACCEPTED":
-            total_accepted += 1
-        elif rec["status"] == "WARNING_JUMP_CUTS":
-            total_warnings += 1
-        else:
-            total_rejected += 1
+                n_win = rec.get("windows_extracted", 0)
+                total_windows += n_win
+                if lbl == "sober":
+                    sober_windows += n_win
+                else:
+                    drunk_windows += n_win
 
-        n_win = rec["windows_extracted"]
-        total_windows += n_win
-        if lbl == "sober":
-            sober_windows += n_win
-        else:
-            drunk_windows += n_win
+                processed_count = len(audit_records)
+                if processed_count % 10 == 0 or processed_count == len(all_clips) or processed_count <= 5:
+                    print(
+                        f"[{processed_count}/{len(all_clips)}] Progress: {processed_count/len(all_clips)*100:.1f}% | "
+                        f"Accepted: {total_accepted} | Warnings: {total_warnings} | "
+                        f"Rejected: {total_rejected} | Windows: {total_windows} "
+                        f"(Sober: {sober_windows}, Drunk: {drunk_windows})",
+                        flush=True,
+                    )
+                    try:
+                        prog_file = os.path.join(output_dir, "ingest_live_progress.json")
+                        with open(prog_file, "w", encoding="utf-8") as pf:
+                            json.dump({
+                                "completed": processed_count,
+                                "total": len(all_clips),
+                                "percent": round(processed_count / len(all_clips) * 100, 1),
+                                "windows": total_windows,
+                                "sober_windows": sober_windows,
+                                "drunk_windows": drunk_windows,
+                                "accepted": total_accepted,
+                                "warnings": total_warnings,
+                                "rejected": total_rejected,
+                            }, pf, indent=2)
+                    except Exception:
+                        pass
+    else:
+        for idx, (vpath, lbl) in enumerate(all_clips, 1):
+            stride = sober_stride if lbl == "sober" else drunk_stride
+            print(f"[{idx}/{len(all_clips)}] Processing {Path(vpath).name} ({lbl.upper()}, stride={stride:.1f}s)...")
+            rec = audit_and_ingest_clip(
+                video_path=vpath,
+                label=lbl,
+                output_dir=output_dir,
+                stride_sec=stride,
+                window_sec=window_sec,
+                headless=headless,
+                split_compilations=split_compilations,
+                clean_output=clean_output,
+            )
+            audit_records.append(rec)
 
-        print(
-            f"   -> Status: {rec['status']} | Face: {rec['face_detection_rate_pct']}% | "
-            f"Ungated: {rec['valid_ungated_rate_pct']}% | Cuts: {rec['scene_cut_count']} | "
-            f"Windows: {n_win}"
-        )
+            if rec["status"] in ("ACCEPTED", "ACCEPTED_RESUMED"):
+                total_accepted += 1
+            elif rec["status"] == "WARNING_JUMP_CUTS":
+                total_warnings += 1
+            else:
+                total_rejected += 1
+
+            n_win = rec["windows_extracted"]
+            total_windows += n_win
+            if lbl == "sober":
+                sober_windows += n_win
+            else:
+                drunk_windows += n_win
+
+            print(
+                f"   -> Status: {rec['status']} | Face: {rec['face_detection_rate_pct']}% | "
+                f"Ungated: {rec['valid_ungated_rate_pct']}% | Cuts: {rec['scene_cut_count']} | "
+                f"Windows: {n_win}"
+            )
 
     # Write summary CSV
     csv_path = os.path.join(output_dir, "dataset_audit_summary.csv")
@@ -745,6 +867,12 @@ def main():
         default=None,
         help="Split multi-part clips into _grpXX subject batches (default: auto-detect compilation keywords only)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker threads for feature ingestion (default: 1)",
+    )
 
     args = parser.parse_args()
     ingest_dataset(
@@ -758,6 +886,7 @@ def main():
         headless=args.headless,
         clean_output=args.clean_output,
         split_compilations=args.split_compilation_groups,
+        workers=args.workers,
     )
 
 

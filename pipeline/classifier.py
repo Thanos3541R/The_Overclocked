@@ -129,6 +129,7 @@ class ImpairmentClassifier:
         self._ml_infer_stride: int = 5
         self._ml_eval_counter: int = 0
         self._last_ml_prob: Optional[float] = None
+        self._last_open_ear: float = 0.30
 
         if model_path is not None and os.path.exists(model_path):
             try:
@@ -144,6 +145,19 @@ class ImpairmentClassifier:
             except Exception as e:
                 logger.warning("[DMS Classifier] Failed to load ML model from %s: %s", model_path, e)
 
+        # Pre-warm ML pipeline & feature aggregator in __init__ so t=3.0s first inference never stalls live threads
+        if self._ml_model is not None:
+            try:
+                from train_baseline import compute_window_summary_features  # noqa: F401
+                n_in = len(self._ml_feature_names) if self._ml_feature_names else getattr(self._ml_model, "n_features_in_", 196)
+                dummy_x = np.zeros((1, n_in), dtype=np.float32)
+                if hasattr(self._ml_model, "predict_proba"):
+                    self._ml_model.predict_proba(dummy_x)
+                elif hasattr(self._ml_model, "predict"):
+                    self._ml_model.predict(dummy_x)
+            except Exception as exc:
+                logger.debug("[DMS Classifier] ML model warm-up skipped: %s", exc)
+
     def reset(self):
         """Reset temporal state and ML frame buffer."""
         self.ingress_impairment_detected = False
@@ -151,6 +165,7 @@ class ImpairmentClassifier:
         self._ml_frame_buffer.clear()
         self._ml_eval_counter = 0
         self._last_ml_prob = None
+        self._last_open_ear = 0.30
         self._consecutive_invalid_frames = 0
 
     def _predict_ml_probability(self, features: FrameFeatures) -> Optional[float]:
@@ -433,6 +448,12 @@ class ImpairmentClassifier:
 
         self._consecutive_invalid_frames = 0
 
+        blink_phase = getattr(features, "blink_phase", "open")
+        if blink_phase == "open" and features.ear_avg >= 0.22:
+            self._last_open_ear = float(features.ear_avg)
+        in_blink_phase = blink_phase in ("closing", "closed", "opening")
+        effective_ear = self._last_open_ear if in_blink_phase else float(features.ear_avg)
+
         marker_scores = {}
         indicators = []
         active_markers: List[str] = []
@@ -448,7 +469,7 @@ class ImpairmentClassifier:
         gaze_disp_val = float(getattr(features, "gaze_yaw_dispersion", 1.0))
         stare_dur_val = float(getattr(features, "stare_fixation_duration_s", 0.0))
         is_alert_desktop_gaze = bool(
-            features.ear_avg >= 0.26
+            effective_ear >= 0.26
             and features.perclos < 0.10
             and gaze_disp_val >= 0.024
             and not features.gen_detected
@@ -560,7 +581,7 @@ class ImpairmentClassifier:
         tunnel_corroborated = (
             features.blink_opening_velocity == 0.0
             or features.perclos > 0.10
-            or features.ear_avg < self.sober_ear * 0.88
+            or effective_ear < self.sober_ear * 0.88
             or features.gen_detected
             or features.lack_of_convergence
             or features.pursuit_fragmentation_ratio > 0.15
@@ -654,7 +675,7 @@ class ImpairmentClassifier:
 
         # 14. Rigid Head Stabilization
         suppress_rigid = (
-            features.ear_avg >= self.sober_ear * 0.90
+            effective_ear >= self.sober_ear * 0.90
             and (features.blink_opening_velocity == 0.0 or features.blink_opening_velocity >= 1.50)
             and not features.gen_detected
             and not features.lack_of_convergence
@@ -768,7 +789,7 @@ class ImpairmentClassifier:
 
         # Check if live driver currently exhibits healthy, alert open eyes with zero hard impairment signs
         sober_attentive_guard = bool(
-            features.ear_avg >= 0.26
+            effective_ear >= 0.26
             and features.perclos < 0.10
             and not catatonic_stare
             and not catatonic_stare_detected
@@ -776,8 +797,8 @@ class ImpairmentClassifier:
             and not getattr(features, "masking_detected", False)
         )
         live_alert_open_eyes = bool(
-            features.ear_avg > 0.0
-            and features.ear_avg >= self.sober_ear * 0.84
+            effective_ear > 0.0
+            and effective_ear >= self.sober_ear * 0.84
             and features.perclos < 0.12
             and not features.microsleep_detected
             and not features.gen_detected
@@ -810,7 +831,7 @@ class ImpairmentClassifier:
             not is_alert_desktop_gaze
             and (features.masking_detected or features.masking_divergence_score >= 50.0)
             and (
-                (0.0 < features.blink_opening_velocity < 1.25 and features.ear_avg < 0.27)
+                (0.0 < features.blink_opening_velocity < 1.25 and effective_ear < 0.27)
                 or features.perclos >= 0.18
                 or features.gen_detected
                 or features.lack_of_convergence
@@ -821,6 +842,19 @@ class ImpairmentClassifier:
             features.deliberate_blink_suppression
             and has_sluggish_blink
             and (ml_prob is not None and (ml_prob * 100.0) >= 45.0)
+        )
+        catatonic_stupor = bool(catatonic_stare or catatonic_stare_detected or catatonic_stupor_score > 0.0)
+        eff_v_up_thresh = 1.00 if getattr(self, "_effective_fps", self.fps) < 22.0 else 1.20
+        physiologically_alert = bool(
+            effective_ear >= 0.25
+            and features.perclos < 0.12
+            and not features.microsleep_detected
+            and not features.gen_detected
+            and not features.lack_of_convergence
+            and features.pursuit_fragmentation_ratio <= 0.25
+            and (features.blink_opening_velocity <= 0.01 or features.blink_opening_velocity >= eff_v_up_thresh)
+            and not catatonic_stupor
+            and not confirmed_anti_masking
         )
         bypass_open_eye_cap = bool(
             catatonic_stare
@@ -843,9 +877,10 @@ class ImpairmentClassifier:
             ml_prob_pct = round(ml_prob * 100.0, 1)
             ml_active = True
             marker_scores["ml_probability"] = ml_prob_pct
-            if live_alert_open_eyes and inv_risk < 20.0 and not bypass_open_eye_cap:
-                # Prevent YouTube domain shift from pushing an alert, wide-eyed sober webcam user into MILD/HIGH_RISK
-                inv_risk = float(min(22.0, 0.85 * inv_risk + 0.15 * (ml_prob * 100.0)))
+            if (physiologically_alert or (live_alert_open_eyes and not bypass_open_eye_cap)) and inv_risk < 20.0:
+                # Cap out-of-distribution webcam ML probability to at most +12.0 points when open-eye physiology is alert
+                rule_inv = inv_risk
+                inv_risk = float(np.clip(0.85 * rule_inv + min(12.0, 0.15 * (ml_prob * 100.0)), 0.0, 100.0))
             else:
                 ml_weight = 0.25 if (inv_risk < 15.0 and features.perclos < 0.10) else 0.40
                 inv_risk = float(np.clip((1.0 - ml_weight) * inv_risk + ml_weight * (ml_prob * 100.0), 0.0, 100.0))
@@ -864,12 +899,16 @@ class ImpairmentClassifier:
             stupor_fused = 0.65 * catatonic_stupor_score + 0.35 * max(ml_component, catatonic_stupor_score)
             inv_risk = float(np.clip(max(inv_risk, stupor_fused), 0.0, 100.0))
 
-        if not bypass_open_eye_cap:
+        if not bypass_open_eye_cap or physiologically_alert:
             open_eye_desktop_guard = (
-                sober_attentive_guard
-                and features.ear_avg >= self.sober_ear * 0.84
+                (sober_attentive_guard or physiologically_alert)
+                and effective_ear >= self.sober_ear * 0.84
                 and features.perclos < 0.15
                 and features.mar < 0.22
+                and not high_ml_with_masking
+                and not confirmed_anti_masking
+                and not catatonic_stupor
+                and heuristic_risk < 25.0
             )
             if open_eye_desktop_guard:
                 inv_risk = min(inv_risk, 22.0)

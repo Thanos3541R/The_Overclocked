@@ -176,6 +176,29 @@ class BayesianEvidenceAccumulator:
         if audio_valid and voice_slurred and inv_risk >= 25.0:
             delta_l += 0.35 * (voice_score / 100.0) * dt
 
+        active_markers = set(getattr(assessment, "active_markers", []) or [])
+        hard_flags = bool(
+            getattr(feat_obj, "microsleep_detected", False)
+            or getattr(feat_obj, "gen_detected", False)
+            or getattr(feat_obj, "lack_of_convergence", False)
+            or getattr(feat_obj, "masking_detected", False)
+            or voice_slurred
+            or marker_scores.get("microsleep", 0.0) > 0.0
+            or marker_scores.get("gen", 0.0) > 0.0
+            or marker_scores.get("lack_of_convergence", 0.0) > 0.0
+            or marker_scores.get("masking_divergence", 0.0) >= 50.0
+            or bool(active_markers & {
+                "microsleep",
+                "gen",
+                "lack_of_convergence",
+                "masking_detected",
+                "slurred_voice_dysarthria",
+            })
+        )
+        eff_risk = max(float(getattr(assessment, "risk_score", 0.0)), float(inv_risk))
+        if eff_risk < 48.0 and not hard_flags and self.posterior > 0.20:
+            delta_l = min(delta_l, 0.0)
+
         return delta_l
 
     def update(
@@ -201,8 +224,12 @@ class BayesianEvidenceAccumulator:
             self._last_timestamp = timestamp
             dt = 0.033
         else:
-            dt = max(1e-4, min(1.0, timestamp - self._last_timestamp))
+            raw_dt = float(timestamp - self._last_timestamp)
             self._last_timestamp = timestamp
+            if raw_dt <= 0.0:
+                dt = 1e-4
+            else:
+                dt = min(raw_dt, 0.25)
 
         delta_l = self._compute_frame_llr(assessment, dt=dt, features=features)
 

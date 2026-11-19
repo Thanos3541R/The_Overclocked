@@ -49,6 +49,7 @@ from pipeline.imu_gate import SoftwareIMUGate
 from pipeline.stabilizer import KinematicStabilizer
 from pipeline.classifier import ImpairmentClassifier
 from pipeline.bayesian_filter import BayesianEvidenceAccumulator
+from pipeline.hardware_bridge import HardwareBuzzerBridge
 from utils.visualization import Visualizer
 
 
@@ -117,6 +118,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--audio-device", type=int, default=None,
         help="Optional sounddevice microphone device index (default: auto-detect)")
+    parser.add_argument(
+        "--hil-mode",
+        type=str,
+        choices=["auto", "pi-only", "off"],
+        default="auto",
+        help="ESP32 hardware buzzer bridge mode: 'auto' (default, activates when ESP32 USB-UART is detected), 'pi-only', or 'off'",
+    )
+    parser.add_argument(
+        "--hil-port",
+        type=str,
+        default=None,
+        help="Optional explicit ESP32 serial port (e.g. /dev/ttyUSB0 or COM3)",
+    )
     return parser.parse_args()
 
 
@@ -401,8 +415,11 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             elif key in (ord('p'), ord('P')):
                 return "pause_toggle"
             elif key in (ord('u'), ord('U')):
+                nonlocal last_lockout_confirmed
                 bayesian_filter.unlatch(park_gear_confirmed=True)
                 classifier.reset()
+                last_lockout_confirmed = False
+                hil_bridge.send_state("SOBER", lockout_confirmed=False)
                 print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
             elif key != 255:
                 visualizer.handle_key(key)
@@ -413,6 +430,13 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
             args.headless = True
         return "continue"
+
+    hil_bridge = HardwareBuzzerBridge(
+        mode=getattr(args, "hil_mode", "auto"),
+        port=getattr(args, "hil_port", None),
+    )
+    hil_bridge.connect()
+    last_lockout_confirmed = False
 
     try:
         while capture.is_open():
@@ -555,6 +579,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                     except cv2.error as exc:
                         print(f"[DMS] OpenCV GUI error: {exc}. Switching to headless mode.")
                         args.headless = True
+                hil_bridge.send_state("SOBER", lockout_confirmed=last_lockout_confirmed)
                 continue
 
             missing_face_frames = 0
@@ -632,6 +657,14 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
             assessment = classifier.evaluate_temporal_stream(features)
             bayesian_state = bayesian_filter.update(assessment, timestamp, features=features)
+
+            last_lockout_confirmed = bool(bayesian_state.lockout_confirmed)
+            hil_bridge.send_state(
+                classification=assessment.classification,
+                lockout_confirmed=last_lockout_confirmed,
+                microsleep_detected=bool(getattr(features, "microsleep_detected", False)),
+                voice_slurred_detected=bool(getattr(features, "voice_slurred_detected", False)),
+            )
 
             # ── Output ──
             if csv_logger is not None:
@@ -727,6 +760,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
             except Exception:
                 pass
         # 3. Release camera & MediaPipe C++ graphs & audio extractor
+        hil_bridge.close()
         if audio_extractor is not None:
             audio_extractor.close()
         capture.release()

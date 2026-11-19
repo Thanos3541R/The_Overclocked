@@ -131,6 +131,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional explicit ESP32 serial port (e.g. /dev/ttyUSB0 or COM3)",
     )
+    parser.add_argument(
+        "--hil-debounce",
+        type=float,
+        default=1.5,
+        help="Seconds of sustained warning before ESP32 warning beep activates (default: 1.5)",
+    )
     return parser.parse_args()
 
 
@@ -391,6 +397,8 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     t0 = time.perf_counter()
     camera_t0: Optional[float] = None
     last_telemetry_time = t0
+    telemetry_frames = 0
+    telemetry_proc_s = 0.0
     video_writer: Optional[cv2.VideoWriter] = None
 
     last_raw_frame = None
@@ -419,6 +427,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 bayesian_filter.unlatch(park_gear_confirmed=True)
                 classifier.reset()
                 last_lockout_confirmed = False
+                hil_bridge.reset_debounce()
                 hil_bridge.send_state("SOBER", lockout_confirmed=False)
                 print("[DMS] Simulating PARK gear: Bayesian lockout unlatched & classifier reset.")
             elif key != 255:
@@ -434,6 +443,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
     hil_bridge = HardwareBuzzerBridge(
         mode=getattr(args, "hil_mode", "auto"),
         port=getattr(args, "hil_port", None),
+        warning_debounce_sec=float(getattr(args, "hil_debounce", 1.5)),
     )
     hil_bridge.connect()
     last_lockout_confirmed = False
@@ -484,6 +494,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 continue
 
             frame_id += 1
+            frame_proc_t0 = time.perf_counter()
             if capture.is_camera:
                 if camera_t0 is None:
                     camera_t0 = capture.last_frame_timestamp
@@ -533,6 +544,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 )
                 assessment = classifier.evaluate_temporal_stream(features)
                 bayesian_state = bayesian_filter.update(assessment, timestamp, features=features)
+                last_lockout_confirmed = bool(bayesian_state.lockout_confirmed)
                 if csv_logger is not None:
                     csv_logger.log(features, assessment=assessment, bayesian_state=bayesian_state)
 
@@ -664,6 +676,7 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
                 lockout_confirmed=last_lockout_confirmed,
                 microsleep_detected=bool(getattr(features, "microsleep_detected", False)),
                 voice_slurred_detected=bool(getattr(features, "voice_slurred_detected", False)),
+                risk_score=float(getattr(assessment, "risk_score", 0.0)),
             )
 
             # ── Output ──
@@ -688,13 +701,21 @@ def run_pipeline(config: PipelineConfig, args: argparse.Namespace):
 
             # ── Periodic Telemetry Log (every 3.0 seconds) ──
             now_t = time.perf_counter()
+            telemetry_frames += 1
+            telemetry_proc_s += max(0.0, now_t - frame_proc_t0)
             cam_fps = getattr(capture, "actual_capture_fps", capture.fps) if capture.is_camera else None
             if now_t - last_telemetry_time >= 3.0:
-                cpu_fps = getattr(visualizer, "fps", getattr(visualizer, "_fps", 0.0))
-                cpu_ms = (1000.0 / max(cpu_fps, 1.0)) if cpu_fps > 0 else 0.0
+                if telemetry_frames > 0 and telemetry_proc_s > 0.0:
+                    cpu_ms = (telemetry_proc_s / telemetry_frames) * 1000.0
+                    cpu_fps = 1000.0 / max(cpu_ms, 1e-3)
+                else:
+                    cpu_fps = getattr(visualizer, "fps", getattr(visualizer, "_fps", 0.0))
+                    cpu_ms = (1000.0 / max(cpu_fps, 1.0)) if cpu_fps > 0 else 0.0
                 cam_label = f"Camera: {cam_fps:.1f} FPS | " if cam_fps is not None else ""
                 print(f"[DMS Telemetry] {cam_label}CPU Pipeline: {cpu_fps:.1f} FPS ({cpu_ms:.1f} ms/frame)")
                 last_telemetry_time = now_t
+                telemetry_frames = 0
+                telemetry_proc_s = 0.0
 
             if not args.headless or args.output_video:
                 try:

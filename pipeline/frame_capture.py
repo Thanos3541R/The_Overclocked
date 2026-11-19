@@ -8,6 +8,9 @@ Handles:
 Auto-detects input type and sets the `is_grayscale` flag accordingly.
 """
 import logging
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -72,10 +75,30 @@ class FrameCapture:
                 except Exception:
                     pass
             else:
-                # Explicitly restore DirectShow Auto-Exposure (0.75 = Auto on DSHOW, 3 = Auto on V4L2)
-                # so the webcam hardware never stays stuck in dark manual exposure (-5) from a prior run.
+                # Explicitly restore Auto-Exposure (0.75 = Auto on Windows DSHOW, 3 = Auto on Linux V4L2)
+                # and disable Linux V4L2 dynamic framerate drop (keeps USB webcams like C270 at 30 FPS indoors).
                 try:
-                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+                    if sys.platform.startswith("linux"):
+                        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                        dev_path = f"/dev/video{source}" if isinstance(source, int) else None
+                        if dev_path and os.path.exists(dev_path) and shutil.which("v4l2-ctl"):
+                            res = subprocess.run(
+                                ["v4l2-ctl", "-d", dev_path, "--set-ctrl=exposure_dynamic_framerate=0"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=1.0,
+                                check=False,
+                            )
+                            if res.returncode != 0:
+                                subprocess.run(
+                                    ["v4l2-ctl", "-d", dev_path, "--set-ctrl=exposure_auto_priority=0"],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=1.0,
+                                    check=False,
+                                )
+                    else:
+                        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
                 except Exception:
                     pass
         else:

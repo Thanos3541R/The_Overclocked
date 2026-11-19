@@ -3,8 +3,8 @@
 Sends single-byte driver state commands over USB UART (115200 baud) to an
 ESP32 DevKit V1 driving a 3-pin active buzzer:
   - b'0': SOBER (silent)
-  - b'1': MILD_IMPAIRMENT / HIGH_RISK_INTOXICATED / voice_slurred_detected (warning beep)
-  - b'2': lockout_confirmed / microsleep_detected (continuous alarm)
+  - b'1': Sustained MILD_IMPAIRMENT / HIGH_RISK_INTOXICATED / corroborated slurred voice (warning beep)
+  - b'2': lockout_confirmed / microsleep_detected (instant continuous alarm)
 
 Safe by default: if `pyserial` is not installed or no ESP32 USB-UART device is
 connected (e.g., laptop dev or GitHub Actions CI), all operations are silent no-ops.
@@ -76,6 +76,9 @@ class HardwareBuzzerBridge:
         port: Optional[str] = None,
         baudrate: int = 115200,
         keepalive_sec: float = 2.0,
+        warning_debounce_sec: float = 1.5,
+        high_risk_debounce_sec: float = 0.5,
+        gate_hold_sec: float = 1.0,
         serial_factory: Optional[Callable[..., Any]] = None,
     ) -> None:
         if mode not in ("auto", "pi-only", "off"):
@@ -84,6 +87,9 @@ class HardwareBuzzerBridge:
         self.requested_port = port
         self.baudrate = baudrate
         self.keepalive_sec = keepalive_sec
+        self.warning_debounce_sec = max(0.0, float(warning_debounce_sec))
+        self.high_risk_debounce_sec = max(0.0, float(high_risk_debounce_sec))
+        self.gate_hold_sec = max(0.0, float(gate_hold_sec))
         self._serial_factory = serial_factory
 
         self.is_pi: bool = is_raspberry_pi()
@@ -91,10 +97,19 @@ class HardwareBuzzerBridge:
         self._serial: Any = None
         self._last_cmd: Optional[bytes] = None
         self._last_sent_time: float = 0.0
+        self._pending_warn_start: Optional[float] = None
+        self._warn_active: bool = False
+        self._gate_start: Optional[float] = None
 
     @property
     def connected(self) -> bool:
         return self._serial is not None
+
+    def reset_debounce(self) -> None:
+        """Clear warning persistence timers."""
+        self._pending_warn_start = None
+        self._warn_active = False
+        self._gate_start = None
 
     def connect(self) -> bool:
         """Probe and connect to the ESP32 serial port if permitted by mode."""
@@ -125,6 +140,7 @@ class HardwareBuzzerBridge:
                 self.active_port = candidate
                 self._last_cmd = None
                 self._last_sent_time = 0.0
+                self.reset_debounce()
                 host_tag = "Raspberry Pi detected — " if self.is_pi else ""
                 print(
                     f"[DMS-HIL] {host_tag}ESP32 Buzzer Bridge active on "
@@ -142,12 +158,72 @@ class HardwareBuzzerBridge:
         lockout_confirmed: bool = False,
         microsleep_detected: bool = False,
         voice_slurred_detected: bool = False,
+        risk_score: Optional[float] = None,
     ) -> bytes:
-        """Map driver assessment state to 1-byte ESP32 buzzer command."""
+        """Map driver assessment state to 1-byte ESP32 buzzer command.
+
+        Voice slurring acts as secondary corroboration when `risk_score` is provided
+        (requiring risk_score >= 25.0) so ambient mic hum during SOBER frames never
+        overrides visual sobriety.
+        """
         if lockout_confirmed or microsleep_detected:
             return b"2"
-        if classification in ("MILD_IMPAIRMENT", "HIGH_RISK_INTOXICATED") or voice_slurred_detected:
+        if classification in ("MILD_IMPAIRMENT", "HIGH_RISK_INTOXICATED"):
             return b"1"
+        if voice_slurred_detected and (risk_score is None or risk_score >= 25.0):
+            return b"1"
+        return b"0"
+
+    def resolve_command(
+        self,
+        classification: str,
+        lockout_confirmed: bool = False,
+        microsleep_detected: bool = False,
+        voice_slurred_detected: bool = False,
+        risk_score: Optional[float] = None,
+        now: Optional[float] = None,
+    ) -> bytes:
+        """Apply tiered persistence debouncing and brief IMU-gate hold before emitting."""
+        ts = time.monotonic() if now is None else now
+
+        # Critical alarms (lockout / microsleep) bypass debounce immediately
+        if lockout_confirmed or microsleep_detected:
+            self.reset_debounce()
+            return b"2"
+
+        # Brief IMU shock / pose gate holds active/pending state up to gate_hold_sec
+        if classification == "INSUFFICIENT_DATA":
+            if self._gate_start is None:
+                self._gate_start = ts
+            if (ts - self._gate_start) <= self.gate_hold_sec:
+                return b"1" if self._warn_active else b"0"
+            self.reset_debounce()
+            return b"0"
+
+        self._gate_start = None
+        raw_cmd = self.compute_command(
+            classification=classification,
+            lockout_confirmed=False,
+            microsleep_detected=False,
+            voice_slurred_detected=voice_slurred_detected,
+            risk_score=risk_score,
+        )
+
+        if raw_cmd == b"1":
+            if self._pending_warn_start is None:
+                self._pending_warn_start = ts
+            req_sec = (
+                self.high_risk_debounce_sec
+                if classification == "HIGH_RISK_INTOXICATED"
+                else self.warning_debounce_sec
+            )
+            if self._warn_active or (ts - self._pending_warn_start) >= req_sec:
+                self._warn_active = True
+                return b"1"
+            return b"0"
+
+        # Genuine SOBER frame immediately clears warning state
+        self.reset_debounce()
         return b"0"
 
     def send_state(
@@ -156,19 +232,22 @@ class HardwareBuzzerBridge:
         lockout_confirmed: bool = False,
         microsleep_detected: bool = False,
         voice_slurred_detected: bool = False,
+        risk_score: Optional[float] = None,
         now: Optional[float] = None,
     ) -> Optional[bytes]:
-        """Transmit state byte on transition or keepalive interval. Safe no-op if disconnected."""
+        """Transmit debounced state byte on transition or keepalive. Safe no-op if disconnected."""
         if self._serial is None:
             return None
 
-        cmd = self.compute_command(
+        ts = time.monotonic() if now is None else now
+        cmd = self.resolve_command(
             classification=classification,
             lockout_confirmed=lockout_confirmed,
             microsleep_detected=microsleep_detected,
             voice_slurred_detected=voice_slurred_detected,
+            risk_score=risk_score,
+            now=ts,
         )
-        ts = time.monotonic() if now is None else now
         needs_send = (cmd != self._last_cmd) or ((ts - self._last_sent_time) >= self.keepalive_sec)
         if not needs_send:
             return None
@@ -183,6 +262,7 @@ class HardwareBuzzerBridge:
 
     def close(self) -> None:
         """Silence buzzer and close the serial port cleanly."""
+        self.reset_debounce()
         if self._serial is None:
             return
         try:
